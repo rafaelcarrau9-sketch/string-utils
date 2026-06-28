@@ -13,4 +13,9 @@ def test_is_palindrome():
     assert is_palindrome("A man a plan a canal Panama") is True
     assert is_palindrome("hello") is False
 
-# NOTE: count_vowels has no test yet.
+
+def test_count_vowels():
+    assert count_vowels("hello") == 2
+    assert count_vowels("xyz") == 0
+    assert count_vowels("AEIOU") == 5
+    assert count_vowels("") == 0
