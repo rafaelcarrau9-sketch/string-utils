@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Portable Git toolchain bundled in this folder — not part of the project
+/Git/
+/.claude/
