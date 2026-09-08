@@ -39,7 +39,9 @@ Requiere un navegador con **WebGL 2** (Chrome o Firefox actualizados).
 | Clic izq. mantenido | Cargar el lanzamiento; soltar para lanzar |
 | Clic izq. | **Clavar** durante la picada |
 | Clic der. mantenido | Recoger carrete |
+| `W`/`S` y `A`/`D` (en la barca) | Bogar y virar |
 | Rueda | Ajustar el freno |
+| `E` | Subir o bajar de la barca |
 | `R` | Recoger el sedal |
 | `Tab` / `B` / `C` / `G` | Equipo / Tienda / Capturas / Estadísticas |
 | `F` | Cambiar cámara (primera ↔ tercera persona) |
@@ -88,7 +90,8 @@ ejecuta tal cual desde un servidor estático, y `build.py` genera el archivo
 ```
 src/
   core/       MathUtils, GeometryUtils, Settings, SaveSystem, Input, Game
-  world/      Textures, TerrainShape, Terrain, WaterBody, SkyDome, Vegetation, Props
+  world/      Textures, TerrainShape, Terrain, WaterBody, SkyDome,
+              Vegetation, Trees, Props, Boat
   weather/    TimeOfDay, Weather
   player/     Player
   fish/       FishData, Fish, FishManager
@@ -123,9 +126,24 @@ osciladores con envolvente.
 Para sustituirlos por texturas reales basta con cambiar `TextureLibrary.material()`
 por un cargador; el resto del juego sólo pide materiales por nombre.
 
+## La barca
+
+Fondeada en la orilla oeste. Con `E` se sube y con `W`/`S` se boga; `A`/`D`
+viran, y virar sólo tiene efecto con algo de arrancada. No entra donde no hay
+calado —encalla suavemente— y para bajarse hace falta orilla al lado: en medio
+del lago el juego lo impide.
+
+Importa porque las especies de fondo (el siluro vive entre 4,5 y 9,5 m) no
+pican desde la orilla. Doce segundos bogando desde el fondeadero llevan a más
+de 6 m de calado.
+
 ## Rendimiento
 
 - Vegetación en `InstancedMesh` agrupada por celdas, con corte por distancia.
+- **LOD real en el arbolado**: cerca, tronco con ramas y copa de varios
+  volúmenes; lejos, un cartel con la mancha de follaje. El cambio se hace
+  escalando a cero las instancias del nivel que no toca, y sólo se recalcula
+  cuando el jugador se ha movido 6 m.
 - Escena típica: ~300 000 triángulos en **~30 draw calls**.
 - Tres presets de calidad que cambian resolución de sombras, tamaño del render
   target del reflejo, densidad de hierba y número de partículas de lluvia.
@@ -134,6 +152,9 @@ por un cargador; el resto del juego sólo pide materiales por nombre.
 
 ## Qué falta
 
-Ver el resumen de estado en la conversación del proyecto. En corto: falta un
-segundo mapa, tercera persona expuesta al jugador (la cámara ya está preparada),
-pesca desde la barca, y sustituir la vegetación de planos cruzados por modelos.
+- Un segundo mapa (la arquitectura lo admite: otra semilla y otros props).
+- Refracción del agua: hoy hay reflejo planar real, pero no segunda pasada.
+- Cascadas de sombra, para que el arbolado lejano proyecte bien.
+- Peces visibles sólo a menos de 45 m.
+- Hierba, juncos y arbustos siguen siendo planos cruzados y volúmenes simples;
+  el arbolado ya no.

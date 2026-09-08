@@ -78,7 +78,6 @@ export class Vegetation {
     this._buildGrass(textures, preset);
     this._buildReeds(preset);
     this._buildBushes(preset);
-    this._buildTrees(textures, preset);
     this._buildRocks(textures, preset);
   }
 
@@ -169,43 +168,6 @@ export class Vegetation {
       d.scale.set(0.7 + rng() * 0.9, 0.55 + rng() * 0.6, 0.7 + rng() * 0.9);
     });
     this._tileify(this.bushes, spots, 150);
-  }
-
-  _buildTrees(textures, preset) {
-    const spots = this._scatter(1500, (x, z, h, slope) =>
-      h > 2.2 && h < 24 && slope < 0.4).slice(0, 420);
-
-    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.28, 5.2, 6, 1);
-    trunkGeo.translate(0, 2.6, 0);
-    const trunkMat = textures.material('corteza', { repeat: 2 });
-
-    this.trunks = this._addInstanced('troncos', trunkGeo, trunkMat, spots, (d, s, i, rng) => {
-      d.position.set(s.x, s.y, s.z);
-      d.rotation.set((rng() - 0.5) * 0.12, rng() * Math.PI, (rng() - 0.5) * 0.12);
-      const k = 0.75 + rng() * 0.85;
-      d.scale.set(k, k, k);
-    });
-    this.trunks.castShadow = preset.shadows;
-    this.trunks.receiveShadow = preset.shadows;
-
-    // Copa: dos planos cruzados con la mancha de follaje, mucho más barato
-    // que una esfera de hojas y se lee bien a distancia.
-    const canopyGeo = crossPlanes(5.4, 5.4);
-    canopyGeo.translate(0, 1.4, 0);
-    const canopyMat = new THREE.MeshStandardMaterial({
-      map: textures.foliage(), alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.9
-    });
-    addWind(canopyMat, this.uniforms, { bendScale: 0.1 });
-
-    this.canopies = this._addInstanced('copas', canopyGeo, canopyMat, spots, (d, s, i, rng) => {
-      d.position.set(s.x, s.y + 3.1, s.z);
-      d.rotation.set(0, rng() * Math.PI, 0);
-      const k = 0.8 + rng() * 0.8;
-      d.scale.set(k, k, k);
-    });
-    this.canopies.castShadow = preset.shadows;
-    this._tileify(this.canopies, spots, this.viewDistance);
-    this._tileify(this.trunks, spots, this.viewDistance);
   }
 
   _buildRocks(textures, preset) {

@@ -91,10 +91,15 @@ export class FishManager {
       }
 
       const appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
-      // Se enfría con la distancia: el señuelo tiene que estar en su zona.
-      fish.interest = clamp(appetite * (1 - distance / detection), 0, 2);
+      // Se enfría con la distancia, pero no linealmente: un pez sólo pierde
+      // el interés cerca del límite de detección, no a medio camino.
+      fish.interest = clamp(appetite * (1 - Math.pow(distance / detection, 1.7)), 0, 2);
 
-      if (fish.state === FishState.SWIMMING && fish.interest > 0.35 && this.rng() < fish.interest * 0.02) {
+      // El apetito es un producto de factores menores que uno, así que sus
+      // valores típicos son bajos: la puerta va acorde. Lo que separa un
+      // señuelo acertado de uno malo es la probabilidad, no el umbral.
+      if (fish.state === FishState.SWIMMING && fish.interest > 0.12 &&
+          this.rng() < fish.interest * 0.013) {
         fish.setState(FishState.SEARCHING);
       }
     }

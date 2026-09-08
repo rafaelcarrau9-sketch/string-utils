@@ -23,7 +23,10 @@ export class Props {
     const plank = textures.material('madera', { repeat: 1 });
 
     this.dock = this._buildDock(Math.PI * 0.18, wood, plank, preset);
-    this._buildBoat(Math.PI * 0.62, wood, preset);
+    // La barca navegable la crea Game (necesita interactuar con el jugador);
+    //     aquí sólo se decide dónde está fondeada.
+    this.boatAnchor = this.shorePoint(Math.PI * 0.62, -0.9);
+    this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
     this._buildCamp(Math.PI * -0.35, wood, textures, preset);
   }
 
@@ -111,36 +114,6 @@ export class Props {
     this.dockDeckY = shore.y + deckY;
     this.dockObject = dock;
     return dock;
-  }
-
-  _buildBoat(angle, wood, preset) {
-    const shore = this.shorePoint(angle, -0.25);
-    const boat = new THREE.Group();
-    boat.position.set(shore.x, 0.02, shore.z);
-    boat.rotation.y = angle + Math.PI / 2 + 0.3;
-
-    // Casco: caja estrechada a proa y popa mediante escalado de vértices.
-    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.55, 4.2, 2, 1, 6), wood);
-    const pos = hull.geometry.attributes.position;
-    const v = new THREE.Vector3();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      const taper = 1 - Math.pow(Math.abs(v.z) / 2.1, 2) * 0.75;
-      v.x *= taper;
-      if (v.y > 0) v.x *= 1.12;
-      pos.setXYZ(i, v.x, v.y, v.z);
-    }
-    hull.geometry.computeVertexNormals();
-    hull.castShadow = preset.shadows;
-    boat.add(hull);
-
-    const bench = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.08, 0.35), wood);
-    bench.position.y = 0.22;
-    boat.add(bench);
-
-    this.group.add(boat);
-    this.boat = boat;
-    this.fishingSpots.push({ name: 'La barca', position: boat.position.clone().setY(0.5) });
   }
 
   _buildCamp(angle, wood, textures, preset) {

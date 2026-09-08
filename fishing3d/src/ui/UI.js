@@ -56,6 +56,9 @@ const CSS = `
   background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
 .sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
 
+.sw-hintline { position: absolute; left: 50%; top: calc(50% + 28px); transform: translateX(-50%);
+  font-size: 12.5px; font-weight: 550; color: #dbe7ee; text-shadow: 0 2px 8px rgba(0,0,0,.95);
+  letter-spacing: .01em; }
 .sw-toast { position: absolute; left: 50%; top: 90px; transform: translateX(-50%);
   background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 8px 15px; font-size: 13px; }
 .sw-toast.bad { border-color: rgba(226,96,74,.6); color: #ffc9bd; }
@@ -169,6 +172,9 @@ export class UI {
     this.prompt = el('div', 'sw-prompt');
     this.root.appendChild(this.prompt);
 
+    this.hint = el('div', 'sw-hintline');
+    this.root.appendChild(this.hint);
+
     this.toast = el('div', 'sw-toast');
     this.toast.style.display = 'none';
     this.root.appendChild(this.toast);
@@ -187,7 +193,8 @@ export class UI {
 
   // ------------------------------------------------------------------ HUD
   update(data) {
-    const { fishing, time, weather, money, equipment } = data;
+    const { fishing, time, weather, money, equipment, hint = '' } = data;
+    if (this.hint.textContent !== hint) this.hint.textContent = hint;
     this.setChip('time', time.label);
     this.setChip('weather', weather.label);
     this.setChip('money', money);

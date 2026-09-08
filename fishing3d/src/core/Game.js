@@ -10,6 +10,8 @@ import { Terrain } from '../world/Terrain.js';
 import { WaterBody } from '../world/WaterBody.js';
 import { SkyDome } from '../world/SkyDome.js';
 import { Vegetation } from '../world/Vegetation.js';
+import { Trees } from '../world/Trees.js';
+import { Boat } from '../world/Boat.js';
 import { Props } from '../world/Props.js';
 
 import { TimeOfDay } from '../weather/TimeOfDay.js';
@@ -95,7 +97,12 @@ export class Game {
     this.sky = new SkyDome(this.scene, this.textures, this.preset);
     this.weather = new Weather(this.scene, this.textures, this.preset);
     this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset);
+    this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset);
     this.props = new Props(this.scene, this.terrain, this.textures, this.preset);
+    this.boat = new Boat(this.scene, this.terrain, this.textures, this.preset, {
+      position: this.props.boatAnchor,
+      heading: Math.PI * 0.62
+    });
   }
 
   _initPlayer() {
@@ -186,6 +193,7 @@ export class Game {
         case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
+        case 'KeyE': if (!this.ui.isPanelOpen) this._toggleBoat(); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
           this.fishing.rod.setVisible(this.player.mode === 'first');
@@ -193,6 +201,43 @@ export class Game {
         default: break;
       }
     });
+  }
+
+  /** Sube o baja de la barca. Desembarcar exige tener orilla al lado. */
+  _toggleBoat() {
+    if (this.player.platform) {
+      const shore = this._findShoreNear(this.boat.position);
+      if (!shore) { this.fishing._say('Acerca la barca a la orilla para bajar', 'bad'); return; }
+      this.boat.leave();
+      this.player.setPlatform(null);
+      this.player.teleport(shore);
+      this.fishing._say('Has desembarcado');
+    } else if (this.boat.canBoard(this.player.position)) {
+      this.fishing.reelIn();
+      this.player.setPlatform(this.boat);
+      this.fishing._say('A bordo · W/S para bogar, A/D para virar, E para bajar');
+    }
+  }
+
+  /**
+   * Sitio donde bajarse de la barca. Vale el agua por la rodilla —de ahí se
+   * puede vadear—, no sólo la tierra seca: exigir tierra firme dejaba el
+   * fondeadero sin salida.
+   */
+  _findShoreNear(position, maxRadius = 13) {
+    let best = null;
+    for (let radius = 2.5; radius <= maxRadius; radius += 1.25) {
+      for (let i = 0; i < 20; i++) {
+        const angle = (i / 20) * Math.PI * 2;
+        const x = position.x + Math.cos(angle) * radius;
+        const z = position.z + Math.sin(angle) * radius;
+        const h = this.terrain.heightAt(x, z);
+        if (h > 0.25) return new THREE.Vector3(x, h, z);      // tierra seca: ideal
+        if (h > -0.6 && !best) best = new THREE.Vector3(x, h, z);  // vadeable
+      }
+      if (best) return best;
+    }
+    return null;
   }
 
   _panel(open) {
@@ -304,7 +349,9 @@ export class Game {
       this.fishing.setRetrieve(0);
     }
 
-    const moving = controllable && !headless
+    // El jugador se actualiza también sin entrada: así sigue a la barca y las
+    // pruebas automáticas ejercitan el mismo código que la partida real.
+    const moving = controllable
       ? this.player.update(dt, this.input)
       : { speed: 0, surface: this.player.surface, depth: 0 };
 
@@ -323,6 +370,17 @@ export class Game {
       choppiness: this.weather.choppiness
     });
     this.vegetation.update(dt, wind, this.player.position);
+    this.trees.update(this.player.position);
+
+    const aboard = this.player.platform === this.boat;
+    this.boat.update(dt, {
+      row: aboard && controllable
+        ? (this.input.isDown('KeyW') ? 1 : 0) - (this.input.isDown('KeyS') ? 1 : 0) : 0,
+      turn: aboard && controllable
+        ? (this.input.isDown('KeyA') ? 1 : 0) - (this.input.isDown('KeyD') ? 1 : 0) : 0,
+      time: this.clock.elapsedTime,
+      water: this.water
+    });
 
     const context = {
       terrain: this.terrain,
@@ -351,11 +409,19 @@ export class Game {
         time: this.time,
         weather: this.weather,
         money: this.economy.money,
-        equipment: this.equipment
+        equipment: this.equipment,
+        hint: this._contextHint()
       });
       this.autosaveTimer += dt;
       if (this.autosaveTimer > 30) { this.autosaveTimer = 0; this._persist(); }
     }
+  }
+
+  /** Aviso contextual bajo el punto de mira. */
+  _contextHint() {
+    if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
+    if (this.boat.canBoard(this.player.position)) return 'E para subir a la barca';
+    return '';
   }
 
   _updateAudio(dt, moving) {
@@ -383,6 +449,8 @@ export class Game {
     this.fishing.dispose();
     this.fishManager.dispose();
     this.vegetation.dispose();
+    this.trees.dispose();
+    this.boat.dispose();
     this.props.dispose();
     this.water.dispose();
     this.sky.dispose();

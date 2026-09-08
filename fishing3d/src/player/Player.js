@@ -37,6 +37,10 @@ export class Player {
     this.mode = 'first';          // 'first' | 'third' (preparado, no expuesto aún)
     this.thirdPersonDistance = 3.4;
 
+    this.platform = null;            // barca u otra plataforma móvil
+    this.body = this._buildBody();
+    this.rig.add(this.body);
+
     this._raycaster = new THREE.Raycaster();
     this._down = new THREE.Vector3(0, -1, 0);
     this._forward = new THREE.Vector3();
@@ -45,6 +49,45 @@ export class Player {
   }
 
   get position() { return this.rig.position; }
+
+  /** Figura del pescador: sólo se ve en tercera persona. */
+  _buildBody() {
+    const body = new THREE.Group();
+    const coat = new THREE.MeshStandardMaterial({ color: 0x2c4a5e, roughness: 0.85 });
+    const skin = new THREE.MeshStandardMaterial({ color: 0xd7ab84, roughness: 0.75 });
+    const hat = new THREE.MeshStandardMaterial({ color: 0x7a6a3c, roughness: 0.9 });
+
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.58, 4, 10), coat);
+    torso.position.y = 1.05;
+    body.add(torso);
+    [-1, 1].forEach((side) => {
+      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.6, 4, 8), coat);
+      leg.position.set(side * 0.13, 0.42, 0);
+      body.add(leg);
+      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.5, 4, 8), coat);
+      arm.position.set(side * 0.31, 1.05, 0.05);
+      body.add(arm);
+    });
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), skin);
+    head.position.y = 1.55;
+    body.add(head);
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.03, 12), hat);
+    brim.position.y = 1.63;
+    body.add(brim);
+    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), hat);
+    crown.position.y = 1.63;
+    body.add(crown);
+
+    body.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    body.visible = false;
+    return body;
+  }
+
+  /** Sube o baja de una plataforma móvil (la barca). */
+  setPlatform(platform) {
+    this.platform = platform;
+    if (platform) platform.board(); 
+  }
 
   /** Altura pisable: terreno o cualquier estructura por encima (muelle, barca). */
   groundHeight(x, z) {
@@ -68,6 +111,7 @@ export class Player {
   }
 
   update(dt, input) {
+    if (this.platform) return this._updateOnPlatform(dt, input);
     const forwardInput = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
     const strafeInput = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
     const running = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
@@ -125,9 +169,29 @@ export class Player {
     return { speed: horizontalSpeed, surface: this.surface, depth: Math.max(0, depth) };
   }
 
-  /** Prepara la tercera persona sin cambiar el resto del control. */
+  /** Embarcado: rema en vez de andar, y la vista sigue al asiento. */
+  _updateOnPlatform(dt, input) {
+    const seat = this.platform.seatPosition();
+    this.rig.position.copy(seat);
+    this.rig.rotation.y = this.yaw;
+
+    const bob = Math.sin(this.bobPhase) * 0.012;
+    this.bobPhase += dt * 1.6;
+    this.camera.rotation.set(this.pitch, 0, 0);
+    this.camera.position.set(
+      0,
+      EYE_HEIGHT * 0.62 + bob,
+      this.mode === 'third' ? this.thirdPersonDistance : 0
+    );
+    this.surface = 'barca';
+    this.lookDelta.multiplyScalar(0.82);
+    return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0 };
+  }
+
+  /** Alterna primera y tercera persona; el cuerpo sólo se ve en la segunda. */
   setCameraMode(mode) {
     this.mode = mode === 'third' ? 'third' : 'first';
+    this.body.visible = this.mode === 'third';
   }
 
   teleport(position) {

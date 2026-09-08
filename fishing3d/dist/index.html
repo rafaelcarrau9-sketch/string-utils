@@ -1171,7 +1171,6 @@ class Vegetation {
     this._buildGrass(textures, preset);
     this._buildReeds(preset);
     this._buildBushes(preset);
-    this._buildTrees(textures, preset);
     this._buildRocks(textures, preset);
   }
 
@@ -1264,43 +1263,6 @@ class Vegetation {
     this._tileify(this.bushes, spots, 150);
   }
 
-  _buildTrees(textures, preset) {
-    const spots = this._scatter(1500, (x, z, h, slope) =>
-      h > 2.2 && h < 24 && slope < 0.4).slice(0, 420);
-
-    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.28, 5.2, 6, 1);
-    trunkGeo.translate(0, 2.6, 0);
-    const trunkMat = textures.material('corteza', { repeat: 2 });
-
-    this.trunks = this._addInstanced('troncos', trunkGeo, trunkMat, spots, (d, s, i, rng) => {
-      d.position.set(s.x, s.y, s.z);
-      d.rotation.set((rng() - 0.5) * 0.12, rng() * Math.PI, (rng() - 0.5) * 0.12);
-      const k = 0.75 + rng() * 0.85;
-      d.scale.set(k, k, k);
-    });
-    this.trunks.castShadow = preset.shadows;
-    this.trunks.receiveShadow = preset.shadows;
-
-    // Copa: dos planos cruzados con la mancha de follaje, mucho más barato
-    // que una esfera de hojas y se lee bien a distancia.
-    const canopyGeo = crossPlanes(5.4, 5.4);
-    canopyGeo.translate(0, 1.4, 0);
-    const canopyMat = new THREE.MeshStandardMaterial({
-      map: textures.foliage(), alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.9
-    });
-    addWind(canopyMat, this.uniforms, { bendScale: 0.1 });
-
-    this.canopies = this._addInstanced('copas', canopyGeo, canopyMat, spots, (d, s, i, rng) => {
-      d.position.set(s.x, s.y + 3.1, s.z);
-      d.rotation.set(0, rng() * Math.PI, 0);
-      const k = 0.8 + rng() * 0.8;
-      d.scale.set(k, k, k);
-    });
-    this.canopies.castShadow = preset.shadows;
-    this._tileify(this.canopies, spots, this.viewDistance);
-    this._tileify(this.trunks, spots, this.viewDistance);
-  }
-
   _buildRocks(textures, preset) {
     const spots = this._scatter(1200, (x, z, h, slope) =>
       (h > -1.6 && h < 22) && (slope > 0.18 || this.rng() < 0.35)).slice(0, 320);
@@ -1347,6 +1309,221 @@ class Vegetation {
   }
 }
 
+/* ===== src/world/Trees.js ===== */
+/**
+ * Arbolado con geometría real y LOD por instancia.
+ *
+ * Cerca, cada árbol es un tronco con ramas y una copa de varios volúmenes;
+ * lejos, un cartel con la mancha de follaje. El intercambio se hace escalando
+ * a cero las instancias del nivel que no toca —la técnica habitual con
+ * InstancedMesh— y sólo se recalcula cuando el jugador se ha movido de verdad,
+ * no cada fotograma.
+ */
+
+const NEAR_DISTANCE = 70;     // metros hasta los que se dibuja el árbol completo
+const REBUILD_STEP = 6;       // el LOD se revisa cuando el jugador anda esto
+
+/** Tronco cónico con tres o cuatro ramas. */
+function trunkGeometry(rng, { height = 5.4, radius = 0.24 } = {}) {
+  const parts = [];
+  const trunk = new THREE.CylinderGeometry(radius * 0.42, radius, height, 7, 1);
+  trunk.translate(0, height / 2, 0);
+  parts.push(trunk);
+
+  const branches = 3 + Math.floor(rng() * 2);
+  for (let i = 0; i < branches; i++) {
+    const t = 0.55 + rng() * 0.35;
+    const length = height * (0.22 + rng() * 0.2);
+    const branch = new THREE.CylinderGeometry(radius * 0.1, radius * 0.28, length, 5, 1);
+    branch.translate(0, length / 2, 0);
+    branch.rotateZ((rng() * 0.5 + 0.5) * (rng() < 0.5 ? 1 : -1));
+    branch.rotateY((i / branches) * Math.PI * 2 + rng());
+    branch.translate(0, height * t, 0);
+    parts.push(branch);
+  }
+  const merged = mergeGeometries(parts);
+  parts.forEach((p) => p.dispose());
+  return merged;
+}
+
+/** Copa de hoja ancha: varios volúmenes solapados. */
+function canopyBlobs(rng, { height = 5.4 } = {}) {
+  const parts = [];
+  const blobs = 5 + Math.floor(rng() * 3);
+  for (let i = 0; i < blobs; i++) {
+    const r = 1.1 + rng() * 0.9;
+    const blob = new THREE.IcosahedronGeometry(r, 0);
+    const angle = (i / blobs) * Math.PI * 2 + rng() * 0.6;
+    const spread = 0.9 + rng() * 1.1;
+    blob.translate(
+      Math.cos(angle) * spread,
+      height * (0.9 + rng() * 0.35),
+      Math.sin(angle) * spread
+    );
+    parts.push(blob);
+  }
+  const merged = mergeGeometries(parts);
+  parts.forEach((p) => p.dispose());
+  return merged;
+}
+
+/** Copa de conífera: conos apilados. */
+function canopyCone(rng, { height = 6.2 } = {}) {
+  const parts = [];
+  const tiers = 3 + Math.floor(rng() * 2);
+  for (let i = 0; i < tiers; i++) {
+    const t = i / tiers;
+    const radius = 2.3 * (1 - t * 0.62);
+    const cone = new THREE.ConeGeometry(radius, 2.1, 8, 1);
+    cone.translate(0, height * 0.68 + i * 1.35, 0);
+    parts.push(cone);
+  }
+  const merged = mergeGeometries(parts);
+  parts.forEach((p) => p.dispose());
+  return merged;
+}
+
+class Trees {
+  constructor(scene, terrain, textures, preset, { seed = 8080, count = 420 } = {}) {
+    this.scene = scene;
+    this.terrain = terrain;
+    this.rng = createRandom(seed);
+    this.group = new THREE.Group();
+    this.group.name = 'arbolado';
+    scene.add(this.group);
+
+    this.nearDistance = Math.min(NEAR_DISTANCE, preset.viewDistance * 0.4);
+    this.spots = this._scatter(count);
+    this._lastRebuild = new THREE.Vector3(1e9, 0, 1e9);
+    this._dummy = new THREE.Object3D();
+
+    this._buildMeshes(textures, preset);
+  }
+
+  _scatter(count) {
+    const spots = [];
+    const half = this.terrain.field.half - 10;
+    let attempts = 0;
+    while (spots.length < count && attempts < count * 30) {
+      attempts++;
+      const x = (this.rng() * 2 - 1) * half;
+      const z = (this.rng() * 2 - 1) * half;
+      const h = this.terrain.heightAt(x, z);
+      if (h < 1.8 || h > 24) continue;
+      if (this.terrain.slopeAt(x, z) > 0.42) continue;
+      spots.push({
+        x, y: h, z,
+        conifer: this.rng() < 0.38,
+        scale: 0.75 + this.rng() * 0.7,
+        rotation: this.rng() * Math.PI * 2,
+        tilt: (this.rng() - 0.5) * 0.1
+      });
+    }
+    return spots;
+  }
+
+  _buildMeshes(textures, preset) {
+    const rng = this.rng;
+    const barkMaterial = textures.material('corteza', { repeat: 2 });
+    const leafMaterial = new THREE.MeshStandardMaterial({
+      color: 0x5f7f3c, roughness: 0.9, metalness: 0, flatShading: true
+    });
+    const coniferMaterial = new THREE.MeshStandardMaterial({
+      color: 0x40603a, roughness: 0.92, metalness: 0, flatShading: true
+    });
+
+    const count = this.spots.length;
+    this.near = {
+      trunk: new THREE.InstancedMesh(trunkGeometry(rng), barkMaterial, count),
+      broad: new THREE.InstancedMesh(canopyBlobs(rng), leafMaterial, count),
+      conifer: new THREE.InstancedMesh(canopyCone(rng), coniferMaterial, count)
+    };
+
+    const billboardGeometry = crossPlanes(5.6, 6.4);
+    const billboardMaterial = new THREE.MeshStandardMaterial({
+      map: textures.foliage(), alphaTest: 0.42, side: THREE.DoubleSide, roughness: 0.9
+    });
+    this.far = new THREE.InstancedMesh(billboardGeometry, billboardMaterial, count);
+
+    [this.near.trunk, this.near.broad, this.near.conifer, this.far].forEach((mesh) => {
+      mesh.castShadow = preset.shadows;
+      mesh.receiveShadow = preset.shadows;
+      mesh.frustumCulled = false;      // el LOD ya decide qué se dibuja
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.group.add(mesh);
+    });
+
+    this._applyLOD(new THREE.Vector3(0, 0, 0));
+  }
+
+  /** Escribe las matrices: escala 0 en el nivel que no corresponde. */
+  _applyLOD(playerPosition) {
+    const d = this._dummy;
+    const near = this.near;
+    const hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+
+    let trunkCount = 0, broadCount = 0, coniferCount = 0, farCount = 0;
+
+    for (let i = 0; i < this.spots.length; i++) {
+      const spot = this.spots[i];
+      const dx = spot.x - playerPosition.x;
+      const dz = spot.z - playerPosition.z;
+      const distance = Math.hypot(dx, dz);
+      const isNear = distance < this.nearDistance;
+
+      d.position.set(spot.x, spot.y, spot.z);
+      d.rotation.set(spot.tilt, spot.rotation, spot.tilt * 0.6);
+      d.scale.setScalar(spot.scale);
+      d.updateMatrix();
+
+      if (isNear) {
+        near.trunk.setMatrixAt(trunkCount++, d.matrix);
+        if (spot.conifer) near.conifer.setMatrixAt(coniferCount++, d.matrix);
+        else near.broad.setMatrixAt(broadCount++, d.matrix);
+        this.far.setMatrixAt(i, hidden);
+      } else {
+        // El cartel se planta un poco más alto: sustituye a copa y tronco.
+        d.position.y = spot.y + 2.4 * spot.scale;
+        d.rotation.set(0, spot.rotation, 0);
+        d.updateMatrix();
+        this.far.setMatrixAt(farCount++, d.matrix);
+      }
+    }
+
+    near.trunk.count = trunkCount;
+    near.broad.count = broadCount;
+    near.conifer.count = coniferCount;
+    this.far.count = farCount;
+
+    near.trunk.instanceMatrix.needsUpdate = true;
+    near.broad.instanceMatrix.needsUpdate = true;
+    near.conifer.instanceMatrix.needsUpdate = true;
+    this.far.instanceMatrix.needsUpdate = true;
+  }
+
+  update(playerPosition) {
+    if (this._lastRebuild.distanceToSquared(playerPosition) < REBUILD_STEP * REBUILD_STEP) return;
+    this._lastRebuild.copy(playerPosition);
+    this._applyLOD(playerPosition);
+  }
+
+  get stats() {
+    return {
+      total: this.spots.length,
+      cerca: this.near.trunk.count,
+      lejos: this.far.count
+    };
+  }
+
+  dispose() {
+    [this.near.trunk, this.near.broad, this.near.conifer, this.far].forEach((m) => {
+      m.geometry.dispose();
+      m.material.dispose();
+    });
+    this.scene.remove(this.group);
+  }
+}
+
 /* ===== src/world/Props.js ===== */
 /**
  * Elementos construidos del escenario: muelle, barca, banco, fogata, cartel.
@@ -1370,7 +1547,10 @@ class Props {
     const plank = textures.material('madera', { repeat: 1 });
 
     this.dock = this._buildDock(Math.PI * 0.18, wood, plank, preset);
-    this._buildBoat(Math.PI * 0.62, wood, preset);
+    // La barca navegable la crea Game (necesita interactuar con el jugador);
+    //     aquí sólo se decide dónde está fondeada.
+    this.boatAnchor = this.shorePoint(Math.PI * 0.62, -0.9);
+    this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
     this._buildCamp(Math.PI * -0.35, wood, textures, preset);
   }
 
@@ -1460,36 +1640,6 @@ class Props {
     return dock;
   }
 
-  _buildBoat(angle, wood, preset) {
-    const shore = this.shorePoint(angle, -0.25);
-    const boat = new THREE.Group();
-    boat.position.set(shore.x, 0.02, shore.z);
-    boat.rotation.y = angle + Math.PI / 2 + 0.3;
-
-    // Casco: caja estrechada a proa y popa mediante escalado de vértices.
-    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.55, 4.2, 2, 1, 6), wood);
-    const pos = hull.geometry.attributes.position;
-    const v = new THREE.Vector3();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      const taper = 1 - Math.pow(Math.abs(v.z) / 2.1, 2) * 0.75;
-      v.x *= taper;
-      if (v.y > 0) v.x *= 1.12;
-      pos.setXYZ(i, v.x, v.y, v.z);
-    }
-    hull.geometry.computeVertexNormals();
-    hull.castShadow = preset.shadows;
-    boat.add(hull);
-
-    const bench = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.08, 0.35), wood);
-    bench.position.y = 0.22;
-    boat.add(bench);
-
-    this.group.add(boat);
-    this.boat = boat;
-    this.fishingSpots.push({ name: 'La barca', position: boat.position.clone().setY(0.5) });
-  }
-
   _buildCamp(angle, wood, textures, preset) {
     const spot = this.shorePoint(angle, 1.4);
     const camp = new THREE.Group();
@@ -1531,6 +1681,147 @@ class Props {
       if (o.isMesh || o.isInstancedMesh) o.geometry.dispose();
     });
     this.scene.remove(this.group);
+  }
+}
+
+/* ===== src/world/Boat.js ===== */
+/**
+ * Barca de remos navegable.
+ *
+ * Es la forma de llegar a las aguas hondas del centro del lago, donde viven
+ * las especies que no pican desde la orilla. Flota siguiendo la superficie,
+ * no puede entrar donde no hay calado y deja estela al avanzar.
+ */
+
+const MIN_DEPTH = 0.55;          // calado mínimo para navegar
+const ROW_ACCEL = 2.4;
+const MAX_SPEED = 3.6;
+const TURN_RATE = 1.15;
+
+class Boat {
+  constructor(scene, terrain, textures, preset, { position = new THREE.Vector3(), heading = 0 } = {}) {
+    this.terrain = terrain;
+    this.position = position.clone();
+    this.heading = heading;
+    this.speed = 0;
+    this.occupied = false;
+    this.wakeTimer = 0;
+
+    const wood = textures.material('madera', { repeat: 1.5 });
+    this.group = new THREE.Group();
+    this.group.name = 'barca';
+
+    // Casco: caja afinada en proa y popa desplazando vértices.
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.62, 4.4, 3, 2, 8), wood);
+    const pos = hull.geometry.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      const taper = 1 - Math.pow(Math.abs(v.z) / 2.2, 2.2) * 0.82;
+      v.x *= taper;
+      if (v.y > 0) v.x *= 1.14;
+      else v.y *= 0.85;
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    hull.geometry.computeVertexNormals();
+    hull.castShadow = preset.shadows;
+    hull.receiveShadow = preset.shadows;
+    this.group.add(hull);
+
+    // Bancada y regala
+    const bench = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.09, 0.4), wood);
+    bench.position.set(0, 0.24, -0.2);
+    this.group.add(bench);
+    const gunwale = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.05, 6, 16, Math.PI * 2), wood);
+    gunwale.rotation.x = Math.PI / 2;
+    gunwale.scale.set(1, 2.6, 1);
+    gunwale.position.y = 0.3;
+    this.group.add(gunwale);
+
+    // Remos, que se mueven al bogar
+    this.oars = [];
+    [-1, 1].forEach((side) => {
+      const oar = new THREE.Group();
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 2.1, 6), wood);
+      shaft.rotation.z = Math.PI / 2;
+      shaft.position.x = side * 0.9;
+      oar.add(shaft);
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.03, 0.22), wood);
+      blade.position.set(side * 1.85, 0, 0);
+      oar.add(blade);
+      oar.position.set(0, 0.28, -0.1);
+      this.group.add(oar);
+      this.oars.push({ object: oar, side });
+    });
+
+    this.group.position.copy(this.position);
+    this.group.rotation.y = heading;
+    scene.add(this.group);
+  }
+
+  /** Punto donde se sienta el pescador, en coordenadas de mundo. */
+  seatPosition(out = new THREE.Vector3()) {
+    return out.set(0, 0.34, -0.2).applyMatrix4(this.group.matrixWorld);
+  }
+
+  /** ¿Está el jugador lo bastante cerca para subirse? */
+  canBoard(playerPosition) {
+    return !this.occupied && playerPosition.distanceTo(this.group.position) < 3.4;
+  }
+
+  board() { this.occupied = true; }
+  leave() { this.occupied = false; this.speed = 0; }
+
+  /**
+   * @param row  -1..1 (bogar hacia adelante o ciar)
+   * @param turn -1..1
+   */
+  update(dt, { row = 0, turn = 0, time = 0, water = null } = {}) {
+    if (this.occupied) {
+      this.speed = damp(this.speed, row * MAX_SPEED, ROW_ACCEL, dt);
+      // Virar sólo tiene efecto con algo de arrancada, como en el agua real.
+      this.heading += turn * TURN_RATE * dt * clamp(0.35 + Math.abs(this.speed) / MAX_SPEED, 0.35, 1.3);
+    } else {
+      this.speed = damp(this.speed, 0, 1.4, dt);
+    }
+
+    if (Math.abs(this.speed) > 0.01) {
+      const nx = this.position.x - Math.sin(this.heading) * this.speed * dt;
+      const nz = this.position.z - Math.cos(this.heading) * this.speed * dt;
+      // Sin calado no se pasa: la barca encalla suavemente.
+      if (this.terrain.depthAt(nx, nz) > MIN_DEPTH) {
+        this.position.x = nx;
+        this.position.z = nz;
+      } else {
+        this.speed *= 0.25;
+      }
+
+      this.wakeTimer -= dt;
+      if (water && this.wakeTimer <= 0 && Math.abs(this.speed) > 0.6) {
+        this.wakeTimer = 0.45;
+        water.splash(this.position, 0.35);
+      }
+    }
+
+    // Flotación: cabeceo y balanceo suaves.
+    const bobY = Math.sin(time * 1.4) * 0.035 + Math.sin(time * 2.1 + 1.3) * 0.02;
+    this.group.position.set(this.position.x, this.terrain.waterLevel + 0.12 + bobY, this.position.z);
+    this.group.rotation.y = this.heading;
+    this.group.rotation.z = Math.sin(time * 1.1) * 0.025 - this.speed * 0.02;
+    this.group.rotation.x = Math.sin(time * 1.7) * 0.018;
+    this.group.updateMatrixWorld();
+
+    // Los remos bogan al ritmo del avance.
+    const stroke = Math.sin(time * 3.2) * clamp(Math.abs(this.speed) / MAX_SPEED, 0, 1);
+    this.oars.forEach(({ object, side }) => {
+      object.rotation.x = stroke * 0.5;
+      object.rotation.y = stroke * 0.28 * side;
+    });
+  }
+
+  dispose() {
+    this.group.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
+    this.group.parent?.remove(this.group);
   }
 }
 
@@ -2296,10 +2587,15 @@ class FishManager {
       }
 
       const appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
-      // Se enfría con la distancia: el señuelo tiene que estar en su zona.
-      fish.interest = clamp(appetite * (1 - distance / detection), 0, 2);
+      // Se enfría con la distancia, pero no linealmente: un pez sólo pierde
+      // el interés cerca del límite de detección, no a medio camino.
+      fish.interest = clamp(appetite * (1 - Math.pow(distance / detection, 1.7)), 0, 2);
 
-      if (fish.state === FishState.SWIMMING && fish.interest > 0.35 && this.rng() < fish.interest * 0.02) {
+      // El apetito es un producto de factores menores que uno, así que sus
+      // valores típicos son bajos: la puerta va acorde. Lo que separa un
+      // señuelo acertado de uno malo es la probabilidad, no el umbral.
+      if (fish.state === FishState.SWIMMING && fish.interest > 0.12 &&
+          this.rng() < fish.interest * 0.013) {
         fish.setState(FishState.SEARCHING);
       }
     }
@@ -3439,6 +3735,10 @@ class Player {
     this.mode = 'first';          // 'first' | 'third' (preparado, no expuesto aún)
     this.thirdPersonDistance = 3.4;
 
+    this.platform = null;            // barca u otra plataforma móvil
+    this.body = this._buildBody();
+    this.rig.add(this.body);
+
     this._raycaster = new THREE.Raycaster();
     this._down = new THREE.Vector3(0, -1, 0);
     this._forward = new THREE.Vector3();
@@ -3447,6 +3747,45 @@ class Player {
   }
 
   get position() { return this.rig.position; }
+
+  /** Figura del pescador: sólo se ve en tercera persona. */
+  _buildBody() {
+    const body = new THREE.Group();
+    const coat = new THREE.MeshStandardMaterial({ color: 0x2c4a5e, roughness: 0.85 });
+    const skin = new THREE.MeshStandardMaterial({ color: 0xd7ab84, roughness: 0.75 });
+    const hat = new THREE.MeshStandardMaterial({ color: 0x7a6a3c, roughness: 0.9 });
+
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.58, 4, 10), coat);
+    torso.position.y = 1.05;
+    body.add(torso);
+    [-1, 1].forEach((side) => {
+      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.6, 4, 8), coat);
+      leg.position.set(side * 0.13, 0.42, 0);
+      body.add(leg);
+      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.5, 4, 8), coat);
+      arm.position.set(side * 0.31, 1.05, 0.05);
+      body.add(arm);
+    });
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), skin);
+    head.position.y = 1.55;
+    body.add(head);
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.03, 12), hat);
+    brim.position.y = 1.63;
+    body.add(brim);
+    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), hat);
+    crown.position.y = 1.63;
+    body.add(crown);
+
+    body.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    body.visible = false;
+    return body;
+  }
+
+  /** Sube o baja de una plataforma móvil (la barca). */
+  setPlatform(platform) {
+    this.platform = platform;
+    if (platform) platform.board(); 
+  }
 
   /** Altura pisable: terreno o cualquier estructura por encima (muelle, barca). */
   groundHeight(x, z) {
@@ -3470,6 +3809,7 @@ class Player {
   }
 
   update(dt, input) {
+    if (this.platform) return this._updateOnPlatform(dt, input);
     const forwardInput = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
     const strafeInput = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
     const running = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
@@ -3527,9 +3867,29 @@ class Player {
     return { speed: horizontalSpeed, surface: this.surface, depth: Math.max(0, depth) };
   }
 
-  /** Prepara la tercera persona sin cambiar el resto del control. */
+  /** Embarcado: rema en vez de andar, y la vista sigue al asiento. */
+  _updateOnPlatform(dt, input) {
+    const seat = this.platform.seatPosition();
+    this.rig.position.copy(seat);
+    this.rig.rotation.y = this.yaw;
+
+    const bob = Math.sin(this.bobPhase) * 0.012;
+    this.bobPhase += dt * 1.6;
+    this.camera.rotation.set(this.pitch, 0, 0);
+    this.camera.position.set(
+      0,
+      EYE_HEIGHT * 0.62 + bob,
+      this.mode === 'third' ? this.thirdPersonDistance : 0
+    );
+    this.surface = 'barca';
+    this.lookDelta.multiplyScalar(0.82);
+    return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0 };
+  }
+
+  /** Alterna primera y tercera persona; el cuerpo sólo se ve en la segunda. */
   setCameraMode(mode) {
     this.mode = mode === 'third' ? 'third' : 'first';
+    this.body.visible = this.mode === 'third';
   }
 
   teleport(position) {
@@ -3592,6 +3952,9 @@ const CSS = `
   background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
 .sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
 
+.sw-hintline { position: absolute; left: 50%; top: calc(50% + 28px); transform: translateX(-50%);
+  font-size: 12.5px; font-weight: 550; color: #dbe7ee; text-shadow: 0 2px 8px rgba(0,0,0,.95);
+  letter-spacing: .01em; }
 .sw-toast { position: absolute; left: 50%; top: 90px; transform: translateX(-50%);
   background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 8px 15px; font-size: 13px; }
 .sw-toast.bad { border-color: rgba(226,96,74,.6); color: #ffc9bd; }
@@ -3705,6 +4068,9 @@ class UI {
     this.prompt = el('div', 'sw-prompt');
     this.root.appendChild(this.prompt);
 
+    this.hint = el('div', 'sw-hintline');
+    this.root.appendChild(this.hint);
+
     this.toast = el('div', 'sw-toast');
     this.toast.style.display = 'none';
     this.root.appendChild(this.toast);
@@ -3723,7 +4089,8 @@ class UI {
 
   // ------------------------------------------------------------------ HUD
   update(data) {
-    const { fishing, time, weather, money, equipment } = data;
+    const { fishing, time, weather, money, equipment, hint = '' } = data;
+    if (this.hint.textContent !== hint) this.hint.textContent = hint;
     this.setChip('time', time.label);
     this.setChip('weather', weather.label);
     this.setChip('money', money);
@@ -4302,7 +4669,12 @@ class Game {
     this.sky = new SkyDome(this.scene, this.textures, this.preset);
     this.weather = new Weather(this.scene, this.textures, this.preset);
     this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset);
+    this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset);
     this.props = new Props(this.scene, this.terrain, this.textures, this.preset);
+    this.boat = new Boat(this.scene, this.terrain, this.textures, this.preset, {
+      position: this.props.boatAnchor,
+      heading: Math.PI * 0.62
+    });
   }
 
   _initPlayer() {
@@ -4393,6 +4765,7 @@ class Game {
         case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
+        case 'KeyE': if (!this.ui.isPanelOpen) this._toggleBoat(); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
           this.fishing.rod.setVisible(this.player.mode === 'first');
@@ -4400,6 +4773,43 @@ class Game {
         default: break;
       }
     });
+  }
+
+  /** Sube o baja de la barca. Desembarcar exige tener orilla al lado. */
+  _toggleBoat() {
+    if (this.player.platform) {
+      const shore = this._findShoreNear(this.boat.position);
+      if (!shore) { this.fishing._say('Acerca la barca a la orilla para bajar', 'bad'); return; }
+      this.boat.leave();
+      this.player.setPlatform(null);
+      this.player.teleport(shore);
+      this.fishing._say('Has desembarcado');
+    } else if (this.boat.canBoard(this.player.position)) {
+      this.fishing.reelIn();
+      this.player.setPlatform(this.boat);
+      this.fishing._say('A bordo · W/S para bogar, A/D para virar, E para bajar');
+    }
+  }
+
+  /**
+   * Sitio donde bajarse de la barca. Vale el agua por la rodilla —de ahí se
+   * puede vadear—, no sólo la tierra seca: exigir tierra firme dejaba el
+   * fondeadero sin salida.
+   */
+  _findShoreNear(position, maxRadius = 13) {
+    let best = null;
+    for (let radius = 2.5; radius <= maxRadius; radius += 1.25) {
+      for (let i = 0; i < 20; i++) {
+        const angle = (i / 20) * Math.PI * 2;
+        const x = position.x + Math.cos(angle) * radius;
+        const z = position.z + Math.sin(angle) * radius;
+        const h = this.terrain.heightAt(x, z);
+        if (h > 0.25) return new THREE.Vector3(x, h, z);      // tierra seca: ideal
+        if (h > -0.6 && !best) best = new THREE.Vector3(x, h, z);  // vadeable
+      }
+      if (best) return best;
+    }
+    return null;
   }
 
   _panel(open) {
@@ -4511,7 +4921,9 @@ class Game {
       this.fishing.setRetrieve(0);
     }
 
-    const moving = controllable && !headless
+    // El jugador se actualiza también sin entrada: así sigue a la barca y las
+    // pruebas automáticas ejercitan el mismo código que la partida real.
+    const moving = controllable
       ? this.player.update(dt, this.input)
       : { speed: 0, surface: this.player.surface, depth: 0 };
 
@@ -4530,6 +4942,17 @@ class Game {
       choppiness: this.weather.choppiness
     });
     this.vegetation.update(dt, wind, this.player.position);
+    this.trees.update(this.player.position);
+
+    const aboard = this.player.platform === this.boat;
+    this.boat.update(dt, {
+      row: aboard && controllable
+        ? (this.input.isDown('KeyW') ? 1 : 0) - (this.input.isDown('KeyS') ? 1 : 0) : 0,
+      turn: aboard && controllable
+        ? (this.input.isDown('KeyA') ? 1 : 0) - (this.input.isDown('KeyD') ? 1 : 0) : 0,
+      time: this.clock.elapsedTime,
+      water: this.water
+    });
 
     const context = {
       terrain: this.terrain,
@@ -4558,11 +4981,19 @@ class Game {
         time: this.time,
         weather: this.weather,
         money: this.economy.money,
-        equipment: this.equipment
+        equipment: this.equipment,
+        hint: this._contextHint()
       });
       this.autosaveTimer += dt;
       if (this.autosaveTimer > 30) { this.autosaveTimer = 0; this._persist(); }
     }
+  }
+
+  /** Aviso contextual bajo el punto de mira. */
+  _contextHint() {
+    if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
+    if (this.boat.canBoard(this.player.position)) return 'E para subir a la barca';
+    return '';
   }
 
   _updateAudio(dt, moving) {
@@ -4590,6 +5021,8 @@ class Game {
     this.fishing.dispose();
     this.fishManager.dispose();
     this.vegetation.dispose();
+    this.trees.dispose();
+    this.boat.dispose();
     this.props.dispose();
     this.water.dispose();
     this.sky.dispose();
