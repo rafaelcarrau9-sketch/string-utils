@@ -447,6 +447,44 @@ export class UI {
     this._overlay('Estadísticas', body);
   }
 
+  showZones(zones, economy, currentId) {
+    const body = el('div');
+    const render = () => {
+      body.innerHTML = '';
+      const money = el('div', 'sw-hint', `Monedas disponibles: <b style="color:var(--warn)">${economy.money}</b>`);
+      money.style.marginBottom = '12px';
+      body.appendChild(money);
+
+      zones.forEach((zone) => {
+        const unlocked = economy.unlockedZones.includes(zone.id);
+        const here = zone.id === currentId;
+        const row = el('div', `sw-item${here ? ' equipped' : ''}`);
+        row.innerHTML = `<div><div class="t">${zone.name}</div>
+          <div class="d">${zone.description}</div>
+          <div class="stats">${zone.species.length} especies · hasta ${zone.terrain.maxDepth} m de calado</div></div>`;
+        const act = el('div', 'act');
+        if (here) {
+          act.appendChild(el('span', 'sw-tag', 'Estás aquí'));
+        } else if (unlocked) {
+          const go = el('button', 'sw-btn', 'Viajar');
+          go.addEventListener('click', () => this.cb.onTravel?.(zone.id));
+          act.appendChild(go);
+        } else {
+          const buy = el('button', 'sw-btn', `${zone.price}`);
+          buy.disabled = !economy.canAfford(zone.price);
+          buy.addEventListener('click', () => {
+            if (this.cb.onUnlockZone?.(zone.id)) render();
+          });
+          act.appendChild(buy);
+        }
+        row.appendChild(act);
+        body.appendChild(row);
+      });
+    };
+    render();
+    this._overlay('Zonas de pesca', body);
+  }
+
   showSettings(settings) {
     const body = el('div');
     const quality = el('div', 'sw-field');
@@ -509,6 +547,8 @@ export class UI {
       <b>Tab</b><span>Equipo</span>
       <b>B</b><span>Tienda</span>
       <b>C</b><span>Capturas</span>
+      <b>Z</b><span>Zonas de pesca</span>
+      <b>E</b><span>Subir o bajar de la barca</span>
       <b>G</b><span>Estadísticas</span>
       <b>F</b><span>Cambiar cámara</span>
       <b>Esc</b><span>Pausa</span>`;

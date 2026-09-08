@@ -26,6 +26,7 @@ MODULES = [
     "src/core/Settings.js",
     "src/core/SaveSystem.js",
     "src/core/Input.js",
+    "src/world/Zones.js",
     "src/world/Textures.js",
     "src/world/TerrainShape.js",
     "src/world/Terrain.js",

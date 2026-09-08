@@ -341,6 +341,48 @@ class Input {
   }
 }
 
+/* ===== src/world/Zones.js ===== */
+/**
+ * Zonas de pesca.
+ *
+ * Cada zona es un juego de parámetros: forma del lago, paleta, especies
+ * presentes y precio de acceso. El mundo entero se construye a partir de
+ * estos datos, así que añadir una zona nueva no toca ni el motor ni la UI.
+ */
+
+const ZONES = [
+  {
+    id: 'lago_niebla',
+    name: 'Lago de la Niebla',
+    description: 'Aguas mansas rodeadas de arboleda. El sitio donde se aprende.',
+    price: 0,
+    terrain: { seed: 20260908, lakeRadius: 118, maxDepth: 9.5, hillHeight: 26 },
+    species: ['perca_negra', 'trucha_arcoiris', 'carpa_comun', 'lucio', 'siluro', 'tenca'],
+    vegetation: { grass: 1, trees: 420, conifer: 0.38 },
+    palette: { grass: 0x53703a, water: 0x0d2630 },
+    weather: 'despejado',
+    startHour: 9.4
+  },
+  {
+    id: 'embalse_alto',
+    name: 'Embalse Alto',
+    description: 'Agua fría y honda entre coníferas. Menos peces, pero más grandes.',
+    price: 2500,
+    terrain: { seed: 771145, lakeRadius: 146, maxDepth: 16, hillHeight: 44 },
+    species: ['trucha_arcoiris', 'trucha_comun', 'lucio', 'lucioperca', 'siluro'],
+    vegetation: { grass: 0.7, trees: 520, conifer: 0.82 },
+    palette: { grass: 0x46613a, water: 0x0a2028 },
+    weather: 'nubes',
+    startHour: 7.2
+  }
+];
+
+const ZONES_BY_ID = Object.fromEntries(ZONES.map((z) => [z.id, z]));
+
+function zoneOf(id) {
+  return ZONES_BY_ID[id] || ZONES[0];
+}
+
 /* ===== src/world/Textures.js ===== */
 /**
  * Fábrica de texturas procedurales.
@@ -553,6 +595,34 @@ class TextureLibrary {
     }
     const tex = textureFrom(heightToNormal(height, size, 1.6), { repeat: 1, aniso: 8 });
     this.cache.set('waterNormals', tex);
+    return tex;
+  }
+
+  /**
+   * Profundidad del lago codificada en una textura (canal rojo, 0 en la
+   * orilla y 1 en lo más hondo). El shader del agua la usa para decidir
+   * cuánto se ve el fondo, sin necesidad de una segunda pasada de render.
+   */
+  depthMap(terrain, size = 512, cacheKey = 'depthMap') {
+    if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
+    const half = terrain.field.half;
+    const maxDepth = terrain.field.maxDepth;
+    const data = new Uint8Array(size * size * 4);
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        const x = -half + (i / (size - 1)) * half * 2;
+        const z = -half + (j / (size - 1)) * half * 2;
+        const d = clamp(terrain.depthAt(x, z) / maxDepth, 0, 1);
+        const k = (j * size + i) * 4;
+        data[k] = data[k + 1] = data[k + 2] = Math.round(d * 255);
+        data[k + 3] = 255;
+      }
+    }
+    const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.minFilter = tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    this.cache.set(cacheKey, tex);
     return tex;
   }
 
@@ -852,7 +922,7 @@ class Terrain {
 const RIPPLE_LIFETIME = 2.6;
 
 class WaterBody {
-  constructor(textures, { size = 620, reflectionSize = 512, sunDirection, level = 0 } = {}) {
+  constructor(textures, { size = 620, reflectionSize = 512, sunDirection, level = 0, terrain = null, zoneId = 'zona' } = {}) {
     this.level = level;
     this.ripples = [];
 
@@ -874,6 +944,7 @@ class WaterBody {
     // `size` escala las coordenadas de mundo dentro del mapa de normales: con
     // el valor por defecto (1) las olas son kilométricas y el lago se ve liso.
     this.water.material.uniforms.size.value = 28;
+    if (terrain) this._addDepthTransparency(textures, terrain, zoneId);
     this.water.name = 'agua';
 
     // Grupo de ondas: anillos que crecen y se desvanecen.
@@ -881,6 +952,56 @@ class WaterBody {
     this.rippleGroup.position.y = level + 0.02;
     this._rippleGeometry = new THREE.RingGeometry(0.06, 0.1, 24);
     this._rippleGeometry.rotateX(-Math.PI / 2);
+  }
+
+  /**
+   * Hace que el agua deje ver el fondo donde cubre poco.
+   *
+   * La transparencia se modula además con el Fresnel del propio shader: a
+   * rasante el lago sigue siendo un espejo (que es lo que se ve de verdad
+   * desde la orilla), y sólo mirando hacia abajo se transparenta el bajío.
+   */
+  _addDepthTransparency(textures, terrain, zoneId) {
+    const material = this.water.material;
+    material.uniforms.uDepthMap = { value: textures.depthMap(terrain, 512, `depthMap:${zoneId}`) };
+    material.uniforms.uWorldHalf = { value: terrain.field.half };
+    material.uniforms.uMaxDepth = { value: terrain.field.maxDepth };
+
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uDepthMap = material.uniforms.uDepthMap;
+      shader.uniforms.uWorldHalf = material.uniforms.uWorldHalf;
+      shader.uniforms.uMaxDepth = material.uniforms.uMaxDepth;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('void main() {', `
+          uniform sampler2D uDepthMap;
+          uniform float uWorldHalf;
+          uniform float uMaxDepth;
+          void main() {
+        `)
+        .replace(
+          'gl_FragColor = vec4( outgoingLight, alpha );',
+          `
+          vec2 depthUv = (worldPosition.xz + uWorldHalf) / (uWorldHalf * 2.0);
+          float lakeDepth = texture2D(uDepthMap, depthUv).r * uMaxDepth;
+
+          float body = smoothstep(0.05, 3.2, lakeDepth);
+          float seeThrough = mix(0.06, alpha, body);
+          // El Fresnel de este shader arranca en 0.3 incluso de frente, así que
+          // se eleva a una potencia: sólo la reflexión rasante —la que de verdad
+          // convierte el lago en espejo— vuelve opaca la lámina.
+          float finalAlpha = mix(seeThrough, alpha, pow(reflectance, 2.2));
+
+          // Franja clara justo en la orilla: la lámina fina moja la arena.
+          float wetLine = 1.0 - smoothstep(0.0, 0.35, lakeDepth);
+          vec3 tinted = mix(outgoingLight, outgoingLight + vec3(0.06, 0.07, 0.06), wetLine * 0.5);
+          tinted = mix(tinted, tinted * 0.82 + waterColor * 0.4, body * 0.7);
+
+          gl_FragColor = vec4( tinted, finalAlpha );
+          `
+        );
+    };
+    material.customProgramCacheKey = () => 'aguaProfundidad';
+    material.needsUpdate = true;
   }
 
   addTo(scene) {
@@ -1153,7 +1274,7 @@ function rockGeometry(rng, detail = 1) {
 }
 
 class Vegetation {
-  constructor(scene, terrain, textures, preset, { seed = 4321 } = {}) {
+  constructor(scene, terrain, textures, preset, { seed = 4321, density = 1 } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.group = new THREE.Group();
@@ -1166,6 +1287,7 @@ class Vegetation {
     };
     this.tiles = new Map();
     this.viewDistance = preset.viewDistance;
+    this.densityScale = density;
     this.rng = createRandom(seed);
 
     this._buildGrass(textures, preset);
@@ -1205,7 +1327,7 @@ class Vegetation {
   }
 
   _buildGrass(textures, preset) {
-    const density = preset.grassDensity;
+    const density = preset.grassDensity * this.densityScale;
     if (density <= 0) return;
     const spots = this._scatter(Math.floor(26000 * density), (x, z, h, slope) =>
       h > 0.15 && h < 16 && slope < 0.42);
@@ -1231,7 +1353,7 @@ class Vegetation {
 
   _buildReeds(preset) {
     // Juncos: sólo en el bajío, entre 5 cm y 1 m de profundidad.
-    const spots = this._scatter(Math.floor(7000 * Math.max(0.35, preset.grassDensity)),
+    const spots = this._scatter(Math.floor(7000 * Math.max(0.35, preset.grassDensity * this.densityScale)),
       (x, z, h) => h < -0.05 && h > -1.05);
 
     const material = new THREE.MeshStandardMaterial({
@@ -1250,7 +1372,7 @@ class Vegetation {
   }
 
   _buildBushes(preset) {
-    const spots = this._scatter(Math.floor(900 * Math.max(0.4, preset.grassDensity)),
+    const spots = this._scatter(Math.floor(900 * Math.max(0.4, preset.grassDensity * this.densityScale)),
       (x, z, h, slope) => h > 0.9 && h < 20 && slope < 0.5);
     const geometry = new THREE.IcosahedronGeometry(1, 1);
     const material = new THREE.MeshStandardMaterial({ color: 0x40592c, roughness: 0.95, flatShading: true });
@@ -1384,7 +1506,7 @@ function canopyCone(rng, { height = 6.2 } = {}) {
 }
 
 class Trees {
-  constructor(scene, terrain, textures, preset, { seed = 8080, count = 420 } = {}) {
+  constructor(scene, terrain, textures, preset, { seed = 8080, count = 420, conifer = 0.38 } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
@@ -1393,6 +1515,7 @@ class Trees {
     scene.add(this.group);
 
     this.nearDistance = Math.min(NEAR_DISTANCE, preset.viewDistance * 0.4);
+    this.coniferRatio = conifer;
     this.spots = this._scatter(count);
     this._lastRebuild = new THREE.Vector3(1e9, 0, 1e9);
     this._dummy = new THREE.Object3D();
@@ -1413,7 +1536,7 @@ class Trees {
       if (this.terrain.slopeAt(x, z) > 0.42) continue;
       spots.push({
         x, y: h, z,
-        conifer: this.rng() < 0.38,
+        conifer: this.rng() < this.coniferRatio,
         scale: 0.75 + this.rng() * 0.7,
         rotation: this.rng() * Math.PI * 2,
         tilt: (this.rng() - 0.5) * 0.1
@@ -2203,6 +2326,44 @@ const SPECIES = [
     strength: 1.0,
     fight: { runs: 3, jumpChance: 0.03, headshake: 0.6 },
     price: 11
+  },
+  {
+    id: 'trucha_comun',
+    name: 'Trucha común',
+    latin: 'Salmo trutta',
+    rarity: 'comun',
+    lengthRange: [26, 68],
+    weightPerLength: 0.0000142,
+    depth: [2.5, 9],
+    prefersCover: false,
+    activity: { madrugada: 1.35, manana: 1.15, tarde: 0.85, noche: 0.6 },
+    lures: { cucharilla: 1.5, ninfa: 1.55, vinilo: 1.1, cucharilla_pesada: 1.2, popper: 0.6, boilie: 0.35 },
+    color: 0x7a6a4a,
+    belly: 0.92,
+    speed: 4.4,
+    stamina: 1.4,
+    strength: 1.2,
+    fight: { runs: 4, jumpChance: 0.5, headshake: 1.1 },
+    price: 26
+  },
+  {
+    id: 'lucioperca',
+    name: 'Lucioperca',
+    latin: 'Sander lucioperca',
+    rarity: 'raro',
+    lengthRange: [38, 96],
+    weightPerLength: 0.0000112,
+    depth: [5, 14],
+    prefersCover: true,
+    activity: { madrugada: 1.5, manana: 0.8, tarde: 0.9, noche: 1.6 },
+    lures: { vinilo: 1.9, cucharilla_pesada: 1.5, cucharilla: 0.9, ninfa: 0.5, popper: 0.4, boilie: 0.3 },
+    color: 0x6b6440,
+    belly: 0.9,
+    speed: 4.0,
+    stamina: 1.5,
+    strength: 1.5,
+    fight: { runs: 5, jumpChance: 0.12, headshake: 1.5 },
+    price: 42
   }
 ];
 
@@ -2508,14 +2669,17 @@ class Fish {
  * SEARCHING; nunca se genera un pez "a medida" delante del jugador.
  */
 
-const MAX_VISIBLE_DISTANCE = 45;
+// Con el agua transparente en el bajío los peces se ven de verdad,
+// así que compensa dibujarlos más lejos.
+const MAX_VISIBLE_DISTANCE = 85;
 
 class FishManager {
-  constructor(scene, terrain, { population = 72, seed = 71 } = {}) {
+  constructor(scene, terrain, { population = 72, seed = 71, species = null } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
     this.fishes = [];
+    this.speciesPool = species ? SPECIES.filter((s) => species.includes(s.id)) : SPECIES;
     this.group = new THREE.Group();
     this.group.name = 'peces';
     scene.add(this.group);
@@ -2543,8 +2707,8 @@ class FishManager {
 
   _spawn() {
     // Las especies raras aparecen menos.
-    const pool = SPECIES.filter((s) => s.rarity !== 'raro' || this.rng() < 0.35);
-    const species = pool[Math.floor(this.rng() * pool.length)] || SPECIES[0];
+    const pool = this.speciesPool.filter((s) => s.rarity !== 'raro' || this.rng() < 0.35);
+    const species = pool[Math.floor(this.rng() * pool.length)] || this.speciesPool[0];
     const position = this._randomSpotFor(species);
     if (!position) return null;
 
@@ -2831,6 +2995,7 @@ class Economy {
       casts: 0, hooked: 0, landed: 0, lost: 0, lineBreaks: 0, totalWeight: 0, biggest: 0
     };
     this.unlockedZones = data?.unlockedZones ?? ['lago_niebla'];
+    this.currentZone = data?.currentZone ?? 'lago_niebla';
   }
 
   /** Registra una captura y devuelve lo que vale. */
@@ -2876,7 +3041,8 @@ class Economy {
       money: this.money,
       records: this.records,
       stats: this.stats,
-      unlockedZones: this.unlockedZones
+      unlockedZones: this.unlockedZones,
+      currentZone: this.currentZone
     };
   }
 }
@@ -4343,6 +4509,44 @@ class UI {
     this._overlay('Estadísticas', body);
   }
 
+  showZones(zones, economy, currentId) {
+    const body = el('div');
+    const render = () => {
+      body.innerHTML = '';
+      const money = el('div', 'sw-hint', `Monedas disponibles: <b style="color:var(--warn)">${economy.money}</b>`);
+      money.style.marginBottom = '12px';
+      body.appendChild(money);
+
+      zones.forEach((zone) => {
+        const unlocked = economy.unlockedZones.includes(zone.id);
+        const here = zone.id === currentId;
+        const row = el('div', `sw-item${here ? ' equipped' : ''}`);
+        row.innerHTML = `<div><div class="t">${zone.name}</div>
+          <div class="d">${zone.description}</div>
+          <div class="stats">${zone.species.length} especies · hasta ${zone.terrain.maxDepth} m de calado</div></div>`;
+        const act = el('div', 'act');
+        if (here) {
+          act.appendChild(el('span', 'sw-tag', 'Estás aquí'));
+        } else if (unlocked) {
+          const go = el('button', 'sw-btn', 'Viajar');
+          go.addEventListener('click', () => this.cb.onTravel?.(zone.id));
+          act.appendChild(go);
+        } else {
+          const buy = el('button', 'sw-btn', `${zone.price}`);
+          buy.disabled = !economy.canAfford(zone.price);
+          buy.addEventListener('click', () => {
+            if (this.cb.onUnlockZone?.(zone.id)) render();
+          });
+          act.appendChild(buy);
+        }
+        row.appendChild(act);
+        body.appendChild(row);
+      });
+    };
+    render();
+    this._overlay('Zonas de pesca', body);
+  }
+
   showSettings(settings) {
     const body = el('div');
     const quality = el('div', 'sw-field');
@@ -4405,6 +4609,8 @@ class UI {
       <b>Tab</b><span>Equipo</span>
       <b>B</b><span>Tienda</span>
       <b>C</b><span>Capturas</span>
+      <b>Z</b><span>Zonas de pesca</span>
+      <b>E</b><span>Subir o bajar de la barca</span>
       <b>G</b><span>Estadísticas</span>
       <b>F</b><span>Cambiar cámara</span>
       <b>Esc</b><span>Pausa</span>`;
@@ -4656,25 +4862,88 @@ class Game {
   _initWorld() {
     this.textures = new TextureLibrary();
     this.time = new TimeOfDay({ hour: 9.4 });
+    this.sky = new SkyDome(this.scene, this.textures, this.preset);
+    this.weather = new Weather(this.scene, this.textures, this.preset);
+    this._buildZone(zoneOf('lago_niebla'));
+  }
 
-    this.terrain = new Terrain(this.textures, { resolution: 300 });
+  /**
+   * Construye (o reconstruye) el mundo de una zona.
+   *
+   * Cielo, clima, jugador, dinero y equipo sobreviven al cambio: sólo se
+   * rehace la geografía. Es lo que permite añadir mapas sin tocar el motor.
+   */
+  _buildZone(zone) {
+    this.zone = zone;
+    this._disposeZone();
+
+    this.terrain = new Terrain(this.textures, { resolution: 300, ...zone.terrain });
     this.scene.add(this.terrain.mesh);
 
     this.water = new WaterBody(this.textures, {
       reflectionSize: this.preset.waterReflection,
-      sunDirection: this.time.sunDirection
+      sunDirection: this.time.sunDirection,
+      terrain: this.terrain,
+      zoneId: zone.id
     });
     this.water.addTo(this.scene);
 
-    this.sky = new SkyDome(this.scene, this.textures, this.preset);
-    this.weather = new Weather(this.scene, this.textures, this.preset);
-    this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset);
-    this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset);
+    this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset, {
+      seed: zone.terrain.seed + 1, density: zone.vegetation.grass
+    });
+    this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset, {
+      seed: zone.terrain.seed + 2, count: zone.vegetation.trees, conifer: zone.vegetation.conifer
+    });
     this.props = new Props(this.scene, this.terrain, this.textures, this.preset);
     this.boat = new Boat(this.scene, this.terrain, this.textures, this.preset, {
-      position: this.props.boatAnchor,
-      heading: Math.PI * 0.62
+      position: this.props.boatAnchor, heading: Math.PI * 0.62
     });
+    this.fishManager = new FishManager(this.scene, this.terrain, {
+      seed: zone.terrain.seed + 3, species: zone.species
+    });
+  }
+
+  _disposeZone() {
+    if (!this.terrain) return;
+    this.fishManager?.dispose();
+    this.boat?.dispose();
+    this.props?.dispose();
+    this.trees?.dispose();
+    this.vegetation?.dispose();
+    if (this.water) {
+      this.scene.remove(this.water.water);
+      this.scene.remove(this.water.rippleGroup);
+      this.water.dispose();
+    }
+    this.scene.remove(this.terrain.mesh);
+    this.terrain.dispose();
+  }
+
+  /** Viaja a otra zona: rehace el mundo y recoloca al jugador en su muelle. */
+  travelTo(zoneId) {
+    const zone = zoneOf(zoneId);
+    if (zone.id === this.zone?.id) return;
+    this.fishing.reelIn();
+    if (this.player.platform) { this.boat.leave(); this.player.setPlatform(null); }
+
+    this._buildZone(zone);
+
+    // Los sistemas que guardaban referencias al mundo anterior se reenganchan.
+    this.player.terrain = this.terrain;
+    this.player.walkables = [this.props.group];
+    this.fishing.terrain = this.terrain;
+    this.fishing.water = this.water;
+    this.fishing.fishManager = this.fishManager;
+
+    this.scene.updateMatrixWorld(true);
+    const spot = this.props.fishingSpots[0];
+    this.player.teleport(spot.position.clone());
+    this.player.yaw = Math.atan2(spot.position.x, spot.position.z);
+    this.time.setHour(zone.startHour);
+    this.weather.setWeather(zone.weather);
+    this.economy.currentZone = zone.id;
+    this._persist();
+    this.fishing._say(`Has llegado a ${zone.name}`);
   }
 
   _initPlayer() {
@@ -4687,7 +4956,6 @@ class Game {
     this.scene.add(this.player.rig);
     // Mirando al centro del lago.
     this.player.yaw = Math.atan2(-spawn.x, -spawn.z) + Math.PI;
-    this.fishManager = new FishManager(this.scene, this.terrain);
   }
 
   _initProgress() {
@@ -4730,6 +4998,17 @@ class Game {
         }
       },
       onSetting: (key, value) => this._applySetting(key, value),
+      onUnlockZone: (zoneId) => {
+        const zone = zoneOf(zoneId);
+        if (this.economy.unlockedZones.includes(zoneId)) return true;
+        if (!this.economy.canAfford(zone.price)) return false;
+        this.economy.money -= zone.price;
+        this.economy.unlockedZones.push(zoneId);
+        this.audio.coin();
+        this._persist();
+        return true;
+      },
+      onTravel: (zoneId) => { this.ui.closePanel(); this.travelTo(zoneId); },
       onPanelOpen: () => { this.input.releaseLock(); this.ui.setCrosshairVisible(false); },
       onPanelClose: () => { this.ui.setCrosshairVisible(true); }
     });
@@ -4766,6 +5045,7 @@ class Game {
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE': if (!this.ui.isPanelOpen) this._toggleBoat(); break;
+        case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
           this.fishing.rod.setVisible(this.player.mode === 'first');
@@ -4865,7 +5145,7 @@ class Game {
       inventory: this.inventory.toJSON(),
       equipment: this.equipment.toJSON(),
       economy: this.economy.toJSON(),
-      world: { hour: this.time.hour, weather: this.weather.current }
+      world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id }
     });
   }
 
@@ -4878,6 +5158,10 @@ class Game {
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
+    if (data.world?.zone && data.world.zone !== this.zone?.id &&
+        this.economy.unlockedZones.includes(data.world.zone)) {
+      this.travelTo(data.world.zone);
+    }
     this.audio.setVolume(this.settings.masterVolume);
   }
 

@@ -42,6 +42,7 @@ Requiere un navegador con **WebGL 2** (Chrome o Firefox actualizados).
 | `W`/`S` y `A`/`D` (en la barca) | Bogar y virar |
 | Rueda | Ajustar el freno |
 | `E` | Subir o bajar de la barca |
+| `Z` | Zonas de pesca (comprar acceso y viajar) |
 | `R` | Recoger el sedal |
 | `Tab` / `B` / `C` / `G` | Equipo / Tienda / Capturas / Estadísticas |
 | `F` | Cambiar cámara (primera ↔ tercera persona) |
@@ -90,7 +91,7 @@ ejecuta tal cual desde un servidor estático, y `build.py` genera el archivo
 ```
 src/
   core/       MathUtils, GeometryUtils, Settings, SaveSystem, Input, Game
-  world/      Textures, TerrainShape, Terrain, WaterBody, SkyDome,
+  world/      Zones, Textures, TerrainShape, Terrain, WaterBody, SkyDome,
               Vegetation, Trees, Props, Boat
   weather/    TimeOfDay, Weather
   player/     Player
@@ -126,6 +127,33 @@ osciladores con envolvente.
 Para sustituirlos por texturas reales basta con cambiar `TextureLibrary.material()`
 por un cargador; el resto del juego sólo pide materiales por nombre.
 
+## Zonas
+
+Una zona es un juego de parámetros en `Zones.js`: forma del lago, paleta,
+especies presentes, densidad de vegetación y precio de acceso. `Game.travelTo()`
+rehace la geografía —terreno, agua, vegetación, arbolado, construcciones,
+barca y población— y conserva jugador, dinero, equipo y registro de capturas.
+
+| Zona | Precio | Calado | Especies |
+|---|---|---|---|
+| Lago de la Niebla | gratis | 9,5 m | perca negra, trucha arcoíris, carpa, lucio, siluro, tenca |
+| Embalse Alto | 2 500 | 16 m | trucha arcoíris, trucha común, lucio, lucioperca, siluro |
+
+Añadir una tercera no toca ni el motor ni la interfaz: basta una entrada más en
+`ZONES` (y, si se quiere, especies nuevas en `FishData`).
+
+## El agua
+
+Reflejo planar real mediante cámara espejo, y **transparencia según la
+profundidad**: un mapa del calado del lago, horneado del propio campo de
+alturas, decide cuánto se ve el fondo. No hace falta una segunda pasada de
+render.
+
+La transparencia se modula además con el Fresnel del shader, elevado a una
+potencia: a rasante el lago sigue siendo un espejo —que es lo que se ve desde
+la orilla— y sólo mirando hacia abajo se transparenta el bajío. Junto al borde
+hay una franja clara donde la lámina fina moja la arena.
+
 ## La barca
 
 Fondeada en la orilla oeste. Con `E` se sube y con `W`/`S` se boga; `A`/`D`
@@ -152,9 +180,10 @@ de 6 m de calado.
 
 ## Qué falta
 
-- Un segundo mapa (la arquitectura lo admite: otra semilla y otros props).
-- Refracción del agua: hoy hay reflejo planar real, pero no segunda pasada.
+- Refracción con desplazamiento real (hoy hay transparencia por profundidad,
+  que resuelve la lectura pero no dobla la imagen del fondo).
 - Cascadas de sombra, para que el arbolado lejano proyecte bien.
+- Más zonas: hay dos, y el sistema admite las que se quieran.
 - Peces visibles sólo a menos de 45 m.
 - Hierba, juncos y arbustos siguen siendo planos cruzados y volúmenes simples;
   el arbolado ya no.

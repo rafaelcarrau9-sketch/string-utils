@@ -76,7 +76,7 @@ function canopyCone(rng, { height = 6.2 } = {}) {
 }
 
 export class Trees {
-  constructor(scene, terrain, textures, preset, { seed = 8080, count = 420 } = {}) {
+  constructor(scene, terrain, textures, preset, { seed = 8080, count = 420, conifer = 0.38 } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
@@ -85,6 +85,7 @@ export class Trees {
     scene.add(this.group);
 
     this.nearDistance = Math.min(NEAR_DISTANCE, preset.viewDistance * 0.4);
+    this.coniferRatio = conifer;
     this.spots = this._scatter(count);
     this._lastRebuild = new THREE.Vector3(1e9, 0, 1e9);
     this._dummy = new THREE.Object3D();
@@ -105,7 +106,7 @@ export class Trees {
       if (this.terrain.slopeAt(x, z) > 0.42) continue;
       spots.push({
         x, y: h, z,
-        conifer: this.rng() < 0.38,
+        conifer: this.rng() < this.coniferRatio,
         scale: 0.75 + this.rng() * 0.7,
         rotation: this.rng() * Math.PI * 2,
         tilt: (this.rng() - 0.5) * 0.1

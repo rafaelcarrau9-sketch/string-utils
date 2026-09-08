@@ -60,7 +60,7 @@ function rockGeometry(rng, detail = 1) {
 }
 
 export class Vegetation {
-  constructor(scene, terrain, textures, preset, { seed = 4321 } = {}) {
+  constructor(scene, terrain, textures, preset, { seed = 4321, density = 1 } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.group = new THREE.Group();
@@ -73,6 +73,7 @@ export class Vegetation {
     };
     this.tiles = new Map();
     this.viewDistance = preset.viewDistance;
+    this.densityScale = density;
     this.rng = createRandom(seed);
 
     this._buildGrass(textures, preset);
@@ -112,7 +113,7 @@ export class Vegetation {
   }
 
   _buildGrass(textures, preset) {
-    const density = preset.grassDensity;
+    const density = preset.grassDensity * this.densityScale;
     if (density <= 0) return;
     const spots = this._scatter(Math.floor(26000 * density), (x, z, h, slope) =>
       h > 0.15 && h < 16 && slope < 0.42);
@@ -138,7 +139,7 @@ export class Vegetation {
 
   _buildReeds(preset) {
     // Juncos: sólo en el bajío, entre 5 cm y 1 m de profundidad.
-    const spots = this._scatter(Math.floor(7000 * Math.max(0.35, preset.grassDensity)),
+    const spots = this._scatter(Math.floor(7000 * Math.max(0.35, preset.grassDensity * this.densityScale)),
       (x, z, h) => h < -0.05 && h > -1.05);
 
     const material = new THREE.MeshStandardMaterial({
@@ -157,7 +158,7 @@ export class Vegetation {
   }
 
   _buildBushes(preset) {
-    const spots = this._scatter(Math.floor(900 * Math.max(0.4, preset.grassDensity)),
+    const spots = this._scatter(Math.floor(900 * Math.max(0.4, preset.grassDensity * this.densityScale)),
       (x, z, h, slope) => h > 0.9 && h < 20 && slope < 0.5);
     const geometry = new THREE.IcosahedronGeometry(1, 1);
     const material = new THREE.MeshStandardMaterial({ color: 0x40592c, roughness: 0.95, flatShading: true });

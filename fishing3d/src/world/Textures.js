@@ -215,6 +215,34 @@ export class TextureLibrary {
     return tex;
   }
 
+  /**
+   * Profundidad del lago codificada en una textura (canal rojo, 0 en la
+   * orilla y 1 en lo más hondo). El shader del agua la usa para decidir
+   * cuánto se ve el fondo, sin necesidad de una segunda pasada de render.
+   */
+  depthMap(terrain, size = 512, cacheKey = 'depthMap') {
+    if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
+    const half = terrain.field.half;
+    const maxDepth = terrain.field.maxDepth;
+    const data = new Uint8Array(size * size * 4);
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        const x = -half + (i / (size - 1)) * half * 2;
+        const z = -half + (j / (size - 1)) * half * 2;
+        const d = clamp(terrain.depthAt(x, z) / maxDepth, 0, 1);
+        const k = (j * size + i) * 4;
+        data[k] = data[k + 1] = data[k + 2] = Math.round(d * 255);
+        data[k + 3] = 255;
+      }
+    }
+    const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.minFilter = tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    this.cache.set(cacheKey, tex);
+    return tex;
+  }
+
   /** Sprite de mata de hierba con alfa, para la vegetación instanciada. */
   grassBlade(size = 128) {
     if (this.cache.has('grassBlade')) return this.cache.get('grassBlade');

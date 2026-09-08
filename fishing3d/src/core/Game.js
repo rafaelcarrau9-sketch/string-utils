@@ -12,6 +12,7 @@ import { SkyDome } from '../world/SkyDome.js';
 import { Vegetation } from '../world/Vegetation.js';
 import { Trees } from '../world/Trees.js';
 import { Boat } from '../world/Boat.js';
+import { ZONES, zoneOf } from '../world/Zones.js';
 import { Props } from '../world/Props.js';
 
 import { TimeOfDay } from '../weather/TimeOfDay.js';
@@ -84,25 +85,88 @@ export class Game {
   _initWorld() {
     this.textures = new TextureLibrary();
     this.time = new TimeOfDay({ hour: 9.4 });
+    this.sky = new SkyDome(this.scene, this.textures, this.preset);
+    this.weather = new Weather(this.scene, this.textures, this.preset);
+    this._buildZone(zoneOf('lago_niebla'));
+  }
 
-    this.terrain = new Terrain(this.textures, { resolution: 300 });
+  /**
+   * Construye (o reconstruye) el mundo de una zona.
+   *
+   * Cielo, clima, jugador, dinero y equipo sobreviven al cambio: sólo se
+   * rehace la geografía. Es lo que permite añadir mapas sin tocar el motor.
+   */
+  _buildZone(zone) {
+    this.zone = zone;
+    this._disposeZone();
+
+    this.terrain = new Terrain(this.textures, { resolution: 300, ...zone.terrain });
     this.scene.add(this.terrain.mesh);
 
     this.water = new WaterBody(this.textures, {
       reflectionSize: this.preset.waterReflection,
-      sunDirection: this.time.sunDirection
+      sunDirection: this.time.sunDirection,
+      terrain: this.terrain,
+      zoneId: zone.id
     });
     this.water.addTo(this.scene);
 
-    this.sky = new SkyDome(this.scene, this.textures, this.preset);
-    this.weather = new Weather(this.scene, this.textures, this.preset);
-    this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset);
-    this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset);
+    this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset, {
+      seed: zone.terrain.seed + 1, density: zone.vegetation.grass
+    });
+    this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset, {
+      seed: zone.terrain.seed + 2, count: zone.vegetation.trees, conifer: zone.vegetation.conifer
+    });
     this.props = new Props(this.scene, this.terrain, this.textures, this.preset);
     this.boat = new Boat(this.scene, this.terrain, this.textures, this.preset, {
-      position: this.props.boatAnchor,
-      heading: Math.PI * 0.62
+      position: this.props.boatAnchor, heading: Math.PI * 0.62
     });
+    this.fishManager = new FishManager(this.scene, this.terrain, {
+      seed: zone.terrain.seed + 3, species: zone.species
+    });
+  }
+
+  _disposeZone() {
+    if (!this.terrain) return;
+    this.fishManager?.dispose();
+    this.boat?.dispose();
+    this.props?.dispose();
+    this.trees?.dispose();
+    this.vegetation?.dispose();
+    if (this.water) {
+      this.scene.remove(this.water.water);
+      this.scene.remove(this.water.rippleGroup);
+      this.water.dispose();
+    }
+    this.scene.remove(this.terrain.mesh);
+    this.terrain.dispose();
+  }
+
+  /** Viaja a otra zona: rehace el mundo y recoloca al jugador en su muelle. */
+  travelTo(zoneId) {
+    const zone = zoneOf(zoneId);
+    if (zone.id === this.zone?.id) return;
+    this.fishing.reelIn();
+    if (this.player.platform) { this.boat.leave(); this.player.setPlatform(null); }
+
+    this._buildZone(zone);
+
+    // Los sistemas que guardaban referencias al mundo anterior se reenganchan.
+    this.player.terrain = this.terrain;
+    this.player.walkables = [this.props.group];
+    this.fishing.terrain = this.terrain;
+    this.fishing.water = this.water;
+    this.fishing.fishManager = this.fishManager;
+
+    this.scene.updateMatrixWorld(true);
+    const spot = this.props.fishingSpots[0];
+    this.player.teleport(spot.position.clone());
+    this.player.yaw = Math.atan2(spot.position.x, spot.position.z);
+    this.time.setHour(zone.startHour);
+    this.weather.setWeather(zone.weather);
+    this.economy.currentZone = zone.id;
+    this._persist();
+    this.fishing._say(`Has llegado a ${zone.name}`);
   }
 
   _initPlayer() {
@@ -115,7 +179,6 @@ export class Game {
     this.scene.add(this.player.rig);
     // Mirando al centro del lago.
     this.player.yaw = Math.atan2(-spawn.x, -spawn.z) + Math.PI;
-    this.fishManager = new FishManager(this.scene, this.terrain);
   }
 
   _initProgress() {
@@ -158,6 +221,17 @@ export class Game {
         }
       },
       onSetting: (key, value) => this._applySetting(key, value),
+      onUnlockZone: (zoneId) => {
+        const zone = zoneOf(zoneId);
+        if (this.economy.unlockedZones.includes(zoneId)) return true;
+        if (!this.economy.canAfford(zone.price)) return false;
+        this.economy.money -= zone.price;
+        this.economy.unlockedZones.push(zoneId);
+        this.audio.coin();
+        this._persist();
+        return true;
+      },
+      onTravel: (zoneId) => { this.ui.closePanel(); this.travelTo(zoneId); },
       onPanelOpen: () => { this.input.releaseLock(); this.ui.setCrosshairVisible(false); },
       onPanelClose: () => { this.ui.setCrosshairVisible(true); }
     });
@@ -194,6 +268,7 @@ export class Game {
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE': if (!this.ui.isPanelOpen) this._toggleBoat(); break;
+        case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
           this.fishing.rod.setVisible(this.player.mode === 'first');
@@ -293,7 +368,7 @@ export class Game {
       inventory: this.inventory.toJSON(),
       equipment: this.equipment.toJSON(),
       economy: this.economy.toJSON(),
-      world: { hour: this.time.hour, weather: this.weather.current }
+      world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id }
     });
   }
 
@@ -306,6 +381,10 @@ export class Game {
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
+    if (data.world?.zone && data.world.zone !== this.zone?.id &&
+        this.economy.unlockedZones.includes(data.world.zone)) {
+      this.travelTo(data.world.zone);
+    }
     this.audio.setVolume(this.settings.masterVolume);
   }
 

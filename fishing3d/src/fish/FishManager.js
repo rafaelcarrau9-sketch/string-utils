@@ -12,14 +12,17 @@ import { createRandom, clamp } from '../core/MathUtils.js';
  * SEARCHING; nunca se genera un pez "a medida" delante del jugador.
  */
 
-const MAX_VISIBLE_DISTANCE = 45;
+// Con el agua transparente en el bajío los peces se ven de verdad,
+// así que compensa dibujarlos más lejos.
+const MAX_VISIBLE_DISTANCE = 85;
 
 export class FishManager {
-  constructor(scene, terrain, { population = 72, seed = 71 } = {}) {
+  constructor(scene, terrain, { population = 72, seed = 71, species = null } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
     this.fishes = [];
+    this.speciesPool = species ? SPECIES.filter((s) => species.includes(s.id)) : SPECIES;
     this.group = new THREE.Group();
     this.group.name = 'peces';
     scene.add(this.group);
@@ -47,8 +50,8 @@ export class FishManager {
 
   _spawn() {
     // Las especies raras aparecen menos.
-    const pool = SPECIES.filter((s) => s.rarity !== 'raro' || this.rng() < 0.35);
-    const species = pool[Math.floor(this.rng() * pool.length)] || SPECIES[0];
+    const pool = this.speciesPool.filter((s) => s.rarity !== 'raro' || this.rng() < 0.35);
+    const species = pool[Math.floor(this.rng() * pool.length)] || this.speciesPool[0];
     const position = this._randomSpotFor(species);
     if (!position) return null;
 

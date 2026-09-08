@@ -15,6 +15,7 @@ export class Economy {
       casts: 0, hooked: 0, landed: 0, lost: 0, lineBreaks: 0, totalWeight: 0, biggest: 0
     };
     this.unlockedZones = data?.unlockedZones ?? ['lago_niebla'];
+    this.currentZone = data?.currentZone ?? 'lago_niebla';
   }
 
   /** Registra una captura y devuelve lo que vale. */
@@ -60,7 +61,8 @@ export class Economy {
       money: this.money,
       records: this.records,
       stats: this.stats,
-      unlockedZones: this.unlockedZones
+      unlockedZones: this.unlockedZones,
+      currentZone: this.currentZone
     };
   }
 }

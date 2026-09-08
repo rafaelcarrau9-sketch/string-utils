@@ -17,7 +17,7 @@ import { clamp } from '../core/MathUtils.js';
 const RIPPLE_LIFETIME = 2.6;
 
 export class WaterBody {
-  constructor(textures, { size = 620, reflectionSize = 512, sunDirection, level = 0 } = {}) {
+  constructor(textures, { size = 620, reflectionSize = 512, sunDirection, level = 0, terrain = null, zoneId = 'zona' } = {}) {
     this.level = level;
     this.ripples = [];
 
@@ -39,6 +39,7 @@ export class WaterBody {
     // `size` escala las coordenadas de mundo dentro del mapa de normales: con
     // el valor por defecto (1) las olas son kilométricas y el lago se ve liso.
     this.water.material.uniforms.size.value = 28;
+    if (terrain) this._addDepthTransparency(textures, terrain, zoneId);
     this.water.name = 'agua';
 
     // Grupo de ondas: anillos que crecen y se desvanecen.
@@ -46,6 +47,56 @@ export class WaterBody {
     this.rippleGroup.position.y = level + 0.02;
     this._rippleGeometry = new THREE.RingGeometry(0.06, 0.1, 24);
     this._rippleGeometry.rotateX(-Math.PI / 2);
+  }
+
+  /**
+   * Hace que el agua deje ver el fondo donde cubre poco.
+   *
+   * La transparencia se modula además con el Fresnel del propio shader: a
+   * rasante el lago sigue siendo un espejo (que es lo que se ve de verdad
+   * desde la orilla), y sólo mirando hacia abajo se transparenta el bajío.
+   */
+  _addDepthTransparency(textures, terrain, zoneId) {
+    const material = this.water.material;
+    material.uniforms.uDepthMap = { value: textures.depthMap(terrain, 512, `depthMap:${zoneId}`) };
+    material.uniforms.uWorldHalf = { value: terrain.field.half };
+    material.uniforms.uMaxDepth = { value: terrain.field.maxDepth };
+
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uDepthMap = material.uniforms.uDepthMap;
+      shader.uniforms.uWorldHalf = material.uniforms.uWorldHalf;
+      shader.uniforms.uMaxDepth = material.uniforms.uMaxDepth;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('void main() {', `
+          uniform sampler2D uDepthMap;
+          uniform float uWorldHalf;
+          uniform float uMaxDepth;
+          void main() {
+        `)
+        .replace(
+          'gl_FragColor = vec4( outgoingLight, alpha );',
+          `
+          vec2 depthUv = (worldPosition.xz + uWorldHalf) / (uWorldHalf * 2.0);
+          float lakeDepth = texture2D(uDepthMap, depthUv).r * uMaxDepth;
+
+          float body = smoothstep(0.05, 3.2, lakeDepth);
+          float seeThrough = mix(0.06, alpha, body);
+          // El Fresnel de este shader arranca en 0.3 incluso de frente, así que
+          // se eleva a una potencia: sólo la reflexión rasante —la que de verdad
+          // convierte el lago en espejo— vuelve opaca la lámina.
+          float finalAlpha = mix(seeThrough, alpha, pow(reflectance, 2.2));
+
+          // Franja clara justo en la orilla: la lámina fina moja la arena.
+          float wetLine = 1.0 - smoothstep(0.0, 0.35, lakeDepth);
+          vec3 tinted = mix(outgoingLight, outgoingLight + vec3(0.06, 0.07, 0.06), wetLine * 0.5);
+          tinted = mix(tinted, tinted * 0.82 + waterColor * 0.4, body * 0.7);
+
+          gl_FragColor = vec4( tinted, finalAlpha );
+          `
+        );
+    };
+    material.customProgramCacheKey = () => 'aguaProfundidad';
+    material.needsUpdate = true;
   }
 
   addTo(scene) {

@@ -125,6 +125,44 @@ export const SPECIES = [
     strength: 1.0,
     fight: { runs: 3, jumpChance: 0.03, headshake: 0.6 },
     price: 11
+  },
+  {
+    id: 'trucha_comun',
+    name: 'Trucha común',
+    latin: 'Salmo trutta',
+    rarity: 'comun',
+    lengthRange: [26, 68],
+    weightPerLength: 0.0000142,
+    depth: [2.5, 9],
+    prefersCover: false,
+    activity: { madrugada: 1.35, manana: 1.15, tarde: 0.85, noche: 0.6 },
+    lures: { cucharilla: 1.5, ninfa: 1.55, vinilo: 1.1, cucharilla_pesada: 1.2, popper: 0.6, boilie: 0.35 },
+    color: 0x7a6a4a,
+    belly: 0.92,
+    speed: 4.4,
+    stamina: 1.4,
+    strength: 1.2,
+    fight: { runs: 4, jumpChance: 0.5, headshake: 1.1 },
+    price: 26
+  },
+  {
+    id: 'lucioperca',
+    name: 'Lucioperca',
+    latin: 'Sander lucioperca',
+    rarity: 'raro',
+    lengthRange: [38, 96],
+    weightPerLength: 0.0000112,
+    depth: [5, 14],
+    prefersCover: true,
+    activity: { madrugada: 1.5, manana: 0.8, tarde: 0.9, noche: 1.6 },
+    lures: { vinilo: 1.9, cucharilla_pesada: 1.5, cucharilla: 0.9, ninfa: 0.5, popper: 0.4, boilie: 0.3 },
+    color: 0x6b6440,
+    belly: 0.9,
+    speed: 4.0,
+    stamina: 1.5,
+    strength: 1.5,
+    fight: { runs: 5, jumpChance: 0.12, headshake: 1.5 },
+    price: 42
   }
 ];
 
