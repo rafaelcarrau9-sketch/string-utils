@@ -1,0 +1,4641 @@
+<meta charset="utf-8">
+<title>Still Waters</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05080b; overflow: hidden; }
+
+    html, body { margin: 0; height: 100%; background: #05080b; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #loading { position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px; background: #070c10;
+      color: #dbe6ec; font-family: system-ui, sans-serif; z-index: 100;
+      transition: opacity .6s ease; }
+    #loading.done { opacity: 0; pointer-events: none; }
+    #loading h1 { font-size: 26px; font-weight: 600; letter-spacing: .04em; margin: 0; }
+    #loading p { color: #8ea0ac; font-size: 14px; margin: 0; text-align: center; max-width: 420px; }
+    .spinner { width: 26px; height: 26px; border: 2px solid #223039;
+      border-top-color: #6fd3c7; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  
+</style>
+
+<canvas id="viewport"></canvas>
+<div id="loading">
+  <div class="spinner"></div>
+  <h1>Still Waters</h1>
+  <p id="loading-text">Cargando el lago…</p>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { Water } from 'three/addons/objects/Water.js';
+import { Sky } from 'three/addons/objects/Sky.js';
+
+/* ===== src/core/MathUtils.js ===== */
+/** Utilidades numéricas compartidas. Sin dependencias de three. */
+
+const clamp = (v, min, max) => (v < min ? min : v > max ? max : v);
+
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const smoothstep = (edge0, edge1, x) => {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+/** Interpolación exponencial independiente del framerate. */
+const damp = (current, target, lambda, dt) =>
+  lerp(current, target, 1 - Math.exp(-lambda * dt));
+
+const randRange = (rng, min, max) => min + rng() * (max - min);
+
+/** Distribución sesgada hacia el extremo bajo: los ejemplares grandes son raros. */
+function skewedRandom(rng, min, max, bias = 2.2) {
+  return min + (max - min) * Math.pow(rng(), bias);
+}
+
+/** Mulberry32: PRNG determinista y rápido, para mundos reproducibles. */
+function createRandom(seed = 1) {
+  let a = seed >>> 0;
+  return function random() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Ruido de valor 2D con interpolación suave. Base de todo el terreno. */
+function makeValueNoise2D(seed = 1) {
+  const perm = new Uint8Array(512);
+  const rng = createRandom(seed);
+  for (let i = 0; i < 256; i++) perm[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [perm[i], perm[j]] = [perm[j], perm[i]];
+  }
+  for (let i = 0; i < 256; i++) perm[i + 256] = perm[i];
+
+  const hash = (x, y) => perm[(perm[x & 255] + y) & 255] / 255;
+
+  return function noise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf);
+    const v = yf * yf * (3 - 2 * yf);
+    const a = hash(xi, yi), b = hash(xi + 1, yi);
+    const c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+    return lerp(lerp(a, b, u), lerp(c, d, u), v);
+  };
+}
+
+/** Suma de octavas. amplitude/frequency por octava con lacunaridad 2. */
+function fbm(noise, x, y, octaves = 4, persistence = 0.5) {
+  let total = 0, amplitude = 1, frequency = 1, max = 0;
+  for (let i = 0; i < octaves; i++) {
+    total += noise(x * frequency, y * frequency) * amplitude;
+    max += amplitude;
+    amplitude *= persistence;
+    frequency *= 2;
+  }
+  return total / max;
+}
+
+/* ===== src/core/GeometryUtils.js ===== */
+/** Fusiona geometrías indexadas con los mismos atributos (position/normal/uv). */
+function mergeGeometries(geometries) {
+  const result = new THREE.BufferGeometry();
+  const names = ['position', 'normal', 'uv'];
+  const total = geometries.reduce((n, g) => n + g.attributes.position.count, 0);
+  const buffers = {};
+  names.forEach((name) => {
+    const size = geometries[0].attributes[name].itemSize;
+    buffers[name] = { array: new Float32Array(total * size), size, offset: 0 };
+  });
+
+  const indices = [];
+  let vertexOffset = 0;
+  for (const g of geometries) {
+    const indexed = g.index ? g : g.toNonIndexed();
+    const src = indexed.index ? indexed : indexed;
+    names.forEach((name) => {
+      const data = src.attributes[name].array;
+      buffers[name].array.set(data, buffers[name].offset);
+      buffers[name].offset += data.length;
+    });
+    if (src.index) {
+      const idx = src.index.array;
+      for (let i = 0; i < idx.length; i++) indices.push(idx[i] + vertexOffset);
+    } else {
+      const count = src.attributes.position.count;
+      for (let i = 0; i < count; i++) indices.push(i + vertexOffset);
+    }
+    vertexOffset += src.attributes.position.count;
+  }
+
+  names.forEach((name) => {
+    result.setAttribute(name, new THREE.BufferAttribute(buffers[name].array, buffers[name].size));
+  });
+  result.setIndex(indices);
+  return result;
+}
+
+/** Dos planos cruzados en X, con el pivote en la base. Para hierba y follaje. */
+function crossPlanes(width, height) {
+  const a = new THREE.PlaneGeometry(width, height, 1, 2);
+  a.translate(0, height / 2, 0);
+  const b = a.clone();
+  b.rotateY(Math.PI / 2);
+  const merged = mergeGeometries([a, b]);
+  a.dispose();
+  b.dispose();
+  return merged;
+}
+
+/* ===== src/core/Settings.js ===== */
+/**
+ * Calidad gráfica. Cada preset se traduce en decisiones concretas que los
+ * sistemas leen al construirse (resolución de sombras, densidad de hierba,
+ * tamaño del render target del reflejo del agua...).
+ */
+
+const QUALITY_PRESETS = {
+  bajo: {
+    label: 'Bajo',
+    pixelRatio: 0.75,
+    shadows: false,
+    shadowMapSize: 1024,
+    waterReflection: 256,
+    grassDensity: 0.25,
+    viewDistance: 220,
+    rainParticles: 1500,
+    antialias: false
+  },
+  medio: {
+    label: 'Medio',
+    pixelRatio: 1,
+    shadows: true,
+    shadowMapSize: 2048,
+    waterReflection: 512,
+    grassDensity: 0.6,
+    viewDistance: 320,
+    rainParticles: 4000,
+    antialias: true
+  },
+  alto: {
+    label: 'Alto',
+    pixelRatio: 1,
+    shadows: true,
+    shadowMapSize: 4096,
+    waterReflection: 1024,
+    grassDensity: 1,
+    viewDistance: 450,
+    rainParticles: 9000,
+    antialias: true
+  }
+};
+
+const DEFAULT_SETTINGS = {
+  quality: 'medio',
+  fov: 70,
+  sensitivity: 1,
+  invertY: false,
+  masterVolume: 0.8,
+  showFps: false
+};
+
+function presetFor(settings) {
+  return QUALITY_PRESETS[settings.quality] || QUALITY_PRESETS.medio;
+}
+
+/* ===== src/core/SaveSystem.js ===== */
+/**
+ * Persistencia en localStorage. Tolerante a partidas de versiones anteriores:
+ * lo que ya no existe en los catálogos se descarta al cargar en vez de romper.
+ */
+
+const KEY = 'stillwaters.save.v1';
+const VERSION = 1;
+
+class SaveSystem {
+  constructor(storage = globalThis.localStorage) {
+    this.storage = storage;
+  }
+
+  save(payload) {
+    try {
+      this.storage.setItem(KEY, JSON.stringify({ version: VERSION, ...payload }));
+      return true;
+    } catch (err) {
+      console.warn('[save] no se pudo guardar:', err.message);
+      return false;
+    }
+  }
+
+  load() {
+    try {
+      const raw = this.storage.getItem(KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || data.version !== VERSION) return null;
+      return data;
+    } catch (err) {
+      console.warn('[save] partida ilegible, se empieza de cero:', err.message);
+      return null;
+    }
+  }
+
+  clear() {
+    try { this.storage.removeItem(KEY); } catch { /* almacenamiento bloqueado */ }
+  }
+}
+
+/* ===== src/core/Input.js ===== */
+/**
+ * Entrada unificada: teclado, ratón con pointer lock y rueda.
+ * No decide nada de gameplay; sólo expone estado consultable y eventos.
+ */
+
+class Input {
+  constructor(domElement) {
+    this.dom = domElement;
+    this.keys = new Set();
+    this.mouse = { dx: 0, dy: 0, wheel: 0, left: false, right: false };
+    this.locked = false;
+    this.enabled = true;
+    this._listeners = new Map();
+
+    this._onKeyDown = (e) => {
+      if (!this.enabled) return;
+      this.keys.add(e.code);
+      this._emit('keydown', e);
+      if (['Space', 'Tab', 'KeyE'].includes(e.code)) e.preventDefault();
+    };
+    this._onKeyUp = (e) => { this.keys.delete(e.code); this._emit('keyup', e); };
+    this._onMove = (e) => {
+      if (!this.locked) return;
+      this.mouse.dx += e.movementX || 0;
+      this.mouse.dy += e.movementY || 0;
+    };
+    this._onDown = (e) => {
+      if (e.button === 0) this.mouse.left = true;
+      if (e.button === 2) this.mouse.right = true;
+      this._emit('pointerdown', e);
+    };
+    this._onUp = (e) => {
+      if (e.button === 0) this.mouse.left = false;
+      if (e.button === 2) this.mouse.right = false;
+      this._emit('pointerup', e);
+    };
+    this._onWheel = (e) => { this.mouse.wheel += Math.sign(e.deltaY); };
+    this._onLockChange = () => {
+      this.locked = document.pointerLockElement === this.dom;
+      this._emit('lockchange', this.locked);
+    };
+
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+    window.addEventListener('mousemove', this._onMove);
+    window.addEventListener('mousedown', this._onDown);
+    window.addEventListener('mouseup', this._onUp);
+    window.addEventListener('wheel', this._onWheel, { passive: true });
+    document.addEventListener('pointerlockchange', this._onLockChange);
+    this.dom.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  on(event, fn) {
+    if (!this._listeners.has(event)) this._listeners.set(event, new Set());
+    this._listeners.get(event).add(fn);
+    return () => this._listeners.get(event).delete(fn);
+  }
+
+  _emit(event, arg) {
+    const set = this._listeners.get(event);
+    if (set) set.forEach((fn) => fn(arg));
+  }
+
+  isDown(code) { return this.keys.has(code); }
+
+  requestLock() { this.dom.requestPointerLock?.(); }
+  releaseLock() { document.exitPointerLock?.(); }
+
+  /** Consume el delta acumulado: llamar una vez por frame. */
+  consumeMouseDelta() {
+    const d = { dx: this.mouse.dx, dy: this.mouse.dy, wheel: this.mouse.wheel };
+    this.mouse.dx = this.mouse.dy = this.mouse.wheel = 0;
+    return d;
+  }
+
+  setEnabled(value) {
+    this.enabled = value;
+    if (!value) this.keys.clear();
+  }
+}
+
+/* ===== src/world/Textures.js ===== */
+/**
+ * Fábrica de texturas procedurales.
+ *
+ * El juego no puede descargar imágenes (la página publicada bloquea cualquier
+ * recurso externo que no sea un script), así que todos los mapas de color,
+ * normal y rugosidad se generan por código sobre un canvas. Cada material
+ * devuelve un juego completo de mapas para que el PBR de three responda bien
+ * a la luz en vez de verse plano.
+ *
+ * Para sustituirlos más adelante por texturas reales basta con cambiar
+ * `TextureLibrary.material()` por un cargador: el resto del juego sólo pide
+ * materiales por nombre.
+ */
+
+function canvasOf(size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  return canvas;
+}
+
+/** Convierte un campo de alturas en un mapa de normales tangenciales (sobel). */
+function heightToNormal(height, size, strength = 2.2) {
+  const canvas = canvasOf(size);
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const at = (x, y) => height[((y + size) % size) * size + ((x + size) % size)];
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (at(x + 1, y) - at(x - 1, y)) * strength;
+      const dy = (at(x, y + 1) - at(x, y - 1)) * strength;
+      let nx = -dx, ny = -dy, nz = 1;
+      const len = Math.hypot(nx, ny, nz);
+      nx /= len; ny /= len; nz /= len;
+      const i = (y * size + x) * 4;
+      img.data[i] = (nx * 0.5 + 0.5) * 255;
+      img.data[i + 1] = (ny * 0.5 + 0.5) * 255;
+      img.data[i + 2] = (nz * 0.5 + 0.5) * 255;
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
+/** Pinta un canvas evaluando `fn(x, y) -> [r,g,b] 0..1` por píxel. */
+function paint(size, fn) {
+  const canvas = canvasOf(size);
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const c = fn(x, y);
+      const i = (y * size + x) * 4;
+      img.data[i] = clamp(c[0], 0, 1) * 255;
+      img.data[i + 1] = clamp(c[1], 0, 1) * 255;
+      img.data[i + 2] = clamp(c[2], 0, 1) * 255;
+      img.data[i + 3] = (c[3] === undefined ? 1 : clamp(c[3], 0, 1)) * 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
+function textureFrom(canvas, { srgb = false, repeat = 1, aniso = 4 } = {}) {
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeat, repeat);
+  tex.anisotropy = aniso;
+  if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Definición de cada superficie: color base, veta y respuesta a la luz. */
+const SURFACES = {
+  // Base neutra: el terreno la tiñe por vértice (arena, hierba, limo, roca)
+  // para pasar de un material a otro sin costuras ni draw calls extra.
+  suelo: {
+    size: 256,
+    base: [0.62, 0.6, 0.57],
+    accent: [0.34, 0.33, 0.31],
+    grain: (noise, x, y) =>
+      fbm(noise, x * 0.07, y * 0.07, 5, 0.55) * 0.75 + fbm(noise, x * 0.3, y * 0.3, 2, 0.5) * 0.25,
+    roughness: [0.78, 0.97],
+    normalStrength: 1.9
+  },
+  tierra: {
+    size: 256,
+    base: [0.28, 0.21, 0.14],
+    accent: [0.16, 0.12, 0.08],
+    grain: (noise, x, y) => fbm(noise, x * 0.05, y * 0.05, 5, 0.55),
+    roughness: [0.82, 0.98],
+    normalStrength: 2.4
+  },
+  arena: {
+    size: 256,
+    base: [0.62, 0.55, 0.42],
+    accent: [0.48, 0.42, 0.32],
+    grain: (noise, x, y) => fbm(noise, x * 0.14, y * 0.14, 4, 0.5),
+    roughness: [0.7, 0.92],
+    normalStrength: 1.1
+  },
+  hierba: {
+    size: 256,
+    base: [0.19, 0.31, 0.13],
+    accent: [0.11, 0.2, 0.08],
+    grain: (noise, x, y) => fbm(noise, x * 0.09, y * 0.09, 5, 0.6),
+    roughness: [0.78, 0.96],
+    normalStrength: 1.8
+  },
+  roca: {
+    size: 256,
+    base: [0.42, 0.41, 0.39],
+    accent: [0.2, 0.2, 0.21],
+    grain: (noise, x, y) => {
+      const base = fbm(noise, x * 0.035, y * 0.035, 5, 0.55);
+      const cracks = Math.pow(1 - Math.abs(fbm(noise, x * 0.02, y * 0.02, 3, 0.5) - 0.5) * 2, 8);
+      return clamp(base - cracks * 0.45, 0, 1);
+    },
+    roughness: [0.55, 0.88],
+    normalStrength: 3.2
+  },
+  corteza: {
+    size: 256,
+    base: [0.3, 0.22, 0.16],
+    accent: [0.13, 0.09, 0.06],
+    grain: (noise, x, y) => {
+      // Vetas verticales: mucha frecuencia en X, poca en Y.
+      const v = fbm(noise, x * 0.28, y * 0.02, 4, 0.6);
+      return clamp(v * 0.7 + fbm(noise, x * 0.06, y * 0.06, 3, 0.5) * 0.3, 0, 1);
+    },
+    roughness: [0.75, 0.98],
+    normalStrength: 3
+  },
+  madera: {
+    size: 256,
+    base: [0.44, 0.32, 0.2],
+    accent: [0.24, 0.16, 0.09],
+    grain: (noise, x, y) => {
+      const rings = Math.sin((y * 0.35 + fbm(noise, x * 0.02, y * 0.04, 3, 0.5) * 9)) * 0.5 + 0.5;
+      const plank = (x % 64) < 2 ? 0.15 : 1;          // junta entre tablones
+      return clamp(rings * 0.55 + 0.35, 0, 1) * plank;
+    },
+    roughness: [0.6, 0.9],
+    normalStrength: 2
+  }
+};
+
+class TextureLibrary {
+  constructor() {
+    this.cache = new Map();
+    this.noise = makeValueNoise2D(1337);
+  }
+
+  /** Devuelve (y cachea) un MeshStandardMaterial completo para una superficie. */
+  material(name, { repeat = 8, color = 0xffffff, ...extra } = {}) {
+    const key = `${name}:${repeat}:${color}`;
+    if (this.cache.has(key)) return this.cache.get(key);
+
+    const def = SURFACES[name];
+    if (!def) throw new Error(`Superficie desconocida: ${name}`);
+    const { size } = def;
+
+    const height = new Float32Array(size * size);
+    const albedo = paint(size, (x, y) => {
+      const g = def.grain(this.noise, x, y);
+      height[y * size + x] = g;
+      return [
+        lerp(def.accent[0], def.base[0], g),
+        lerp(def.accent[1], def.base[1], g),
+        lerp(def.accent[2], def.base[2], g)
+      ];
+    });
+    const rough = paint(size, (x, y) => {
+      const g = height[y * size + x];
+      const r = lerp(def.roughness[0], def.roughness[1], 1 - g);
+      return [r, r, r];
+    });
+
+    const material = new THREE.MeshStandardMaterial({
+      map: textureFrom(albedo, { srgb: true, repeat }),
+      normalMap: textureFrom(heightToNormal(height, size, def.normalStrength), { repeat }),
+      roughnessMap: textureFrom(rough, { repeat }),
+      roughness: 1,
+      metalness: 0,
+      color,
+      ...extra
+    });
+    material.normalScale.set(1, 1);
+    this.cache.set(key, material);
+    return material;
+  }
+
+  /** Normales de oleaje que teselan, para el shader de agua. */
+  waterNormals(size = 512) {
+    if (this.cache.has('waterNormals')) return this.cache.get('waterNormals');
+    const height = new Float32Array(size * size);
+    // Dos trenes de olas cruzados más ruido: evita el patrón repetido evidente.
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = (x / size) * Math.PI * 2;
+        const v = (y / size) * Math.PI * 2;
+        height[y * size + x] =
+          Math.sin(u * 3 + Math.cos(v * 2) * 0.6) * 0.35 +
+          Math.sin(v * 5 - u * 1.5) * 0.25 +
+          fbm(this.noise, x * 0.05, y * 0.05, 4, 0.55) * 0.4;
+      }
+    }
+    const tex = textureFrom(heightToNormal(height, size, 1.6), { repeat: 1, aniso: 8 });
+    this.cache.set('waterNormals', tex);
+    return tex;
+  }
+
+  /** Sprite de mata de hierba con alfa, para la vegetación instanciada. */
+  grassBlade(size = 128) {
+    if (this.cache.has('grassBlade')) return this.cache.get('grassBlade');
+    const canvas = canvasOf(size);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+    const rng = createRandom(7);
+    for (let i = 0; i < 14; i++) {
+      const x = size * (0.1 + rng() * 0.8);
+      const h = size * (0.45 + rng() * 0.5);
+      const lean = (rng() - 0.5) * size * 0.28;
+      const w = size * (0.018 + rng() * 0.022);
+      const g = 0.35 + rng() * 0.4;
+      const grad = ctx.createLinearGradient(x, size, x + lean, size - h);
+      grad.addColorStop(0, `rgba(${Math.round(38 * g)},${Math.round(62 * g)},${Math.round(24 * g)},1)`);
+      grad.addColorStop(1, `rgba(${Math.round(96 * g)},${Math.round(132 * g)},${Math.round(48 * g)},0.92)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(x - w, size);
+      ctx.quadraticCurveTo(x + lean * 0.4, size - h * 0.55, x + lean, size - h);
+      ctx.quadraticCurveTo(x + lean * 0.5 + w, size - h * 0.5, x + w, size);
+      ctx.closePath();
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.cache.set('grassBlade', tex);
+    return tex;
+  }
+
+  /** Mancha de follaje con alfa suave, para las copas de los árboles. */
+  foliage(size = 128) {
+    if (this.cache.has('foliage')) return this.cache.get('foliage');
+    const rng = createRandom(23);
+    const canvas = canvasOf(size);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+    for (let i = 0; i < 90; i++) {
+      const a = rng() * Math.PI * 2;
+      const r = Math.pow(rng(), 0.6) * size * 0.44;
+      const x = size / 2 + Math.cos(a) * r;
+      const y = size / 2 + Math.sin(a) * r;
+      const rad = size * (0.04 + rng() * 0.07);
+      const shade = 0.45 + rng() * 0.55;
+      ctx.fillStyle = `rgba(${Math.round(48 * shade)},${Math.round(84 * shade)},${Math.round(34 * shade)},0.95)`;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rad, rad * 0.72, a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.cache.set('foliage', tex);
+    return tex;
+  }
+
+  /** Textura de nubes con alfa para la cúpula celeste. */
+  clouds(size = 512) {
+    if (this.cache.has('clouds')) return this.cache.get('clouds');
+    const noise = makeValueNoise2D(99);
+    const canvas = paint(size, (x, y) => {
+      // Coordenadas envolventes para que no se vea la costura.
+      const u = x / size, v = y / size;
+      const n = fbm(noise, u * 6, v * 6, 5, 0.55);
+      const mask = clamp((n - 0.42) * 3.4, 0, 1);
+      const density = Math.pow(mask, 1.3);
+      return [1, 1, 1, density * 0.85];
+    });
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    this.cache.set('clouds', tex);
+    return tex;
+  }
+
+  /** Gota de lluvia alargada para el sistema de partículas. */
+  raindrop(size = 32) {
+    if (this.cache.has('raindrop')) return this.cache.get('raindrop');
+    const canvas = canvasOf(size);
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createLinearGradient(0, 0, 0, size);
+    grad.addColorStop(0, 'rgba(200,225,245,0)');
+    grad.addColorStop(0.5, 'rgba(210,232,250,0.75)');
+    grad.addColorStop(1, 'rgba(200,225,245,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(size * 0.42, 0, size * 0.16, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.cache.set('raindrop', tex);
+    return tex;
+  }
+
+  dispose() {
+    this.cache.forEach((v) => v.dispose?.());
+    this.cache.clear();
+  }
+}
+
+/* ===== src/world/TerrainShape.js ===== */
+/**
+ * Campo de alturas del mapa. Módulo puro (sin three) para poder probarlo
+ * y para que otros sistemas —IA de peces, colocación de vegetación, colisión
+ * del jugador— consulten el relieve sin tocar la escena.
+ *
+ * Convenio: el nivel del agua es y = 0. Todo lo negativo está sumergido.
+ */
+
+const WATER_LEVEL = 0;
+
+function createHeightField({
+  size = 520,            // lado del mapa en metros
+  resolution = 320,      // vértices por lado
+  seed = 20260908,
+  lakeRadius = 118,      // radio medio del lago
+  maxDepth = 9.5,        // profundidad máxima en el centro
+  hillHeight = 26
+} = {}) {
+  const noise = makeValueNoise2D(seed);
+  const heights = new Float32Array(resolution * resolution);
+  const step = size / (resolution - 1);
+  const half = size / 2;
+
+  /** Radio del lago para un ángulo dado: contorno irregular, no un círculo. */
+  function shoreRadius(angle) {
+    const wobble = fbm(noise, Math.cos(angle) * 2.4 + 40, Math.sin(angle) * 2.4 + 40, 3, 0.55);
+    const lobe = Math.sin(angle * 2.0 + 0.7) * 0.09 + Math.sin(angle * 3.0 - 1.4) * 0.06;
+    return lakeRadius * (0.78 + 0.42 * wobble + lobe);
+  }
+
+  function sample(x, z) {
+    const dist = Math.hypot(x, z);
+    const angle = Math.atan2(z, x);
+    const shore = shoreRadius(angle);
+    const t = dist / shore;
+    const detail = (fbm(noise, x * 0.055, z * 0.055, 3, 0.5) - 0.5) * 0.9;
+
+    if (t < 1) {
+      // Cuenca: repisa poco profunda junto a la orilla y hoya en el centro.
+      const bowl = Math.pow(1 - t * t, 1.45);
+      const shelf = smoothstep(1, 0.86, t) * 0.75;   // bajío pegado a la orilla
+      const bed = (fbm(noise, x * 0.021, z * 0.021, 4, 0.5) - 0.5) * 2.1 * (1 - t * 0.7);
+      return -maxDepth * bowl + shelf + bed + detail * 0.35;
+    }
+
+    const rise = t - 1;
+    const beach = smoothstep(0, 0.05, rise) * 0.9;
+    const bank = smoothstep(0.03, 0.42, rise) * 5.5;
+    const hills = fbm(noise, x * 0.0075 + 5, z * 0.0075 + 5, 5, 0.52) * hillHeight
+      * smoothstep(0.12, 1.1, rise);
+    return beach + bank + hills + detail;
+  }
+
+  for (let j = 0; j < resolution; j++) {
+    for (let i = 0; i < resolution; i++) {
+      heights[j * resolution + i] = sample(-half + i * step, -half + j * step);
+    }
+  }
+
+  /** Altura interpolada bilinealmente en coordenadas de mundo. */
+  function heightAt(x, z) {
+    const fx = clamp((x + half) / step, 0, resolution - 1.001);
+    const fz = clamp((z + half) / step, 0, resolution - 1.001);
+    const i = Math.floor(fx), j = Math.floor(fz);
+    const tx = fx - i, tz = fz - j;
+    const h00 = heights[j * resolution + i];
+    const h10 = heights[j * resolution + i + 1];
+    const h01 = heights[(j + 1) * resolution + i];
+    const h11 = heights[(j + 1) * resolution + i + 1];
+    return lerp(lerp(h00, h10, tx), lerp(h01, h11, tx), tz);
+  }
+
+  /** Pendiente 0..1 (0 llano, 1 pared). Se usa para texturizar y para andar. */
+  function slopeAt(x, z) {
+    const d = step;
+    const dx = heightAt(x + d, z) - heightAt(x - d, z);
+    const dz = heightAt(x, z + d) - heightAt(x, z - d);
+    return clamp(Math.hypot(dx, dz) / (2 * d) / 2.2, 0, 1);
+  }
+
+  const depthAt = (x, z) => Math.max(0, WATER_LEVEL - heightAt(x, z));
+  const isSubmerged = (x, z) => heightAt(x, z) < WATER_LEVEL;
+
+  return {
+    heights, resolution, size, step, half,
+    lakeRadius, maxDepth, waterLevel: WATER_LEVEL,
+    heightAt, slopeAt, depthAt, isSubmerged, shoreRadius
+  };
+}
+
+/* ===== src/world/Terrain.js ===== */
+/**
+ * Malla del terreno.
+ *
+ * Una sola geometría con colores por vértice: el material base es neutro y el
+ * color decide si un punto se lee como limo, arena, hierba o roca. Así hay
+ * transiciones suaves entre biomas con una única draw call, en vez de varias
+ * capas de textura mezcladas en un shader.
+ */
+
+const COLORS = {
+  limo:   new THREE.Color(0x403a26),
+  fondo:  new THREE.Color(0x6b6141),
+  arena:  new THREE.Color(0xbda97e),
+  hierba: new THREE.Color(0x53703a),
+  seca:   new THREE.Color(0x7b8248),
+  roca:   new THREE.Color(0x8b8880)
+};
+
+class Terrain {
+  constructor(textures, options = {}) {
+    this.field = createHeightField(options);
+    this.waterLevel = WATER_LEVEL;
+
+    const { resolution, size } = this.field;
+    const geometry = new THREE.PlaneGeometry(size, size, resolution - 1, resolution - 1);
+    geometry.rotateX(-Math.PI / 2);
+
+    const position = geometry.attributes.position;
+    const colors = new Float32Array(position.count * 3);
+    const tint = makeValueNoise2D(4242);
+    const color = new THREE.Color();
+
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i);
+      const z = position.getZ(i);
+      const h = this.field.heightAt(x, z);
+      position.setY(i, h);
+
+      const slope = this.field.slopeAt(x, z);
+      const variation = fbm(tint, x * 0.03, z * 0.03, 3, 0.5);
+
+      if (h < -0.35) {
+        // Fondo del lago: arena en el bajío, limo oscuro en lo hondo.
+        color.copy(COLORS.fondo).lerp(COLORS.limo, smoothstep(-1.2, -5.5, h));
+      } else if (h < 0.85) {
+        color.copy(COLORS.arena).lerp(COLORS.fondo, smoothstep(0.85, -0.35, h) * 0.55);
+      } else {
+        const dry = smoothstep(6, 20, h) * 0.6 + variation * 0.25;
+        color.copy(COLORS.hierba).lerp(COLORS.seca, clamp(dry, 0, 1));
+      }
+      // La roca asoma donde la pendiente no deja agarrar tierra.
+      color.lerp(COLORS.roca, smoothstep(0.35, 0.75, slope));
+      color.offsetHSL(0, 0, (variation - 0.5) * 0.06);
+
+      colors[i * 3] = color.r;
+      colors[i * 3 + 1] = color.g;
+      colors[i * 3 + 2] = color.b;
+    }
+
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+
+    const material = textures.material('suelo', { repeat: 90 });
+    material.vertexColors = true;
+
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.receiveShadow = true;
+    this.mesh.castShadow = false;
+    this.mesh.name = 'terreno';
+    this.mesh.matrixAutoUpdate = false;
+    this.mesh.updateMatrix();
+  }
+
+  heightAt(x, z) { return this.field.heightAt(x, z); }
+  slopeAt(x, z) { return this.field.slopeAt(x, z); }
+  depthAt(x, z) { return this.field.depthAt(x, z); }
+  isSubmerged(x, z) { return this.field.isSubmerged(x, z); }
+
+  /** Normal del terreno, para orientar objetos apoyados en el suelo. */
+  normalAt(x, z, out = new THREE.Vector3()) {
+    const d = 0.75;
+    const hx = this.heightAt(x + d, z) - this.heightAt(x - d, z);
+    const hz = this.heightAt(x, z + d) - this.heightAt(x, z - d);
+    return out.set(-hx, 2 * d, -hz).normalize();
+  }
+
+  dispose() {
+    this.mesh.geometry.dispose();
+  }
+}
+
+/* ===== src/world/WaterBody.js ===== */
+/**
+ * Superficie del lago.
+ *
+ * Usa el shader `Water` de three, que resuelve el reflejo con una cámara
+ * espejo y un render target: el cielo, los árboles y el muelle se reflejan de
+ * verdad. La refracción completa exigiría una segunda pasada; en su lugar la
+ * superficie es translúcida y el color del agua se oscurece con la
+ * profundidad, que da la lectura correcta a un coste mucho menor.
+ *
+ * Además gestiona las ondas circulares que deja el señuelo al caer.
+ */
+
+const RIPPLE_LIFETIME = 2.6;
+
+class WaterBody {
+  constructor(textures, { size = 620, reflectionSize = 512, sunDirection, level = 0 } = {}) {
+    this.level = level;
+    this.ripples = [];
+
+    const geometry = new THREE.PlaneGeometry(size, size, 1, 1);
+    this.water = new Water(geometry, {
+      textureWidth: reflectionSize,
+      textureHeight: reflectionSize,
+      waterNormals: textures.waterNormals(),
+      sunDirection: sunDirection ? sunDirection.clone() : new THREE.Vector3(0.7, 0.7, 0),
+      sunColor: 0xffffff,
+      waterColor: 0x0d2630,
+      distortionScale: 3.4,
+      alpha: 0.9,
+      fog: true
+    });
+    this.water.rotation.x = -Math.PI / 2;
+    this.water.position.y = level;
+    this.water.material.transparent = true;
+    // `size` escala las coordenadas de mundo dentro del mapa de normales: con
+    // el valor por defecto (1) las olas son kilométricas y el lago se ve liso.
+    this.water.material.uniforms.size.value = 28;
+    this.water.name = 'agua';
+
+    // Grupo de ondas: anillos que crecen y se desvanecen.
+    this.rippleGroup = new THREE.Group();
+    this.rippleGroup.position.y = level + 0.02;
+    this._rippleGeometry = new THREE.RingGeometry(0.06, 0.1, 24);
+    this._rippleGeometry.rotateX(-Math.PI / 2);
+  }
+
+  addTo(scene) {
+    scene.add(this.water);
+    scene.add(this.rippleGroup);
+  }
+
+  /** Onda expansiva en la superficie: caída del señuelo, pez que colea... */
+  splash(position, strength = 1) {
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xdff0f5, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false
+    });
+    const ring = new THREE.Mesh(this._rippleGeometry, material);
+    ring.position.set(position.x, 0, position.z);
+    ring.userData = { age: 0, strength: clamp(strength, 0.2, 3) };
+    this.rippleGroup.add(ring);
+    this.ripples.push(ring);
+    if (this.ripples.length > 40) this._retire(this.ripples[0]);
+  }
+
+  _retire(ring) {
+    const i = this.ripples.indexOf(ring);
+    if (i >= 0) this.ripples.splice(i, 1);
+    this.rippleGroup.remove(ring);
+    ring.material.dispose();
+  }
+
+  update(dt, { sunDirection, sunColor, waterColor, choppiness = 1 } = {}) {
+    const u = this.water.material.uniforms;
+    u.time.value += dt * 0.55 * choppiness;
+    u.distortionScale.value = 2.2 + choppiness * 2.6;
+    u.size.value = 24 + choppiness * 8;
+    if (sunDirection) u.sunDirection.value.copy(sunDirection).normalize();
+    if (sunColor) u.sunColor.value.copy(sunColor);
+    if (waterColor) u.waterColor.value.copy(waterColor);
+
+    for (let i = this.ripples.length - 1; i >= 0; i--) {
+      const ring = this.ripples[i];
+      const data = ring.userData;
+      data.age += dt;
+      const t = data.age / RIPPLE_LIFETIME;
+      if (t >= 1) { this._retire(ring); continue; }
+      const scale = 1 + t * 34 * data.strength;
+      ring.scale.setScalar(scale);
+      ring.material.opacity = 0.5 * (1 - t) * (1 - t);
+    }
+  }
+
+  /** Altura de la lámina de agua incluyendo el oleaje aproximado. */
+  surfaceHeight(x, z, time) {
+    return this.level +
+      Math.sin(x * 0.28 + time * 1.1) * 0.035 +
+      Math.sin(z * 0.21 - time * 0.9) * 0.03;
+  }
+
+  dispose() {
+    this.water.geometry.dispose();
+    this.water.material.dispose();
+    this._rippleGeometry.dispose();
+  }
+}
+
+/* ===== src/world/SkyDome.js ===== */
+/**
+ * Cielo e iluminación global.
+ *
+ * Reúne el cielo atmosférico de Preetham, el sol y la luna como luces
+ * direccionales, un campo de estrellas y dos capas de nubes. La sombra sigue
+ * al jugador: el volumen del mapa entero no cabría en un shadow map decente.
+ */
+
+const SKY_SCALE = 3000;
+
+class SkyDome {
+  constructor(scene, textures, preset) {
+    this.scene = scene;
+
+    this.sky = new Sky();
+    this.sky.scale.setScalar(SKY_SCALE);
+    this.sky.material.uniforms.turbidity.value = 2.2;
+    this.sky.material.uniforms.rayleigh.value = 3.1;
+    this.sky.material.uniforms.mieCoefficient.value = 0.0028;
+    this.sky.material.uniforms.mieDirectionalG.value = 0.82;
+    scene.add(this.sky);
+
+    this.sun = new THREE.DirectionalLight(0xffffff, 2);
+    this.sun.castShadow = preset.shadows;
+    if (preset.shadows) {
+      const s = this.sun.shadow;
+      s.mapSize.set(preset.shadowMapSize, preset.shadowMapSize);
+      s.camera.near = 1;
+      s.camera.far = 460;
+      s.camera.left = s.camera.bottom = -150;
+      s.camera.right = s.camera.top = 150;
+      s.bias = -0.0012;
+      s.normalBias = 0.035;
+    }
+    scene.add(this.sun);
+    scene.add(this.sun.target);
+
+    this.moon = new THREE.DirectionalLight(0x9fb6de, 0);
+    scene.add(this.moon);
+
+    this.hemi = new THREE.HemisphereLight(0x9dc0e8, 0x40402c, 0.5);
+    scene.add(this.hemi);
+
+    this.ambient = new THREE.AmbientLight(0x404050, 0.35);
+    scene.add(this.ambient);
+
+    this._buildStars();
+    this._buildClouds(textures);
+  }
+
+  _buildStars(count = 1400) {
+    const rng = createRandom(88);
+    const positions = new Float32Array(count * 3);
+    const sizes = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      // Distribución uniforme en la media esfera superior.
+      const u = rng() * 2 - 1;
+      const theta = rng() * Math.PI * 2;
+      const r = Math.sqrt(1 - u * u);
+      const y = Math.abs(u);
+      positions.set([r * Math.cos(theta) * 2400, y * 2400 + 60, r * Math.sin(theta) * 2400], i * 3);
+      sizes[i] = 1 + Math.pow(rng(), 6) * 5;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    this.stars = new THREE.Points(geometry, new THREE.PointsMaterial({
+      color: 0xdfe8ff, size: 3.2, sizeAttenuation: false,
+      transparent: true, opacity: 0, depthWrite: false
+    }));
+    this.stars.frustumCulled = false;
+    this.scene.add(this.stars);
+  }
+
+  _buildClouds(textures) {
+    const texture = textures.clouds();
+    this.cloudLayers = [];
+    for (let i = 0; i < 2; i++) {
+      const map = texture.clone();
+      map.needsUpdate = true;
+      map.wrapS = map.wrapT = THREE.RepeatWrapping;
+      map.repeat.set(16 + i * 6, 16 + i * 6);
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(5200, 5200),
+        new THREE.MeshBasicMaterial({
+          map, transparent: true, opacity: 0, depthWrite: false,
+          side: THREE.DoubleSide, fog: false
+        })
+      );
+      mesh.rotation.x = Math.PI / 2;
+      mesh.position.y = 620 + i * 190;
+      mesh.renderOrder = -1;
+      this.cloudLayers.push(mesh);
+      this.scene.add(mesh);
+    }
+  }
+
+  /** `focus` es la posición del jugador: la sombra se encaja a su alrededor. */
+  update(time, weather, dt, focus = null) {
+    const sunDir = time.sunDirection;
+    this.sky.material.uniforms.sunPosition.value.copy(sunDir).multiplyScalar(SKY_SCALE * 0.5);
+    this.sky.material.uniforms.turbidity.value = lerp(2.2, 9, weather.cloudiness);
+    this.sky.material.uniforms.rayleigh.value = lerp(3.1, 0.8, weather.cloudiness);
+
+    const daylight = clamp(Math.sin(time.elevation) * 2.2, 0, 1);
+    const overcast = 1 - weather.cloudiness * 0.62;
+
+    if (focus) {
+      this.sun.position.copy(focus).addScaledVector(sunDir, 210);
+      this.sun.target.position.copy(focus);
+      this.sun.target.updateMatrixWorld();
+      this.sky.position.set(focus.x, 0, focus.z);
+      this.stars.position.set(focus.x, 0, focus.z);
+      this.cloudLayers.forEach((l) => l.position.set(focus.x, l.position.y, focus.z));
+    } else {
+      this.sun.position.copy(sunDir).multiplyScalar(140);
+    }
+    this.sun.color.copy(time.sunColor);
+    this.sun.intensity = time.sunIntensity * overcast;
+    this.sun.visible = this.sun.intensity > 0.01;
+
+    this.moon.position.copy(focus || new THREE.Vector3()).addScaledVector(time.moonDirection, 140);
+    this.moon.intensity = time.nightFactor * 0.5 * overcast;
+    this.moon.visible = this.moon.intensity > 0.01;
+
+    this.hemi.color.copy(time.skyColor);
+    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast;
+    this.ambient.color.copy(time.ambientColor);
+    this.ambient.intensity = lerp(1.2, 1.15, daylight);
+
+    this.stars.material.opacity = time.nightFactor * (1 - weather.cloudiness * 0.85);
+    this.stars.visible = this.stars.material.opacity > 0.02;
+    this.stars.rotation.y += dt * 0.0035;
+
+    this.cloudLayers.forEach((layer, i) => {
+      layer.material.opacity = clamp(weather.cloudiness * 0.85, 0, 0.9) * (i === 0 ? 1 : 0.6);
+      layer.visible = layer.material.opacity > 0.02;
+      layer.material.color.copy(time.skyColor).lerp(new THREE.Color(0xffffff), 0.55 - weather.cloudiness * 0.4);
+      layer.material.map.offset.x += dt * weather.windSpeed * 0.0016 * (i + 1);
+      layer.material.map.offset.y += dt * weather.windSpeed * 0.0007 * (i + 1);
+    });
+  }
+
+  dispose() {
+    this.stars.geometry.dispose();
+    this.stars.material.dispose();
+    this.cloudLayers.forEach((c) => { c.geometry.dispose(); c.material.dispose(); });
+  }
+}
+
+/* ===== src/world/Vegetation.js ===== */
+/**
+ * Vegetación instanciada.
+ *
+ * Todo lo que se repite (hierba, juncos, arbustos, árboles, rocas) va en
+ * InstancedMesh, así que miles de elementos cuestan un puñado de draw calls.
+ * La hierba y los juncos se mueven con el viento en el vertex shader, sin
+ * coste de CPU.
+ *
+ * El culling es por celdas: las instancias se agrupan en tiles y cada tile se
+ * apaga entero cuando queda lejos, que es mucho más barato que ocultar
+ * instancias sueltas.
+ */
+
+const TILE_SIZE = 64;
+
+/** Inyecta ondulación de viento en un material estándar. */
+function addWind(material, uniforms, { bendScale = 1 } = {}) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = uniforms.uTime;
+    shader.uniforms.uWind = uniforms.uWind;
+    shader.uniforms.uBend = { value: bendScale };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        uniform float uTime;
+        uniform vec3 uWind;
+        uniform float uBend;
+      `)
+      .replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        // Sólo se dobla la parte alta: la base queda clavada en el suelo.
+        float bendFactor = clamp(position.y, 0.0, 4.0) * uBend;
+        vec3 worldOrigin = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        float phase = worldOrigin.x * 0.35 + worldOrigin.z * 0.28;
+        float gust = sin(uTime * 1.7 + phase) * 0.6 + sin(uTime * 3.1 + phase * 1.7) * 0.4;
+        transformed.xz += uWind.xz * gust * bendFactor * 0.14;
+      `);
+  };
+  material.customProgramCacheKey = () => 'wind' + bendScale;
+}
+
+/** Roca irregular: icosaedro con los vértices desplazados por ruido. */
+function rockGeometry(rng, detail = 1) {
+  const geo = new THREE.IcosahedronGeometry(1, detail);
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const n = 0.72 + rng() * 0.5;
+    v.multiplyScalar(n);
+    v.y *= 0.72;
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+class Vegetation {
+  constructor(scene, terrain, textures, preset, { seed = 4321 } = {}) {
+    this.scene = scene;
+    this.terrain = terrain;
+    this.group = new THREE.Group();
+    this.group.name = 'vegetación';
+    scene.add(this.group);
+
+    this.uniforms = {
+      uTime: { value: 0 },
+      uWind: { value: new THREE.Vector3(1, 0, 0.3) }
+    };
+    this.tiles = new Map();
+    this.viewDistance = preset.viewDistance;
+    this.rng = createRandom(seed);
+
+    this._buildGrass(textures, preset);
+    this._buildReeds(preset);
+    this._buildBushes(preset);
+    this._buildTrees(textures, preset);
+    this._buildRocks(textures, preset);
+  }
+
+  /** Reparte `count` intentos de colocación y acepta los que cumplan `accept`. */
+  _scatter(count, accept) {
+    const spots = [];
+    const half = this.terrain.field.half - 8;
+    for (let i = 0; i < count; i++) {
+      const x = (this.rng() * 2 - 1) * half;
+      const z = (this.rng() * 2 - 1) * half;
+      const h = this.terrain.heightAt(x, z);
+      const slope = this.terrain.slopeAt(x, z);
+      if (accept(x, z, h, slope)) spots.push({ x, y: h, z });
+    }
+    return spots;
+  }
+
+  _addInstanced(name, geometry, material, spots, transform) {
+    if (!spots.length) return null;
+    const mesh = new THREE.InstancedMesh(geometry, material, spots.length);
+    mesh.name = name;
+    const dummy = new THREE.Object3D();
+    spots.forEach((spot, i) => {
+      transform(dummy, spot, i, this.rng);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.frustumCulled = true;
+    this.group.add(mesh);
+    return mesh;
+  }
+
+  _buildGrass(textures, preset) {
+    const density = preset.grassDensity;
+    if (density <= 0) return;
+    const spots = this._scatter(Math.floor(26000 * density), (x, z, h, slope) =>
+      h > 0.15 && h < 16 && slope < 0.42);
+
+    const material = new THREE.MeshStandardMaterial({
+      map: textures.grassBlade(),
+      alphaTest: 0.36,
+      side: THREE.DoubleSide,
+      roughness: 0.92,
+      metalness: 0
+    });
+    addWind(material, this.uniforms, { bendScale: 1 });
+
+    const geometry = crossPlanes(0.7, 0.75);
+    this.grass = this._addInstanced('hierba', geometry, material, spots, (d, s, i, rng) => {
+      d.position.set(s.x, s.y - 0.05, s.z);
+      d.rotation.set(0, rng() * Math.PI, 0);
+      const k = 0.7 + rng() * 0.8;
+      d.scale.set(k, k * (0.8 + rng() * 0.7), k);
+    });
+    this._tileify(this.grass, spots, 78);
+  }
+
+  _buildReeds(preset) {
+    // Juncos: sólo en el bajío, entre 5 cm y 1 m de profundidad.
+    const spots = this._scatter(Math.floor(7000 * Math.max(0.35, preset.grassDensity)),
+      (x, z, h) => h < -0.05 && h > -1.05);
+
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x6c7a3a, roughness: 0.9, side: THREE.DoubleSide
+    });
+    addWind(material, this.uniforms, { bendScale: 0.55 });
+
+    const geometry = crossPlanes(0.12, 1.9);
+    this.reeds = this._addInstanced('juncos', geometry, material, spots, (d, s, i, rng) => {
+      d.position.set(s.x, s.y, s.z);
+      d.rotation.set(0, rng() * Math.PI, 0);
+      const k = 0.75 + rng() * 0.9;
+      d.scale.set(1, k, 1);
+    });
+    this._tileify(this.reeds, spots, 110);
+  }
+
+  _buildBushes(preset) {
+    const spots = this._scatter(Math.floor(900 * Math.max(0.4, preset.grassDensity)),
+      (x, z, h, slope) => h > 0.9 && h < 20 && slope < 0.5);
+    const geometry = new THREE.IcosahedronGeometry(1, 1);
+    const material = new THREE.MeshStandardMaterial({ color: 0x40592c, roughness: 0.95, flatShading: true });
+    addWind(material, this.uniforms, { bendScale: 0.18 });
+    this.bushes = this._addInstanced('arbustos', geometry, material, spots, (d, s, i, rng) => {
+      d.position.set(s.x, s.y + 0.35, s.z);
+      d.rotation.set(rng() * 0.4, rng() * Math.PI, rng() * 0.4);
+      d.scale.set(0.7 + rng() * 0.9, 0.55 + rng() * 0.6, 0.7 + rng() * 0.9);
+    });
+    this._tileify(this.bushes, spots, 150);
+  }
+
+  _buildTrees(textures, preset) {
+    const spots = this._scatter(1500, (x, z, h, slope) =>
+      h > 2.2 && h < 24 && slope < 0.4).slice(0, 420);
+
+    const trunkGeo = new THREE.CylinderGeometry(0.16, 0.28, 5.2, 6, 1);
+    trunkGeo.translate(0, 2.6, 0);
+    const trunkMat = textures.material('corteza', { repeat: 2 });
+
+    this.trunks = this._addInstanced('troncos', trunkGeo, trunkMat, spots, (d, s, i, rng) => {
+      d.position.set(s.x, s.y, s.z);
+      d.rotation.set((rng() - 0.5) * 0.12, rng() * Math.PI, (rng() - 0.5) * 0.12);
+      const k = 0.75 + rng() * 0.85;
+      d.scale.set(k, k, k);
+    });
+    this.trunks.castShadow = preset.shadows;
+    this.trunks.receiveShadow = preset.shadows;
+
+    // Copa: dos planos cruzados con la mancha de follaje, mucho más barato
+    // que una esfera de hojas y se lee bien a distancia.
+    const canopyGeo = crossPlanes(5.4, 5.4);
+    canopyGeo.translate(0, 1.4, 0);
+    const canopyMat = new THREE.MeshStandardMaterial({
+      map: textures.foliage(), alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.9
+    });
+    addWind(canopyMat, this.uniforms, { bendScale: 0.1 });
+
+    this.canopies = this._addInstanced('copas', canopyGeo, canopyMat, spots, (d, s, i, rng) => {
+      d.position.set(s.x, s.y + 3.1, s.z);
+      d.rotation.set(0, rng() * Math.PI, 0);
+      const k = 0.8 + rng() * 0.8;
+      d.scale.set(k, k, k);
+    });
+    this.canopies.castShadow = preset.shadows;
+    this._tileify(this.canopies, spots, this.viewDistance);
+    this._tileify(this.trunks, spots, this.viewDistance);
+  }
+
+  _buildRocks(textures, preset) {
+    const spots = this._scatter(1200, (x, z, h, slope) =>
+      (h > -1.6 && h < 22) && (slope > 0.18 || this.rng() < 0.35)).slice(0, 320);
+    const geometry = rockGeometry(this.rng, 1);
+    const material = textures.material('roca', { repeat: 1.4 });
+    this.rocks = this._addInstanced('rocas', geometry, material, spots, (d, s, i, rng) => {
+      d.position.set(s.x, s.y - 0.15, s.z);
+      d.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
+      const k = 0.35 + Math.pow(rng(), 2.2) * 2.4;
+      d.scale.set(k, k * (0.6 + rng() * 0.5), k);
+    });
+    this.rocks.castShadow = preset.shadows;
+    this.rocks.receiveShadow = preset.shadows;
+    this._tileify(this.rocks, spots, this.viewDistance);
+  }
+
+  /** Registra la celda y la distancia a la que deja de dibujarse. */
+  _tileify(mesh, spots, distance) {
+    if (!mesh) return;
+    let cx = 0, cz = 0;
+    spots.forEach((s) => { cx += s.x; cz += s.z; });
+    mesh.userData.center = new THREE.Vector3(cx / spots.length, 0, cz / spots.length);
+    mesh.userData.cullDistance = distance;
+    this.tiles.set(mesh.name, mesh);
+  }
+
+  update(dt, wind, playerPosition) {
+    this.uniforms.uTime.value += dt;
+    this.uniforms.uWind.value.set(wind.x, 0, wind.z);
+
+    // Las instancias cubren todo el mapa, así que el corte por distancia se
+    // hace contra el radio real de cada grupo, no contra su centro.
+    this.tiles.forEach((mesh) => {
+      const d = mesh.userData.center.distanceTo(playerPosition);
+      mesh.visible = d < mesh.userData.cullDistance + 320;
+    });
+  }
+
+  dispose() {
+    this.group.traverse((o) => {
+      if (o.isInstancedMesh) { o.geometry.dispose(); o.material.dispose(); }
+    });
+    this.scene.remove(this.group);
+  }
+}
+
+/* ===== src/world/Props.js ===== */
+/**
+ * Elementos construidos del escenario: muelle, barca, banco, fogata, cartel.
+ *
+ * Se colocan buscando la orilla real sobre el campo de alturas, no con
+ * coordenadas fijas, para que sigan encajando si se cambia la semilla o la
+ * forma del lago.
+ */
+
+class Props {
+  constructor(scene, terrain, textures, preset) {
+    this.scene = scene;
+    this.terrain = terrain;
+    this.group = new THREE.Group();
+    this.group.name = 'construcciones';
+    scene.add(this.group);
+    this.rng = createRandom(909);
+    this.fishingSpots = [];
+
+    const wood = textures.material('madera', { repeat: 2 });
+    const plank = textures.material('madera', { repeat: 1 });
+
+    this.dock = this._buildDock(Math.PI * 0.18, wood, plank, preset);
+    this._buildBoat(Math.PI * 0.62, wood, preset);
+    this._buildCamp(Math.PI * -0.35, wood, textures, preset);
+  }
+
+  /** Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`). */
+  shorePoint(angle, targetHeight = 0.35) {
+    const dir = new THREE.Vector2(Math.cos(angle), Math.sin(angle));
+    let lo = 0, hi = this.terrain.field.half - 10;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      const h = this.terrain.heightAt(dir.x * mid, dir.y * mid);
+      if (h < targetHeight) lo = mid; else hi = mid;
+    }
+    const r = (lo + hi) / 2;
+    return new THREE.Vector3(dir.x * r, this.terrain.heightAt(dir.x * r, dir.y * r), dir.y * r);
+  }
+
+  _buildDock(angle, wood, plankMat, preset) {
+    const shore = this.shorePoint(angle, 0.55);
+    const inward = new THREE.Vector3(-Math.cos(angle), 0, -Math.sin(angle));  // hacia el agua
+    const dock = new THREE.Group();
+    dock.position.copy(shore);
+    dock.lookAt(shore.clone().add(inward));
+
+    const length = 15;
+    const width = 2.6;
+    const deckY = 1.15;
+
+    // Tablones cruzados
+    const plankGeo = new THREE.BoxGeometry(width, 0.09, 0.42);
+    const planks = new THREE.InstancedMesh(plankGeo, plankMat, Math.floor(length / 0.5));
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < planks.count; i++) {
+      dummy.position.set(0, deckY, 0.6 + i * 0.5);
+      dummy.rotation.set(0, 0, (this.rng() - 0.5) * 0.01);
+      dummy.updateMatrix();
+      planks.setMatrixAt(i, dummy.matrix);
+    }
+    planks.castShadow = preset.shadows;
+    planks.receiveShadow = preset.shadows;
+    dock.add(planks);
+
+    // Vigas longitudinales
+    const beamGeo = new THREE.BoxGeometry(0.16, 0.2, length);
+    [-width / 2 + 0.2, width / 2 - 0.2].forEach((x) => {
+      const beam = new THREE.Mesh(beamGeo, wood);
+      beam.position.set(x, deckY - 0.15, length / 2 + 0.4);
+      beam.castShadow = preset.shadows;
+      dock.add(beam);
+    });
+
+    // Pilotes hasta el fondo
+    const pileGeo = new THREE.CylinderGeometry(0.14, 0.16, 1, 7);
+    for (let i = 0; i < 5; i++) {
+      const t = 0.7 + i * 3.4;
+      [-width / 2 + 0.2, width / 2 - 0.2].forEach((x) => {
+        const world = dock.localToWorld(new THREE.Vector3(x, 0, t));
+        const bed = this.terrain.heightAt(world.x, world.z);
+        const height = deckY + shore.y - bed + 0.3;
+        const pile = new THREE.Mesh(pileGeo, wood);
+        pile.scale.y = height;
+        pile.position.set(x, deckY - height / 2, t);
+        pile.castShadow = preset.shadows;
+        dock.add(pile);
+      });
+    }
+
+    // Barandilla parcial en el extremo
+    const railGeo = new THREE.BoxGeometry(0.08, 0.08, 3);
+    [-width / 2 + 0.2, width / 2 - 0.2].forEach((x) => {
+      const rail = new THREE.Mesh(railGeo, wood);
+      rail.position.set(x, deckY + 0.85, length - 1.2);
+      dock.add(rail);
+      for (let k = 0; k < 2; k++) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.9, 0.1), wood);
+        post.position.set(x, deckY + 0.45, length - 2.6 + k * 2.6);
+        dock.add(post);
+      }
+    });
+
+    this.group.add(dock);
+
+    // Puntos de pesca recomendados en la punta del muelle.
+    const tip = dock.localToWorld(new THREE.Vector3(0, deckY, length - 1.5));
+    this.fishingSpots.push({ name: 'Punta del muelle', position: tip });
+    this.dockDeckY = shore.y + deckY;
+    this.dockObject = dock;
+    return dock;
+  }
+
+  _buildBoat(angle, wood, preset) {
+    const shore = this.shorePoint(angle, -0.25);
+    const boat = new THREE.Group();
+    boat.position.set(shore.x, 0.02, shore.z);
+    boat.rotation.y = angle + Math.PI / 2 + 0.3;
+
+    // Casco: caja estrechada a proa y popa mediante escalado de vértices.
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.55, 4.2, 2, 1, 6), wood);
+    const pos = hull.geometry.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      const taper = 1 - Math.pow(Math.abs(v.z) / 2.1, 2) * 0.75;
+      v.x *= taper;
+      if (v.y > 0) v.x *= 1.12;
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    hull.geometry.computeVertexNormals();
+    hull.castShadow = preset.shadows;
+    boat.add(hull);
+
+    const bench = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.08, 0.35), wood);
+    bench.position.y = 0.22;
+    boat.add(bench);
+
+    this.group.add(boat);
+    this.boat = boat;
+    this.fishingSpots.push({ name: 'La barca', position: boat.position.clone().setY(0.5) });
+  }
+
+  _buildCamp(angle, wood, textures, preset) {
+    const spot = this.shorePoint(angle, 1.4);
+    const camp = new THREE.Group();
+    camp.position.copy(spot);
+
+    // Círculo de piedras
+    const stone = textures.material('roca', { repeat: 1 });
+    const stoneGeo = new THREE.DodecahedronGeometry(0.22, 0);
+    for (let i = 0; i < 9; i++) {
+      const a = (i / 9) * Math.PI * 2;
+      const s = new THREE.Mesh(stoneGeo, stone);
+      s.position.set(Math.cos(a) * 0.75, 0.08, Math.sin(a) * 0.75);
+      s.rotation.set(this.rng(), this.rng(), this.rng());
+      s.scale.setScalar(0.7 + this.rng() * 0.6);
+      s.castShadow = preset.shadows;
+      camp.add(s);
+    }
+    // Leña
+    for (let i = 0; i < 4; i++) {
+      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.8, 5), wood);
+      log.rotation.set(Math.PI / 2.2, (i / 4) * Math.PI, 0);
+      log.position.y = 0.12;
+      camp.add(log);
+    }
+    // Banco de tronco
+    const seat = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 2.2, 8), wood);
+    seat.rotation.z = Math.PI / 2;
+    seat.position.set(1.8, 0.24, 0.4);
+    seat.castShadow = preset.shadows;
+    camp.add(seat);
+
+    this.group.add(camp);
+    this.camp = camp;
+    this.fishingSpots.push({ name: 'Cala del campamento', position: spot.clone() });
+  }
+
+  dispose() {
+    this.group.traverse((o) => {
+      if (o.isMesh || o.isInstancedMesh) o.geometry.dispose();
+    });
+    this.scene.remove(this.group);
+  }
+}
+
+/* ===== src/weather/TimeOfDay.js ===== */
+/**
+ * Reloj del mundo y paleta de luz.
+ *
+ * Convierte una hora (0..24) en la posición del sol y en los colores de luz,
+ * cielo y niebla. Es la única fuente de verdad sobre "qué hora es": el cielo,
+ * la iluminación, la IA de los peces y el audio la consultan.
+ */
+
+const MAX_ELEVATION = THREE.MathUtils.degToRad(62);
+
+// Paradas de color a lo largo del día. Se interpolan según la altura del sol.
+const PALETTE = [
+  { key: 'noche',    sun: 0x2a3f6b, sky: 0x0a1224, fog: 0x0d1526, ambient: 0x1b2740, intensity: 0.25 },
+  { key: 'alba',     sun: 0xffa062, sky: 0x35486e, fog: 0x5b6884, ambient: 0x4b5470, intensity: 2.2 },
+  { key: 'mañana',   sun: 0xffe0b8, sky: 0x6ea3d8, fog: 0x9db6cf, ambient: 0x7d90a8, intensity: 4.6 },
+  { key: 'mediodía', sun: 0xfff6ea, sky: 0x74a9e2, fog: 0xa9c2d8, ambient: 0x93a7bd, intensity: 5.6 },
+  { key: 'ocaso',    sun: 0xff7a3c, sky: 0x3d4a72, fog: 0x6b5f70, ambient: 0x4a4560, intensity: 1.9 }
+];
+
+class TimeOfDay {
+  constructor({ hour = 7.5, speed = 1 / 90 } = {}) {
+    this.hour = hour;
+    this.speed = speed;              // horas por segundo real (1/90 ≈ 36 min/día)
+    this.paused = false;
+
+    this.sunDirection = new THREE.Vector3();
+    this.moonDirection = new THREE.Vector3();
+    this.sunColor = new THREE.Color();
+    this.skyColor = new THREE.Color();
+    this.fogColor = new THREE.Color();
+    this.ambientColor = new THREE.Color();
+    this.sunIntensity = 1;
+    this.elevation = 0;
+    this._update();
+  }
+
+  update(dt) {
+    if (!this.paused) {
+      this.hour = (this.hour + dt * this.speed * 24) % 24;
+    }
+    this._update();
+  }
+
+  setHour(hour) {
+    this.hour = ((hour % 24) + 24) % 24;
+    this._update();
+  }
+
+  /** 0 de día, 1 de noche cerrada. */
+  get nightFactor() {
+    return 1 - smoothstep(-0.12, 0.16, Math.sin(this.elevation));
+  }
+
+  /** Los peces comen al amanecer y al atardecer: 1 en la mejor franja. */
+  get feedingFactor() {
+    const h = this.hour;
+    const dawn = Math.exp(-Math.pow((h - 6.5) / 1.8, 2));
+    const dusk = Math.exp(-Math.pow((h - 19.5) / 1.8, 2));
+    const night = h < 4.5 || h > 21.5 ? 0.45 : 0;
+    return clamp(0.45 + dawn * 0.75 + dusk * 0.7 + night * 0.2, 0.3, 1.4);
+  }
+
+  get label() {
+    const h = Math.floor(this.hour);
+    const m = Math.floor((this.hour - h) * 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
+  _update() {
+    // 6h amanece, 12h cenit, 18h anochece. Fuera de esa franja el sol está bajo el horizonte.
+    const dayAngle = ((this.hour - 6) / 12) * Math.PI;
+    this.elevation = Math.sin(dayAngle) * MAX_ELEVATION;
+    const azimuth = THREE.MathUtils.degToRad(-40) + (this.hour / 24) * Math.PI * 2;
+
+    this.sunDirection.set(
+      Math.cos(this.elevation) * Math.cos(azimuth),
+      Math.sin(this.elevation),
+      Math.cos(this.elevation) * Math.sin(azimuth)
+    ).normalize();
+    this.moonDirection.copy(this.sunDirection).negate();
+
+    const stops = this._blendStops();
+    this.sunColor.copy(stops.sun);
+    this.skyColor.copy(stops.sky);
+    this.fogColor.copy(stops.fog);
+    this.ambientColor.copy(stops.ambient);
+    this.sunIntensity = stops.intensity;
+  }
+
+  _blendStops() {
+    const s = Math.sin(this.elevation);
+    let a, b, t;
+    if (s < -0.05) { a = PALETTE[0]; b = PALETTE[0]; t = 0; }
+    else if (s < 0.12) { a = PALETTE[0]; b = this.hour < 12 ? PALETTE[1] : PALETTE[4]; t = smoothstep(-0.05, 0.12, s); }
+    else if (s < 0.42) { a = this.hour < 12 ? PALETTE[1] : PALETTE[4]; b = PALETTE[2]; t = smoothstep(0.12, 0.42, s); }
+    else { a = PALETTE[2]; b = PALETTE[3]; t = smoothstep(0.42, 0.85, s); }
+
+    return {
+      sun: new THREE.Color(a.sun).lerp(new THREE.Color(b.sun), t),
+      sky: new THREE.Color(a.sky).lerp(new THREE.Color(b.sky), t),
+      fog: new THREE.Color(a.fog).lerp(new THREE.Color(b.fog), t),
+      ambient: new THREE.Color(a.ambient).lerp(new THREE.Color(b.ambient), t),
+      intensity: lerp(a.intensity, b.intensity, t)
+    };
+  }
+}
+
+/* ===== src/weather/Weather.js ===== */
+/**
+ * Meteorología: estados, transiciones suaves y lluvia.
+ *
+ * Cada preset no es sólo estético — la nubosidad y el viento entran en el
+ * cálculo de actividad de los peces, en el oleaje del agua y en la mezcla del
+ * audio ambiente.
+ */
+
+const WEATHER_PRESETS = {
+  despejado: { label: 'Despejado', cloudiness: 0.1, fogDensity: 0.00055, rain: 0, wind: 1.6, biteModifier: 1.0 },
+  nubes:     { label: 'Nublado',   cloudiness: 0.6, fogDensity: 0.0016, rain: 0, wind: 3.2, biteModifier: 1.15 },
+  niebla:    { label: 'Niebla',    cloudiness: 0.7,  fogDensity: 0.016,  rain: 0, wind: 0.6, biteModifier: 0.9 },
+  lluvia:    { label: 'Lluvia',    cloudiness: 0.88, fogDensity: 0.0075, rain: 0.6, wind: 5.5, biteModifier: 1.3 },
+  tormenta:  { label: 'Tormenta',  cloudiness: 1.0,  fogDensity: 0.012,  rain: 1, wind: 9, biteModifier: 0.75 }
+};
+
+const ORDER = Object.keys(WEATHER_PRESETS);
+
+class Weather {
+  constructor(scene, textures, preset, { initial = 'despejado', seed = 5 } = {}) {
+    this.scene = scene;
+    this.rng = createRandom(seed);
+    this.current = initial;
+    this.target = WEATHER_PRESETS[initial];
+
+    this.cloudiness = this.target.cloudiness;
+    this.fogDensity = this.target.fogDensity;
+    this.rainAmount = this.target.rain;
+    this.windSpeed = this.target.wind;
+    this.windDirection = new THREE.Vector2(1, 0.35).normalize();
+    this.timeToChange = 120 + this.rng() * 180;
+
+    this.fog = new THREE.FogExp2(0xa8bdd2, this.fogDensity);
+    scene.fog = this.fog;
+
+    this._buildRain(textures, preset.rainParticles);
+  }
+
+  _buildRain(textures, count) {
+    this.rainCount = count;
+    const positions = new Float32Array(count * 3);
+    const speeds = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      positions.set([
+        (this.rng() - 0.5) * 140,
+        this.rng() * 60,
+        (this.rng() - 0.5) * 140
+      ], i * 3);
+      speeds[i] = 26 + this.rng() * 22;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    this.rainSpeeds = speeds;
+
+    this.rain = new THREE.Points(geometry, new THREE.PointsMaterial({
+      map: textures.raindrop(),
+      color: 0xc9dcec,
+      size: 0.42,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      sizeAttenuation: true
+    }));
+    this.rain.frustumCulled = false;
+    this.rain.visible = false;
+    this.scene.add(this.rain);
+  }
+
+  setWeather(key) {
+    if (!WEATHER_PRESETS[key]) return;
+    this.current = key;
+    this.target = WEATHER_PRESETS[key];
+    this.timeToChange = 150 + this.rng() * 200;
+  }
+
+  cycle() {
+    const i = ORDER.indexOf(this.current);
+    this.setWeather(ORDER[(i + 1) % ORDER.length]);
+    return this.target.label;
+  }
+
+  get label() { return this.target.label; }
+  get biteModifier() { return this.target.biteModifier; }
+  /** Cuánto pica la superficie del agua: alimenta el shader del lago. */
+  get choppiness() { return clamp(0.5 + this.windSpeed / 9, 0.5, 2.4); }
+
+  update(dt, playerPosition, fogColor) {
+    this.timeToChange -= dt;
+    if (this.timeToChange <= 0) {
+      // Transición a un estado vecino: nunca se pasa de despejado a tormenta de golpe.
+      const i = ORDER.indexOf(this.current);
+      const next = ORDER[clamp(i + (this.rng() < 0.5 ? -1 : 1), 0, ORDER.length - 1)];
+      this.setWeather(next);
+    }
+
+    this.cloudiness = damp(this.cloudiness, this.target.cloudiness, 0.35, dt);
+    this.fogDensity = damp(this.fogDensity, this.target.fogDensity, 0.35, dt);
+    this.rainAmount = damp(this.rainAmount, this.target.rain, 0.5, dt);
+    this.windSpeed = damp(this.windSpeed, this.target.wind, 0.4, dt);
+
+    this.fog.density = this.fogDensity;
+    if (fogColor) this.fog.color.copy(fogColor);
+
+    this._updateRain(dt, playerPosition);
+  }
+
+  _updateRain(dt, center) {
+    const visible = this.rainAmount > 0.02;
+    this.rain.visible = visible;
+    if (!visible) return;
+
+    this.rain.material.opacity = clamp(this.rainAmount * 0.75, 0, 1);
+    const active = Math.floor(this.rainCount * clamp(this.rainAmount, 0, 1));
+    this.rain.geometry.setDrawRange(0, active);
+
+    const pos = this.rain.geometry.attributes.position;
+    const arr = pos.array;
+    const driftX = this.windDirection.x * this.windSpeed * dt;
+    const driftZ = this.windDirection.y * this.windSpeed * dt;
+
+    for (let i = 0; i < active; i++) {
+      const i3 = i * 3;
+      arr[i3 + 1] -= this.rainSpeeds[i] * dt;
+      arr[i3] += driftX;
+      arr[i3 + 2] += driftZ;
+      // Reciclado en una caja alrededor del jugador: la lluvia le acompaña.
+      if (arr[i3 + 1] < center.y - 6) {
+        arr[i3] = center.x + (this.rng() - 0.5) * 140;
+        arr[i3 + 1] = center.y + 45 + this.rng() * 20;
+        arr[i3 + 2] = center.z + (this.rng() - 0.5) * 140;
+      }
+    }
+    pos.needsUpdate = true;
+  }
+
+  dispose() {
+    this.rain.geometry.dispose();
+    this.rain.material.dispose();
+  }
+}
+
+/* ===== src/fish/FishData.js ===== */
+/**
+ * Catálogo de especies.
+ *
+ * Todo lo que distingue a un pez de otro vive aquí como datos: tamaño, fuerza,
+ * hábitat, horario, señuelos preferidos y carácter de pelea. Añadir una
+ * especie nueva no requiere tocar ni el motor ni la IA.
+ *
+ * - `depth`: franja de profundidad preferida en metros.
+ * - `activity`: multiplicador por franja horaria (madrugada, mañana, tarde, noche).
+ * - `lures`: afinidad por tipo de señuelo (1 = indiferente).
+ * - `fight`: cómo se comporta al estar enganchado.
+ */
+
+const SPECIES = [
+  {
+    id: 'perca_negra',
+    name: 'Perca negra',
+    latin: 'Micropterus salmoides',
+    rarity: 'comun',
+    lengthRange: [24, 58],          // cm
+    weightPerLength: 0.000018,       // kg = k * cm^3
+    depth: [0.8, 4.5],
+    prefersCover: true,              // junto a juncos y estructura
+    activity: { madrugada: 0.7, manana: 1.25, tarde: 1.15, noche: 0.5 },
+    lures: { cucharilla: 1.35, vinilo: 1.5, popper: 1.4, cucharilla_pesada: 0.8, ninfa: 0.7, boilie: 0.5 },
+    color: 0x3f5a33,
+    belly: 0.82,
+    speed: 3.4,
+    stamina: 1.1,
+    strength: 1.15,
+    fight: { runs: 3, jumpChance: 0.45, headshake: 1.3 },
+    price: 14
+  },
+  {
+    id: 'trucha_arcoiris',
+    name: 'Trucha arcoíris',
+    latin: 'Oncorhynchus mykiss',
+    rarity: 'comun',
+    lengthRange: [22, 52],
+    weightPerLength: 0.0000135,
+    depth: [1.5, 6],
+    prefersCover: false,
+    activity: { madrugada: 1.3, manana: 1.2, tarde: 0.9, noche: 0.55 },
+    lures: { cucharilla: 1.5, ninfa: 1.6, vinilo: 0.9, popper: 0.7, cucharilla_pesada: 1.0, boilie: 0.4 },
+    color: 0x6b7d86,
+    belly: 0.95,
+    speed: 4.6,
+    stamina: 1.25,
+    strength: 0.95,
+    fight: { runs: 4, jumpChance: 0.6, headshake: 1.0 },
+    price: 18
+  },
+  {
+    id: 'carpa_comun',
+    name: 'Carpa común',
+    latin: 'Cyprinus carpio',
+    rarity: 'comun',
+    lengthRange: [35, 92],
+    weightPerLength: 0.000027,
+    depth: [1.0, 5.0],
+    prefersCover: true,
+    activity: { madrugada: 1.1, manana: 1.0, tarde: 1.15, noche: 0.85 },
+    lures: { boilie: 1.9, ninfa: 1.1, vinilo: 0.6, cucharilla: 0.4, popper: 0.3, cucharilla_pesada: 0.5 },
+    color: 0x8a6f38,
+    belly: 0.9,
+    speed: 2.6,
+    stamina: 1.7,
+    strength: 1.45,
+    fight: { runs: 5, jumpChance: 0.05, headshake: 0.5 },
+    price: 12
+  },
+  {
+    id: 'lucio',
+    name: 'Lucio',
+    latin: 'Esox lucius',
+    rarity: 'raro',
+    lengthRange: [45, 118],
+    weightPerLength: 0.0000098,
+    depth: [1.2, 5.5],
+    prefersCover: true,
+    activity: { madrugada: 1.2, manana: 1.1, tarde: 1.25, noche: 0.6 },
+    lures: { cucharilla_pesada: 1.8, vinilo: 1.6, cucharilla: 1.2, popper: 1.1, ninfa: 0.4, boilie: 0.2 },
+    color: 0x4a5c30,
+    belly: 0.88,
+    speed: 5.2,
+    stamina: 1.35,
+    strength: 1.7,
+    fight: { runs: 4, jumpChance: 0.3, headshake: 1.8 },
+    price: 34
+  },
+  {
+    id: 'siluro',
+    name: 'Siluro',
+    latin: 'Silurus glanis',
+    rarity: 'raro',
+    lengthRange: [70, 205],
+    weightPerLength: 0.0000073,
+    depth: [4.5, 9.5],
+    prefersCover: false,
+    activity: { madrugada: 1.3, manana: 0.6, tarde: 0.8, noche: 1.8 },
+    lures: { vinilo: 1.5, boilie: 1.4, cucharilla_pesada: 1.3, cucharilla: 0.6, ninfa: 0.4, popper: 0.3 },
+    color: 0x3a3529,
+    belly: 0.78,
+    speed: 3.0,
+    stamina: 2.4,
+    strength: 2.6,
+    fight: { runs: 6, jumpChance: 0.02, headshake: 0.8 },
+    price: 46
+  },
+  {
+    id: 'tenca',
+    name: 'Tenca',
+    latin: 'Tinca tinca',
+    rarity: 'comun',
+    lengthRange: [20, 46],
+    weightPerLength: 0.000024,
+    depth: [0.5, 2.5],
+    prefersCover: true,
+    activity: { madrugada: 1.2, manana: 1.0, tarde: 1.0, noche: 0.7 },
+    lures: { boilie: 1.6, ninfa: 1.4, vinilo: 0.7, cucharilla: 0.35, popper: 0.25, cucharilla_pesada: 0.3 },
+    color: 0x3f4a26,
+    belly: 0.86,
+    speed: 2.4,
+    stamina: 1.2,
+    strength: 1.0,
+    fight: { runs: 3, jumpChance: 0.03, headshake: 0.6 },
+    price: 11
+  }
+];
+
+const SPECIES_BY_ID = Object.fromEntries(SPECIES.map((s) => [s.id, s]));
+
+/** Franja horaria para las tablas de actividad. */
+function timeBand(hour) {
+  if (hour < 6) return 'madrugada';
+  if (hour < 12) return 'manana';
+  if (hour < 20) return 'tarde';
+  return 'noche';
+}
+
+/** Peso realista a partir de la longitud (relación cúbica típica). */
+function weightFor(species, lengthCm) {
+  return species.weightPerLength * Math.pow(lengthCm, 3);
+}
+
+function valueFor(species, weightKg) {
+  return Math.max(1, Math.round(species.price * weightKg * 1.6));
+}
+
+/* ===== src/fish/Fish.js ===== */
+/**
+ * Un pez: cuerpo, animación de nado y máquina de estados.
+ *
+ * Estados: IDLE → SWIMMING → SEARCHING → INVESTIGATING → BITING → HOOKED →
+ * FIGHTING → ESCAPING → CAUGHT. Cada especie modula tiempos y probabilidades
+ * desde `FishData`, así que el comportamiento sale de los datos y no de
+ * condicionales repartidos por el código.
+ */
+
+const FishState = {
+  IDLE: 'idle',
+  SWIMMING: 'swimming',
+  SEARCHING: 'searching',
+  INVESTIGATING: 'investigating',
+  BITING: 'biting',
+  HOOKED: 'hooked',
+  FIGHTING: 'fighting',
+  ESCAPING: 'escaping',
+  CAUGHT: 'caught'
+};
+
+const geometryCache = new Map();
+
+/** Cuerpo de pez: elipsoide afilado + caudal + dorsal, fusionados. */
+function fishGeometry(speciesId) {
+  if (geometryCache.has(speciesId)) return geometryCache.get(speciesId);
+
+  const body = new THREE.SphereGeometry(0.5, 14, 10);
+  const pos = body.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const t = v.z / 0.5;                       // -1 cola, +1 morro
+    const taper = 1 - Math.pow(Math.abs(t), 2.1) * 0.85;
+    v.x *= 0.42 * taper;
+    v.y *= 0.62 * taper;
+    v.z *= 2.0;
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  body.computeVertexNormals();
+
+  const caudal = new THREE.PlaneGeometry(0.55, 0.7, 1, 1);
+  caudal.rotateY(Math.PI / 2);
+  caudal.translate(0, 0, -1.15);
+
+  const dorsal = new THREE.PlaneGeometry(0.7, 0.3, 1, 1);
+  dorsal.rotateY(Math.PI / 2);
+  dorsal.translate(0, 0.3, 0.05);
+
+  const geo = mergeGeometries([body, caudal, dorsal]);
+  body.dispose(); caudal.dispose(); dorsal.dispose();
+  geometryCache.set(speciesId, geo);
+  return geo;
+}
+
+function fishMaterial(species) {
+  const material = new THREE.MeshStandardMaterial({
+    color: species.color,
+    roughness: 0.42,
+    metalness: 0.22,
+    side: THREE.DoubleSide,
+    flatShading: false
+  });
+
+  // Ondulación de nado en el vertex shader: la cola bate y el cuerpo serpentea.
+  material.userData.uniforms = { uTime: { value: 0 }, uSwim: { value: 1 } };
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = material.userData.uniforms.uTime;
+    shader.uniforms.uSwim = material.userData.uniforms.uSwim;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        uniform float uTime;
+        uniform float uSwim;
+      `)
+      .replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        float tailFactor = clamp(-transformed.z * 0.9 + 0.35, 0.0, 1.6);
+        transformed.x += sin(uTime * 7.0 + transformed.z * 2.4) * 0.09 * tailFactor * uSwim;
+      `);
+  };
+  return material;
+}
+
+class Fish {
+  constructor(speciesId, { rng, position }) {
+    this.species = SPECIES_BY_ID[speciesId];
+    this.rng = rng;
+
+    this.length = skewedRandom(rng, this.species.lengthRange[0], this.species.lengthRange[1], 2.4);
+    this.weight = weightFor(this.species, this.length);
+    this.trophy = (this.length - this.species.lengthRange[0]) /
+      (this.species.lengthRange[1] - this.species.lengthRange[0]);
+
+    this.state = FishState.SWIMMING;
+    this.stateTime = 0;
+    this.interest = 0;
+    this.energy = 1;
+
+    this.position = position.clone();
+    this.velocity = new THREE.Vector3();
+    this.heading = rng() * Math.PI * 2;
+    this.wanderTarget = position.clone();
+    this.wanderTimer = 0;
+
+    const scale = this.length / 100;          // cm → m
+    this.material = fishMaterial(this.species);
+    this.mesh = new THREE.Mesh(fishGeometry(this.species.id), this.material);
+    this.mesh.scale.setScalar(scale);
+    this.mesh.position.copy(this.position);
+    this.mesh.castShadow = false;
+    this.mesh.visible = false;                // se enciende al acercarse
+    this.mesh.userData.fish = this;
+  }
+
+  get displayName() { return this.species.name; }
+  get isBusy() {
+    return this.state === FishState.HOOKED || this.state === FishState.FIGHTING;
+  }
+
+  setState(state) {
+    if (this.state === state) return;
+    this.state = state;
+    this.stateTime = 0;
+  }
+
+  /** Ganas de morder este señuelo, ahora, aquí. 0 = ni mirarlo. */
+  appetite(lure, hour, weatherModifier, depth) {
+    const s = this.species;
+    const affinity = s.lures[lure.id] ?? 0.8;
+    const band = s.activity[timeBand(hour)] ?? 1;
+    const depthFit = 1 - clamp(
+      Math.abs(depth - (s.depth[0] + s.depth[1]) / 2) / ((s.depth[1] - s.depth[0]) / 2 + 1.2),
+      0, 1
+    ) * 0.75;
+    // Los ejemplares grandes son más desconfiados.
+    const caution = 1 - this.trophy * 0.35;
+    return affinity * band * depthFit * caution * weatherModifier * lure.attraction;
+  }
+
+  update(dt, context) {
+    this.stateTime += dt;
+    this.material.userData.uniforms.uTime.value += dt * (0.6 + this.velocity.length() * 0.5);
+
+    switch (this.state) {
+      case FishState.SWIMMING: this._wander(dt, context); break;
+      case FishState.SEARCHING: this._search(dt, context); break;
+      case FishState.INVESTIGATING: this._investigate(dt, context); break;
+      case FishState.BITING: this._biting(dt, context); break;
+      case FishState.ESCAPING: this._escape(dt, context); break;
+      case FishState.HOOKED:
+      case FishState.FIGHTING: break;   // los conduce FishingSystem
+      default: break;
+    }
+
+    if (!this.isBusy) {
+      this.position.addScaledVector(this.velocity, dt);
+      this._clampToWater(context.terrain);
+    }
+    this._applyTransform(dt);
+  }
+
+  _applyTransform(dt) {
+    this.mesh.position.copy(this.position);
+    const speed = this.velocity.length();
+    if (speed > 0.02) {
+      const look = this.position.clone().addScaledVector(this.velocity, 1 / Math.max(speed, 0.001));
+      this.mesh.lookAt(look);
+    }
+    this.material.userData.uniforms.uSwim.value = clamp(0.35 + speed * 0.5, 0.3, 2.2);
+  }
+
+  /** No sale del agua ni atraviesa el fondo. */
+  _clampToWater(terrain) {
+    const bed = terrain.heightAt(this.position.x, this.position.z);
+    const minY = bed + 0.18;
+    const maxY = terrain.waterLevel - 0.15;
+    if (minY >= maxY) {
+      // Ha llegado a un bajío sin calado: da media vuelta hacia el centro.
+      this.velocity.set(-this.position.x, 0, -this.position.z).normalize().multiplyScalar(this.species.speed * 0.4);
+      this.position.y = Math.min(maxY, minY);
+      return;
+    }
+    if (this.position.y < minY) { this.position.y = minY; this.velocity.y = Math.abs(this.velocity.y) * 0.4; }
+    if (this.position.y > maxY) { this.position.y = maxY; this.velocity.y = -Math.abs(this.velocity.y) * 0.4; }
+  }
+
+  _wander(dt, { terrain }) {
+    this.wanderTimer -= dt;
+    if (this.wanderTimer <= 0) {
+      this.wanderTimer = 3 + this.rng() * 6;
+      const s = this.species;
+      const preferredDepth = lerp(s.depth[0], s.depth[1], this.rng());
+      const angle = this.heading + (this.rng() - 0.5) * 2.2;
+      const dist = 6 + this.rng() * 16;
+      const nx = this.position.x + Math.cos(angle) * dist;
+      const nz = this.position.z + Math.sin(angle) * dist;
+      const depthThere = terrain.depthAt(nx, nz);
+      if (depthThere > s.depth[0] * 0.6) {
+        this.heading = angle;
+        this.wanderTarget.set(nx, terrain.waterLevel - clamp(preferredDepth, 0.4, depthThere - 0.3), nz);
+      } else {
+        this.heading += Math.PI * (0.6 + this.rng() * 0.8);   // hacia aguas con calado
+      }
+    }
+    this._steerTo(this.wanderTarget, this.species.speed * 0.28, dt);
+  }
+
+  _search(dt, context) {
+    const lure = context.lurePosition;
+    if (!lure) { this.setState(FishState.SWIMMING); return; }
+    this._steerTo(lure, this.species.speed * 0.55, dt);
+    if (this.position.distanceTo(lure) < 2.4) this.setState(FishState.INVESTIGATING);
+    if (this.stateTime > 14) this.setState(FishState.ESCAPING);
+  }
+
+  _investigate(dt, context) {
+    const lure = context.lurePosition;
+    if (!lure) { this.setState(FishState.SWIMMING); return; }
+
+    // Rodea el señuelo mientras se decide.
+    const toLure = lure.clone().sub(this.position);
+    const dist = toLure.length();
+    const tangent = new THREE.Vector3(-toLure.z, 0, toLure.x).normalize();
+    const desired = lure.clone()
+      .addScaledVector(tangent, 0.9)
+      .addScaledVector(toLure.normalize(), -0.7);
+    this._steerTo(desired, this.species.speed * 0.4, dt);
+
+    // El movimiento del señuelo despierta el ataque; quieto, desconfía.
+    const action = context.lureAction || 0;
+    const chance = this.interest * (0.25 + action * 0.9) * dt;
+    if (this.rng() < chance && dist < 1.8) {
+      this.setState(FishState.BITING);
+      this.biteStrength = clamp(0.35 + this.interest * 0.5 + this.trophy * 0.4, 0.25, 1.6);
+      context.onBite?.(this);
+    } else if (this.stateTime > 6 + this.interest * 5) {
+      this.setState(FishState.ESCAPING);
+    }
+  }
+
+  _biting(dt, context) {
+    const lure = context.lurePosition;
+    if (lure) this._steerTo(lure, this.species.speed * 0.5, dt);
+    // Ventana para clavar: si el jugador no reacciona, lo suelta.
+    if (this.stateTime > 1.15 + this.species.stamina * 0.35) {
+      context.onSpit?.(this);
+      this.setState(FishState.ESCAPING);
+    }
+  }
+
+  _escape(dt, { terrain }) {
+    const away = this.position.clone().setY(0).normalize().negate().multiplyScalar(-1);
+    this.velocity.lerp(away.multiplyScalar(this.species.speed * 0.6), 1 - Math.exp(-2 * dt));
+    if (this.stateTime > 5) { this.interest = 0; this.setState(FishState.SWIMMING); }
+  }
+
+  _steerTo(target, speed, dt) {
+    const desired = target.clone().sub(this.position);
+    const d = desired.length();
+    if (d < 0.001) return;
+    desired.multiplyScalar(speed / d);
+    this.velocity.x = damp(this.velocity.x, desired.x, 1.8, dt);
+    this.velocity.y = damp(this.velocity.y, desired.y, 1.4, dt);
+    this.velocity.z = damp(this.velocity.z, desired.z, 1.8, dt);
+  }
+
+  dispose() {
+    this.material.dispose();
+  }
+}
+
+/* ===== src/fish/FishManager.js ===== */
+/**
+ * Población del lago.
+ *
+ * Los peces existen antes de que el jugador lance: nacen en el hábitat que les
+ * corresponde por profundidad y se mueven por el lago. Cuando hay un señuelo en
+ * el agua, este gestor evalúa qué peces cercanos se interesan y los pasa a
+ * SEARCHING; nunca se genera un pez "a medida" delante del jugador.
+ */
+
+const MAX_VISIBLE_DISTANCE = 45;
+
+class FishManager {
+  constructor(scene, terrain, { population = 72, seed = 71 } = {}) {
+    this.scene = scene;
+    this.terrain = terrain;
+    this.rng = createRandom(seed);
+    this.fishes = [];
+    this.group = new THREE.Group();
+    this.group.name = 'peces';
+    scene.add(this.group);
+
+    for (let i = 0; i < population; i++) this._spawn();
+  }
+
+  _randomSpotFor(species) {
+    // Busca un punto con la profundidad que esa especie prefiere.
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const angle = this.rng() * Math.PI * 2;
+      const radius = this.rng() * this.terrain.field.lakeRadius * 1.05;
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
+      const depth = this.terrain.depthAt(x, z);
+      if (depth < species.depth[0] * 0.7 || depth > species.depth[1] * 1.6) continue;
+      const y = this.terrain.waterLevel - clamp(
+        species.depth[0] + this.rng() * (species.depth[1] - species.depth[0]),
+        0.4, depth - 0.25
+      );
+      return new THREE.Vector3(x, y, z);
+    }
+    return null;
+  }
+
+  _spawn() {
+    // Las especies raras aparecen menos.
+    const pool = SPECIES.filter((s) => s.rarity !== 'raro' || this.rng() < 0.35);
+    const species = pool[Math.floor(this.rng() * pool.length)] || SPECIES[0];
+    const position = this._randomSpotFor(species);
+    if (!position) return null;
+
+    const fish = new Fish(species.id, { rng: this.rng, position });
+    this.fishes.push(fish);
+    this.group.add(fish.mesh);
+    return fish;
+  }
+
+  /** Pez que está mordiendo ahora mismo, si lo hay. */
+  get biting() {
+    return this.fishes.find((f) => f.state === FishState.BITING) || null;
+  }
+
+  /**
+   * Reparte interés entre los peces cercanos al señuelo.
+   * `lureAction` (0..1) es cuánto se está moviendo el señuelo al recoger.
+   */
+  evaluate(context) {
+    const { lurePosition, lure, hour, weatherModifier, lureAction, feeding } = context;
+    if (!lurePosition || !lure) {
+      this.fishes.forEach((f) => {
+        if (f.state === FishState.SEARCHING || f.state === FishState.INVESTIGATING) {
+          f.interest = 0;
+          f.setState(FishState.SWIMMING);
+        }
+      });
+      return;
+    }
+
+    const depth = this.terrain.depthAt(lurePosition.x, lurePosition.z);
+    for (const fish of this.fishes) {
+      if (fish.isBusy || fish.state === FishState.ESCAPING || fish.state === FishState.BITING) continue;
+
+      const distance = fish.position.distanceTo(lurePosition);
+      const detection = 9 + fish.species.speed * 2.4;
+      if (distance > detection) {
+        if (fish.state === FishState.SEARCHING) fish.setState(FishState.SWIMMING);
+        continue;
+      }
+
+      const appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
+      // Se enfría con la distancia: el señuelo tiene que estar en su zona.
+      fish.interest = clamp(appetite * (1 - distance / detection), 0, 2);
+
+      if (fish.state === FishState.SWIMMING && fish.interest > 0.35 && this.rng() < fish.interest * 0.02) {
+        fish.setState(FishState.SEARCHING);
+      }
+    }
+  }
+
+  update(dt, context) {
+    const camera = context.cameraPosition;
+    for (const fish of this.fishes) {
+      fish.update(dt, context);
+      // Sólo se dibujan los peces cercanos: el resto sigue simulándose barato.
+      fish.mesh.visible = !!camera && fish.position.distanceTo(camera) < MAX_VISIBLE_DISTANCE;
+    }
+  }
+
+  /** Retira un pez capturado y repone la población en otro punto del lago. */
+  remove(fish) {
+    const i = this.fishes.indexOf(fish);
+    if (i >= 0) this.fishes.splice(i, 1);
+    this.group.remove(fish.mesh);
+    fish.dispose();
+    this._spawn();
+  }
+
+  /** Devuelve un pez al agua tras soltarlo o perderlo. */
+  release(fish) {
+    fish.interest = 0;
+    fish.setState(FishState.ESCAPING);
+  }
+
+  get counts() {
+    const byState = {};
+    this.fishes.forEach((f) => { byState[f.state] = (byState[f.state] || 0) + 1; });
+    return { total: this.fishes.length, byState };
+  }
+
+  dispose() {
+    this.fishes.forEach((f) => f.dispose());
+    this.scene.remove(this.group);
+  }
+}
+
+/* ===== src/gear/GearData.js ===== */
+/**
+ * Catálogo de equipo. Datos puros: la caña, el carrete, la línea y el señuelo
+ * son cuatro ejes independientes y sus estadísticas se combinan en
+ * `Equipment.stats`.
+ *
+ * Cañas      → potencia (lanzamiento), resistencia (tensión que aguanta), sensibilidad (aviso de picada).
+ * Carretes   → capacidad de línea, velocidad de recogida, freno máximo.
+ * Líneas     → resistencia en kg, diámetro (más fino = más lejos, menos aguante), elasticidad (amortigua tirones).
+ * Señuelos   → peso (distancia), profundidad de trabajo, acción y atractivo.
+ */
+
+const RODS = [
+  { id: 'cana_iniciacion', name: 'Caña de iniciación', power: 1.0, length: 1.98, strength: 5.5, sensitivity: 0.55, price: 0,
+    description: 'Fibra de vidrio pesada. Cumple, sin más.' },
+  { id: 'cana_ligera', name: 'Caña ligera de lago', power: 1.25, length: 2.13, strength: 7.0, sensitivity: 0.78, price: 320,
+    description: 'Puntera sensible: notas la picada mucho antes.' },
+  { id: 'cana_carbono', name: 'Caña de carbono', power: 1.5, length: 2.44, strength: 9.5, sensitivity: 0.9, price: 1400,
+    description: 'Ligera y con reserva de potencia para peces grandes.' },
+  { id: 'cana_pesada', name: 'Caña de acción pesada', power: 1.78, length: 2.7, strength: 14, sensitivity: 0.82, price: 4200,
+    description: 'Para siluros y lucios de talla. Poco fina, mucha fuerza.' }
+];
+
+const REELS = [
+  { id: 'carrete_basico', name: 'Carrete básico', capacity: 90, retrieve: 0.62, maxDrag: 3.0, durability: 0.6, price: 0,
+    description: 'Recuperación lenta y freno justo.' },
+  { id: 'carrete_medio', name: 'Carrete de aluminio', capacity: 140, retrieve: 0.85, maxDrag: 5.5, durability: 0.8, price: 380,
+    description: 'Freno progresivo y recogida decente.' },
+  { id: 'carrete_avanzado', name: 'Carrete de competición', capacity: 200, retrieve: 1.1, maxDrag: 9.0, durability: 0.95, price: 1800,
+    description: 'Freno fino y mucha recogida por vuelta.' },
+  { id: 'carrete_pesado', name: 'Carrete de gran pez', capacity: 300, retrieve: 0.95, maxDrag: 15, durability: 1.0, price: 5200,
+    description: 'Pensado para frenar carreras largas sin fundirse.' }
+];
+
+const LINES = [
+  { id: 'nylon_022', name: 'Nailon 0,22 mm', strength: 4.0, diameter: 0.22, elasticity: 0.85, price: 0,
+    description: 'Elástico y perdonavidas, pero se rompe pronto.' },
+  { id: 'nylon_028', name: 'Nailon 0,28 mm', strength: 6.5, diameter: 0.28, elasticity: 0.8, price: 140,
+    description: 'Más aguante a cambio de algo de distancia.' },
+  { id: 'fluoro_026', name: 'Fluorocarbono 0,26 mm', strength: 7.5, diameter: 0.26, elasticity: 0.5, price: 620,
+    description: 'Casi invisible bajo el agua. Poco elástico: cuidado con los tirones.' },
+  { id: 'trenzado_020', name: 'Trenzado 0,20 mm', strength: 13, diameter: 0.20, elasticity: 0.12, price: 1900,
+    description: 'Sin elasticidad: transmite todo y aguanta mucho, pero no perdona un frenazo.' }
+];
+
+const LURES = [
+  { id: 'cucharilla', name: 'Cucharilla giratoria', weightG: 8, workingDepth: 1.6, action: 0.85, attraction: 1.0, price: 0,
+    description: 'Vibración constante al recoger. Versátil.' },
+  { id: 'vinilo', name: 'Vinilo con cabeza plomada', weightG: 14, workingDepth: 3.2, action: 0.7, attraction: 1.1, price: 90,
+    description: 'Trabaja a media agua. Muy imitativo.' },
+  { id: 'popper', name: 'Popper de superficie', weightG: 11, workingDepth: 0.3, action: 1.0, attraction: 0.95, price: 160,
+    description: 'Chapotea en superficie. Espectacular al amanecer.' },
+  { id: 'ninfa', name: 'Ninfa lastrada', weightG: 4, workingDepth: 2.0, action: 0.45, attraction: 1.05, price: 120,
+    description: 'Discreta y ligera. Cuesta lanzarla lejos.' },
+  { id: 'cucharilla_pesada', name: 'Cucharilla pesada', weightG: 24, workingDepth: 5.0, action: 0.8, attraction: 0.9, price: 340,
+    description: 'Baja rápido: la herramienta para el fondo.' },
+  { id: 'boilie', name: 'Boilie al fondo', weightG: 18, workingDepth: 7.5, action: 0.1, attraction: 1.2, price: 210,
+    description: 'Cebo quieto en el fondo. Paciencia, pero peces grandes.' }
+];
+
+const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES };
+
+const CATEGORY_LABELS = {
+  rods: 'Cañas',
+  reels: 'Carretes',
+  lines: 'Líneas',
+  lures: 'Señuelos'
+};
+
+function findItem(category, id) {
+  return (CATALOG[category] || []).find((item) => item.id === id) || null;
+}
+
+/* ===== src/gear/Inventory.js ===== */
+/** Qué posee el jugador. No sabe nada de estadísticas: sólo de propiedad. */
+class Inventory {
+  constructor(initial = null) {
+    this.owned = initial || {
+      rods: ['cana_iniciacion'],
+      reels: ['carrete_basico'],
+      lines: ['nylon_022'],
+      lures: ['cucharilla']
+    };
+  }
+
+  has(category, id) {
+    return (this.owned[category] || []).includes(id);
+  }
+
+  add(category, id) {
+    if (!CATALOG[category] || !findItem(category, id)) return false;
+    if (this.has(category, id)) return false;
+    this.owned[category].push(id);
+    return true;
+  }
+
+  list(category) {
+    return (this.owned[category] || []).map((id) => findItem(category, id)).filter(Boolean);
+  }
+
+  toJSON() { return { owned: this.owned }; }
+
+  static fromJSON(data) {
+    if (!data?.owned) return new Inventory();
+    const clean = {};
+    for (const category of Object.keys(CATALOG)) {
+      clean[category] = (data.owned[category] || []).filter((id) => findItem(category, id));
+      if (!clean[category].length) clean[category] = [CATALOG[category][0].id];
+    }
+    return new Inventory(clean);
+  }
+}
+
+/* ===== src/gear/Equipment.js ===== */
+/**
+ * Montaje equipado y estadísticas derivadas.
+ *
+ * Aquí es donde caña + carrete + línea + señuelo se convierten en los números
+ * que usa el sistema de pesca: cuánto se lanza, cuánto aguanta la línea, a qué
+ * velocidad se recoge y cuánto freno se puede aplicar.
+ */
+class Equipment {
+  constructor(inventory, equipped = null) {
+    this.inventory = inventory;
+    this.equipped = equipped || {
+      rods: 'cana_iniciacion',
+      reels: 'carrete_basico',
+      lines: 'nylon_022',
+      lures: 'cucharilla'
+    };
+  }
+
+  get rod() { return findItem('rods', this.equipped.rods) || CATALOG.rods[0]; }
+  get reel() { return findItem('reels', this.equipped.reels) || CATALOG.reels[0]; }
+  get line() { return findItem('lines', this.equipped.lines) || CATALOG.lines[0]; }
+  get lure() { return findItem('lures', this.equipped.lures) || CATALOG.lures[0]; }
+
+  equip(category, id) {
+    if (!this.inventory.has(category, id)) return false;
+    this.equipped[category] = id;
+    return true;
+  }
+
+  get stats() {
+    const { rod, reel, line, lure } = this;
+
+    // Un señuelo con peso vuela más; una línea gruesa frena el lanzamiento.
+    const lureFactor = clamp(0.62 + lure.weightG / 26, 0.62, 1.4);
+    const lineFactor = clamp(1.2 - line.diameter * 1.35, 0.72, 1.16);
+    const castDistance = 17 * rod.power * lureFactor * lineFactor * (0.85 + reel.retrieve * 0.35);
+
+    return {
+      castDistance,                                   // metros a máxima potencia
+      lineStrength: line.strength,                    // kg antes de romper
+      // El freno nunca puede superar lo que aguanta la línea.
+      maxDrag: Math.min(reel.maxDrag, line.strength * 0.82),
+      retrieveSpeed: 0.85 + reel.retrieve * 1.5,      // m/s de recogida
+      sensitivity: rod.sensitivity,
+      elasticity: line.elasticity,                    // amortigua los picos de tensión
+      rodStrength: rod.strength,                      // tensión que aguanta la caña
+      workingDepth: lure.workingDepth,
+      lureAction: lure.action,
+      capacity: reel.capacity                         // metros de línea disponibles
+    };
+  }
+
+  toJSON() { return { equipped: this.equipped }; }
+
+  static fromJSON(inventory, data) {
+    const equipment = new Equipment(inventory);
+    if (data?.equipped) {
+      for (const [category, id] of Object.entries(data.equipped)) {
+        if (inventory.has(category, id)) equipment.equipped[category] = id;
+      }
+    }
+    return equipment;
+  }
+}
+
+/* ===== src/economy/Economy.js ===== */
+/**
+ * Dinero, ventas y registro de capturas.
+ *
+ * El registro guarda récords por especie: es a la vez "pantalla de peces
+ * capturados" y base de la progresión futura (logros, licencias, zonas).
+ */
+class Economy {
+  constructor(data = null) {
+    this.money = data?.money ?? 60;
+    this.records = data?.records ?? {};      // id → { count, bestLength, bestWeight }
+    this.stats = data?.stats ?? {
+      casts: 0, hooked: 0, landed: 0, lost: 0, lineBreaks: 0, totalWeight: 0, biggest: 0
+    };
+    this.unlockedZones = data?.unlockedZones ?? ['lago_niebla'];
+  }
+
+  /** Registra una captura y devuelve lo que vale. */
+  registerCatch(fish) {
+    const id = fish.species.id;
+    const record = this.records[id] || { count: 0, bestLength: 0, bestWeight: 0 };
+    const isRecord = fish.length > record.bestLength;
+    record.count += 1;
+    record.bestLength = Math.max(record.bestLength, fish.length);
+    record.bestWeight = Math.max(record.bestWeight, fish.weight);
+    this.records[id] = record;
+
+    this.stats.landed += 1;
+    this.stats.totalWeight += fish.weight;
+    this.stats.biggest = Math.max(this.stats.biggest, fish.weight);
+
+    const value = valueFor(fish.species, fish.weight);
+    return { value, isRecord, isNew: record.count === 1 };
+  }
+
+  sell(amount) {
+    this.money += amount;
+    return this.money;
+  }
+
+  canAfford(price) { return this.money >= price; }
+
+  buy(category, id) {
+    const item = findItem(category, id);
+    if (!item || !this.canAfford(item.price)) return false;
+    this.money -= item.price;
+    return true;
+  }
+
+  get discovered() {
+    return Object.keys(this.records).filter((id) => this.records[id].count > 0).length;
+  }
+
+  get speciesTotal() { return Object.keys(SPECIES_BY_ID).length; }
+
+  toJSON() {
+    return {
+      money: this.money,
+      records: this.records,
+      stats: this.stats,
+      unlockedZones: this.unlockedZones
+    };
+  }
+}
+
+/* ===== src/fishing/Line.js ===== */
+/**
+ * Línea de pesca: cuerda de Verlet entre la puntera y el señuelo.
+ *
+ * La simulación es puramente visual —la tensión de juego la calcula
+ * `FishingSystem` a partir de fuerzas— pero comparte con ella el mismo dato:
+ * `lineOut`, los metros de hilo soltados. Si hay más hilo que distancia, la
+ * cuerda cuelga; si hay menos, se tensa en línea recta. Por eso lo que se ve
+ * coincide siempre con lo que se siente.
+ */
+
+const SEGMENTS = 22;
+const LINE_GRAVITY = new THREE.Vector3(0, -9.81, 0);
+
+class FishingLine {
+  constructor(scene, { color = 0xe8f1f5 } = {}) {
+    this.points = [];
+    for (let i = 0; i < SEGMENTS; i++) {
+      this.points.push({
+        position: new THREE.Vector3(),
+        previous: new THREE.Vector3()
+      });
+    }
+
+    const positions = new Float32Array(SEGMENTS * 3);
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    this.material = new THREE.LineBasicMaterial({
+      color, transparent: true, opacity: 0.75, depthWrite: false
+    });
+    this.mesh = new THREE.Line(this.geometry, this.material);
+    this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
+    this.mesh.name = 'linea';
+    scene.add(this.mesh);
+  }
+
+  /** Coloca la cuerda recta entre dos puntos (al lanzar). */
+  reset(start, end) {
+    for (let i = 0; i < SEGMENTS; i++) {
+      const t = i / (SEGMENTS - 1);
+      const p = start.clone().lerp(end, t);
+      this.points[i].position.copy(p);
+      this.points[i].previous.copy(p);
+    }
+  }
+
+  /**
+   * @param start   puntera de la caña
+   * @param end     posición del señuelo
+   * @param lineOut metros de hilo fuera del carrete
+   * @param wind    viento, que curva el hilo suelto
+   */
+  update(dt, start, end, lineOut, wind) {
+    const step = Math.min(dt, 0.033);
+    const restLength = Math.max(0.05, lineOut / (SEGMENTS - 1));
+
+    // Integración de Verlet con amortiguación.
+    for (let i = 1; i < SEGMENTS - 1; i++) {
+      const p = this.points[i];
+      const velocity = p.position.clone().sub(p.previous).multiplyScalar(0.94);
+      p.previous.copy(p.position);
+      p.position.add(velocity);
+      p.position.addScaledVector(LINE_GRAVITY, step * step * 0.55);
+      if (wind) p.position.addScaledVector(wind, step * step * 0.35);
+    }
+
+    // Extremos fijos: puntera y señuelo.
+    this.points[0].position.copy(start);
+    this.points[SEGMENTS - 1].position.copy(end);
+
+    // Relajación de distancias. Varias pasadas dan una cuerda estable.
+    for (let iteration = 0; iteration < 6; iteration++) {
+      for (let i = 0; i < SEGMENTS - 1; i++) {
+        const a = this.points[i].position;
+        const b = this.points[i + 1].position;
+        const delta = b.clone().sub(a);
+        const distance = delta.length();
+        if (distance < 1e-5) continue;
+        // Sólo tira si está estirado: una cuerda no empuja.
+        const difference = (distance - restLength) / distance;
+        if (difference <= 0) continue;
+        const correction = delta.multiplyScalar(difference * 0.5);
+        if (i > 0) a.add(correction);
+        if (i + 1 < SEGMENTS - 1) b.sub(correction);
+      }
+      this.points[0].position.copy(start);
+      this.points[SEGMENTS - 1].position.copy(end);
+    }
+
+    const array = this.geometry.attributes.position.array;
+    for (let i = 0; i < SEGMENTS; i++) {
+      const p = this.points[i].position;
+      array[i * 3] = p.x;
+      array[i * 3 + 1] = p.y;
+      array[i * 3 + 2] = p.z;
+    }
+    this.geometry.attributes.position.needsUpdate = true;
+    this.geometry.computeBoundingSphere();
+  }
+
+  /** La línea muy tensa se ve más fina y clara. */
+  setTension(ratio) {
+    this.material.opacity = clamp(0.5 + ratio * 0.45, 0.5, 0.98);
+    this.material.color.setHSL(0.55 - ratio * 0.55, ratio * 0.7, 0.85);
+  }
+
+  setVisible(value) { this.mesh.visible = value; }
+
+  dispose() {
+    this.geometry.dispose();
+    this.material.dispose();
+  }
+}
+
+/* ===== src/fishing/Lure.js ===== */
+/**
+ * Señuelo/flotador: vuelo balístico, entrada en el agua y trabajo sumergido.
+ *
+ * Cada señuelo del catálogo tiene su profundidad de trabajo: la cucharilla
+ * pesada baja al fondo, el popper se queda en superficie. Al recoger, sube
+ * hacia su profundidad y genera "acción", que es lo que despierta a los peces.
+ */
+
+const LureState = {
+  STOWED: 'stowed',
+  FLYING: 'flying',
+  WATER: 'water',
+  LANDED: 'landed'      // en tierra: lanzamiento fallido
+};
+
+const AIR_DRAG = 0.16;
+const GRAVITY_Y = -9.81;
+
+class Lure {
+  constructor(scene) {
+    this.state = LureState.STOWED;
+    this.position = new THREE.Vector3();
+    this.velocity = new THREE.Vector3();
+    this.depthTarget = 0;
+    this.action = 0;          // 0..1, cuánto se está moviendo bajo el agua
+    this.submergedTime = 0;
+
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.SphereGeometry(0.055, 10, 8),
+      new THREE.MeshStandardMaterial({ color: 0xd8402c, roughness: 0.35, metalness: 0.45 })
+    );
+    body.scale.set(1, 1, 1.7);
+    group.add(body);
+    const blade = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04, 8, 6),
+      new THREE.MeshStandardMaterial({ color: 0xd9d2b0, roughness: 0.2, metalness: 0.9 })
+    );
+    blade.scale.set(0.4, 1.2, 0.9);
+    blade.position.z = 0.08;
+    group.add(blade);
+
+    this.object = group;
+    this.object.visible = false;
+    scene.add(this.object);
+  }
+
+  cast(origin, direction, speed, lure) {
+    this.position.copy(origin);
+    this.velocity.copy(direction).normalize().multiplyScalar(speed);
+    this.state = LureState.FLYING;
+    this.depthTarget = lure.workingDepth;
+    this.submergedTime = 0;
+    this.action = 0;
+    this.object.visible = true;
+  }
+
+  stow() {
+    this.state = LureState.STOWED;
+    this.object.visible = false;
+    this.action = 0;
+  }
+
+  get isFishable() { return this.state === LureState.WATER; }
+
+  /**
+   * @param retrieve  0..1 cuánto está recogiendo el jugador
+   * @returns evento de entrada en el agua, para salpicadura y sonido
+   */
+  update(dt, { terrain, waterLevel, retrieve = 0, rodTip, retrieveSpeed = 1.5, wind }) {
+    let event = null;
+
+    if (this.state === LureState.FLYING) {
+      this.velocity.y += GRAVITY_Y * dt;
+      this.velocity.addScaledVector(this.velocity.clone().normalize(), -AIR_DRAG * this.velocity.length() * dt);
+      if (wind) this.velocity.addScaledVector(wind, dt * 0.06);
+      this.position.addScaledVector(this.velocity, dt);
+
+      const bed = terrain.heightAt(this.position.x, this.position.z);
+      if (this.position.y <= waterLevel && bed < waterLevel) {
+        this.position.y = waterLevel;
+        this.state = LureState.WATER;
+        this.velocity.set(0, 0, 0);
+        this.submergedTime = 0;
+        event = { type: 'splash', position: this.position.clone(), strength: 1 };
+      } else if (this.position.y <= bed) {
+        this.position.y = bed;
+        this.state = LureState.LANDED;
+        this.velocity.set(0, 0, 0);
+        event = { type: 'ground', position: this.position.clone() };
+      }
+    } else if (this.state === LureState.WATER) {
+      this.submergedTime += dt;
+      const bed = terrain.heightAt(this.position.x, this.position.z);
+      const maxDepth = Math.max(0.15, waterLevel - bed - 0.08);
+
+      // Hundimiento hasta su profundidad de trabajo; al recoger, sube.
+      const sinkTarget = waterLevel - clamp(this.depthTarget, 0, maxDepth);
+      const workTarget = waterLevel - clamp(this.depthTarget * (1 - retrieve * 0.55), 0, maxDepth);
+      const target = retrieve > 0.05 ? workTarget : sinkTarget;
+      const sinkRate = retrieve > 0.05 ? 3.2 : 0.55;
+      this.position.y = damp(this.position.y, target, sinkRate, dt);
+
+      if (retrieve > 0.05 && rodTip) {
+        const toRod = rodTip.clone().setY(this.position.y).sub(this.position);
+        const distance = toRod.length();
+        if (distance > 0.01) {
+          const step = Math.min(distance, retrieveSpeed * retrieve * dt);
+          this.position.addScaledVector(toRod.divideScalar(distance), step);
+        }
+      }
+
+      // La "acción" decae si el señuelo está quieto.
+      this.action = damp(this.action, retrieve, 6, dt);
+      this.object.rotation.z += this.action * dt * 6;
+    }
+
+    this.object.position.copy(this.position);
+    if (this.state === LureState.FLYING && this.velocity.lengthSq() > 0.01) {
+      this.object.lookAt(this.position.clone().add(this.velocity));
+    }
+    return event;
+  }
+
+  dispose() {
+    this.object.traverse((o) => {
+      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+    });
+  }
+}
+
+/* ===== src/fishing/Rod.js ===== */
+/**
+ * Caña en primera persona.
+ *
+ * Es un tubo generado sobre una curva: al subir la tensión, la puntera se
+ * dobla de verdad (se recalcula la curva), en vez de rotar la malla entera.
+ * La puntera es también el ancla de la línea, así que lo que se ve y lo que
+ * simula la física es el mismo punto.
+ */
+class Rod {
+  constructor(camera, equipment) {
+    this.equipment = equipment;
+    this.bend = 0;
+    this.targetBend = 0;
+    this.sway = new THREE.Vector2();
+
+    this.group = new THREE.Group();
+    this.group.position.set(0.42, -0.34, -0.42);
+    this.group.rotation.set(0.05, -0.3, 0.2);
+    camera.add(this.group);
+
+    this.material = new THREE.MeshStandardMaterial({ color: 0x4a5158, roughness: 0.35, metalness: 0.35 });
+    this.gripMaterial = new THREE.MeshStandardMaterial({ color: 0x4a3527, roughness: 0.9 });
+
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.28, 8), this.gripMaterial);
+    grip.rotation.x = Math.PI / 2;
+    grip.position.z = 0.1;
+    this.group.add(grip);
+
+    const reelSeat = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.06, 10),
+      new THREE.MeshStandardMaterial({ color: 0x8b8f96, roughness: 0.3, metalness: 0.8 }));
+    reelSeat.position.set(0, -0.05, 0.02);
+    this.group.add(reelSeat);
+    this.reelSeat = reelSeat;
+
+    this._buildBlank();
+    this.tip = new THREE.Object3D();
+    this.group.add(this.tip);
+  }
+
+  _buildBlank() {
+    if (this.blank) {
+      this.group.remove(this.blank);
+      this.blank.geometry.dispose();
+    }
+    this.curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, -0.45),
+      new THREE.Vector3(0, 0, -0.9),
+      new THREE.Vector3(0, 0, -1.35)
+    ]);
+    this.blank = new THREE.Mesh(
+      new THREE.TubeGeometry(this.curve, 20, 0.007, 5, false),
+      this.material
+    );
+    this.group.add(this.blank);
+  }
+
+  /** `tensionRatio` 0..1 respecto a la resistencia de la caña. */
+  update(dt, tensionRatio, lookDelta) {
+    this.targetBend = clamp(tensionRatio, 0, 1.2);
+    this.bend = damp(this.bend, this.targetBend, 7, dt);
+
+    // Balanceo suave al mover la vista: la caña "pesa".
+    this.sway.x = damp(this.sway.x, clamp(-lookDelta.x * 0.0016, -0.06, 0.06), 6, dt);
+    this.sway.y = damp(this.sway.y, clamp(-lookDelta.y * 0.0016, -0.06, 0.06), 6, dt);
+    this.group.rotation.z = 0.16 + this.sway.x;
+    this.group.rotation.x = 0.06 + this.sway.y;
+
+    const b = this.bend;
+    const points = this.curve.points;
+    points[1].set(0, -b * 0.04, -0.45);
+    points[2].set(0, -b * 0.16, -0.88);
+    points[3].set(0, -b * 0.38, -1.3 + b * 0.06);
+    this.curve.needsUpdate = true;
+
+    const geometry = new THREE.TubeGeometry(this.curve, 20, 0.007, 5, false);
+    this.blank.geometry.dispose();
+    this.blank.geometry = geometry;
+
+    this.tip.position.copy(points[3]);
+  }
+
+  /** Puntera en coordenadas de mundo: de ahí sale la línea. */
+  worldTip(out = new THREE.Vector3()) {
+    return this.tip.getWorldPosition(out);
+  }
+
+  setVisible(value) { this.group.visible = value; }
+
+  dispose() {
+    this.blank.geometry.dispose();
+    this.material.dispose();
+    this.gripMaterial.dispose();
+  }
+}
+
+/* ===== src/fishing/FishingSystem.js ===== */
+/**
+ * Sistema de pesca: lanzamiento, espera, picada, clavada y pelea.
+ *
+ * El modelo de tensión es el núcleo de todo:
+ *
+ *   tensión = rigidez · (distancia_al_pez − hilo_soltado)
+ *
+ * Es decir, la línea sólo tira cuando hay menos hilo fuera que distancia. De
+ * ahí salen solos los tres comportamientos que se esperan de un carrete:
+ *
+ *  - Recoger acorta el hilo → sube la tensión.
+ *  - El freno deja escapar hilo cuando la tensión lo supera → la carrera del
+ *    pez se "paga" con metros, no con vida.
+ *  - Demasiada holgura mantenida → el anzuelo se desprende.
+ *
+ * Si la tensión supera la resistencia de la línea, rompe.
+ */
+
+const FishingState = {
+  IDLE: 'idle',
+  AIMING: 'aiming',
+  CASTING: 'casting',
+  FISHING: 'fishing',
+  BITE: 'bite',
+  FIGHTING: 'fighting',
+  LANDED: 'landed'
+};
+
+const SLACK_TOLERANCE = 1.4;      // metros de holgura antes de arriesgar el anzuelo
+const SLACK_GRACE = 2.2;          // segundos de holgura que aguanta el anzuelo
+const LAND_DISTANCE = 2.2;
+
+class FishingSystem {
+  constructor({ scene, camera, terrain, water, fishManager, equipment, events }) {
+    this.scene = scene;
+    this.camera = camera;
+    this.terrain = terrain;
+    this.water = water;
+    this.fishManager = fishManager;
+    this.equipment = equipment;
+    this.events = events;
+
+    this.rod = new Rod(camera, equipment);
+    this.line = new FishingLine(scene);
+    this.lure = new Lure(scene);
+
+    this.state = FishingState.IDLE;
+    this.power = 0;              // carga del lanzamiento 0..1
+    this.charging = false;
+    this.lineOut = 0;
+    this.tension = 0;
+    this.dragSetting = 0.45;     // 0..1 del freno máximo
+    this.slackTimer = 0;
+    this.hooked = null;
+    this.biteTimer = 0;
+    this.retrieveInput = 0;
+    this.message = null;
+    this.lastCatch = null;
+
+    this._rodTip = new THREE.Vector3();
+    this._tmp = new THREE.Vector3();
+  }
+
+  get stats() { return this.equipment.stats; }
+  get tensionRatio() { return clamp(this.tension / this.stats.lineStrength, 0, 1.4); }
+  get dragForce() { return this.dragSetting * this.stats.maxDrag; }
+  get canCast() { return this.state === FishingState.IDLE; }
+
+  // ---------------------------------------------------------------- entrada
+  beginCast() {
+    if (!this.canCast) return;
+    this.state = FishingState.AIMING;
+    this.charging = true;
+    this.power = 0;
+  }
+
+  releaseCast() {
+    if (this.state !== FishingState.AIMING) return;
+    this.charging = false;
+
+    const direction = new THREE.Vector3();
+    this.camera.getWorldDirection(direction);
+    // Se lanza algo por encima de la línea de visión, como en la realidad.
+    direction.y += 0.22;
+    direction.normalize();
+
+    const distance = this.stats.castDistance * (0.25 + 0.75 * this.power);
+    const speed = Math.sqrt(distance * 9.81 / Math.max(0.35, Math.sin(2 * Math.asin(clamp(direction.y, -0.99, 0.99)))));
+    const launchSpeed = clamp(isFinite(speed) ? speed : 18, 6, 34);
+
+    this.rod.worldTip(this._rodTip);
+    this.lure.cast(this._rodTip, direction, launchSpeed, this.equipment.lure);
+    this.line.reset(this._rodTip, this.lure.position);
+    this.line.setVisible(true);
+    this.lineOut = 1;
+    this.tension = 0;
+    this.state = FishingState.CASTING;
+    this.events?.onCast?.(this.power);
+    this.power = 0;
+  }
+
+  /** Clavada. Sólo sirve durante la ventana de picada. */
+  strike() {
+    if (this.state === FishingState.BITE) {
+      const fish = this.fishManager.biting;
+      if (fish) {
+        fish.setState(FishState.FIGHTING);
+        this.hooked = fish;
+        this.state = FishingState.FIGHTING;
+        this.slackTimer = 0;
+        // La línea queda tensa pero sin estirar: sin esto, el desfase que
+        // acumula el recogido se convertiría en un pico de tensión que rompe
+        // el hilo en el mismo instante de clavar.
+        this.lineOut = Math.max(this.lineOut, this._rodTip.distanceTo(fish.position) + 0.15);
+        this.fight = {
+          stamina: 1,
+          burst: 0,
+          burstTimer: 1 + Math.random() * 2,
+          jumping: 0,
+          runsLeft: fish.species.fight.runs
+        };
+        this.events?.onHookSet?.(fish);
+        return true;
+      }
+    }
+    if (this.state === FishingState.FISHING || this.state === FishingState.CASTING) {
+      // Clavada en falso: se recoge el señuelo.
+      this.reelIn('Clavada en vacío');
+    }
+    return false;
+  }
+
+  reelIn(reason = null) {
+    // Sin esto, seguir pulsando recoger al terminar un lance hacía que el
+    // siguiente se recuperase solo nada más tocar el agua.
+    this.retrieveInput = 0;
+    this.lure.stow();
+    this.line.setVisible(false);
+    if (this.hooked) this.fishManager.release(this.hooked);
+    this.hooked = null;
+    this.fight = null;
+    this.state = FishingState.IDLE;
+    this.tension = 0;
+    this.lineOut = 0;
+    if (reason) this._say(reason);
+  }
+
+  adjustDrag(delta) {
+    this.dragSetting = clamp(this.dragSetting + delta, 0.05, 1);
+  }
+
+  setRetrieve(amount) { this.retrieveInput = clamp(amount, 0, 1); }
+
+  _say(text, kind = 'info') {
+    this.message = { text, kind, time: 0 };
+    this.events?.onMessage?.(text, kind);
+  }
+
+  // ----------------------------------------------------------------- update
+  update(dt, context) {
+    this.rod.worldTip(this._rodTip);
+    const stats = this.stats;
+
+    if (this.charging) {
+      this.power = Math.min(1, this.power + dt * 0.85);
+    }
+
+    const event = this.lure.update(dt, {
+      terrain: this.terrain,
+      waterLevel: this.terrain.waterLevel,
+      retrieve: this.state === FishingState.FIGHTING ? 0 : this.retrieveInput,
+      rodTip: this._rodTip,
+      retrieveSpeed: stats.retrieveSpeed,
+      wind: context.wind
+    });
+
+    if (event?.type === 'splash') {
+      this.water.splash(event.position, 0.8);
+      this.events?.onSplash?.(event.position);
+      this.state = FishingState.FISHING;
+      this.lineOut = this._rodTip.distanceTo(this.lure.position) + 0.3;
+    } else if (event?.type === 'ground') {
+      this._say('El señuelo ha caído en tierra');
+      this.state = FishingState.FISHING;
+      this.lineOut = this._rodTip.distanceTo(this.lure.position) + 0.3;
+    }
+
+    switch (this.state) {
+      case FishingState.CASTING: this._updateCasting(dt); break;
+      case FishingState.FISHING: this._updateFishing(dt, context); break;
+      case FishingState.BITE: this._updateBite(dt, context); break;
+      case FishingState.FIGHTING: this._updateFight(dt, context); break;
+      default: break;
+    }
+
+    this._updateLineVisual(dt, context);
+    this.rod.update(dt, clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.2), context.lookDelta);
+    if (this.message) {
+      this.message.time += dt;
+      if (this.message.time > 3.5) this.message = null;
+    }
+  }
+
+  _updateCasting() {
+    this.lineOut = Math.max(this.lineOut, this._rodTip.distanceTo(this.lure.position) + 0.2);
+  }
+
+  _updateFishing(dt, context) {
+    if (!this.lure.isFishable) return;
+
+    // Recoger acorta el hilo; si llega al final, el lance ha terminado.
+    if (this.retrieveInput > 0.05) {
+      const toLure = this._rodTip.distanceTo(this.lure.position);
+      this.lineOut = Math.max(0.6, this.lineOut - this.stats.retrieveSpeed * this.retrieveInput * dt);
+      // El señuelo tarda en seguir al carrete; sin este tope el hilo "fuera"
+      // se quedaría por debajo de la distancia real.
+      this.lineOut = Math.max(this.lineOut, toLure);
+      if (toLure < 1.4) {
+        this.reelIn();
+        return;
+      }
+    }
+
+    this.fishManager.evaluate({
+      lurePosition: this.lure.position,
+      lure: this.equipment.lure,
+      hour: context.hour,
+      weatherModifier: context.weatherModifier,
+      lureAction: this.lure.action * this.stats.lureAction,
+      feeding: context.feeding
+    });
+
+    if (this.fishManager.biting) {
+      this.state = FishingState.BITE;
+      this.biteTimer = 0;
+      this.water.splash(this.lure.position, 0.5);
+      this.events?.onBite?.(this.fishManager.biting);
+    }
+  }
+
+  _updateBite(dt) {
+    this.biteTimer += dt;
+    const fish = this.fishManager.biting;
+    if (!fish) {
+      // Lo ha soltado sin que reaccionáramos.
+      this.state = FishingState.FISHING;
+      this._say('Se ha soltado');
+      return;
+    }
+    // Tirones visibles en el señuelo mientras el pez lo tiene en la boca.
+    this.lure.position.lerp(fish.position, 0.35 * dt * 4);
+    this.lineOut = Math.max(0.8, this.lineOut - dt * 0.4);
+  }
+
+  _updateFight(dt, context) {
+    const fish = this.hooked;
+    if (!fish) { this.state = FishingState.FISHING; return; }
+
+    const stats = this.stats;
+    const f = this.fight;
+    const species = fish.species;
+
+    // --- comportamiento del pez -------------------------------------------
+    f.burstTimer -= dt;
+    if (f.burstTimer <= 0) {
+      const wantsRun = f.runsLeft > 0 && f.stamina > 0.25 && Math.random() < 0.55 + this.tensionRatio * 0.3;
+      if (wantsRun) {
+        f.burst = 1;
+        f.runsLeft -= 1;
+        f.burstTimer = 1.2 + Math.random() * 1.8;
+        this.events?.onRun?.(fish);
+      } else {
+        f.burst = 0;
+        f.burstTimer = 0.8 + Math.random() * 1.6;
+      }
+      if (Math.random() < species.fight.jumpChance * 0.5 && f.stamina > 0.3) {
+        f.jumping = 0.55;
+        this.events?.onJump?.(fish);
+      }
+    }
+    f.burst = damp(f.burst, f.burst > 0.5 ? 1 : 0, 4, dt);
+
+    // Nada alejándose del pescador, con sacudidas laterales.
+    const away = fish.position.clone().sub(this._rodTip).setY(0);
+    if (away.lengthSq() < 0.01) away.set(1, 0, 0);
+    away.normalize();
+    const shake = Math.sin(context.time * 6 * species.fight.headshake) * 0.5;
+    away.applyAxisAngle(new THREE.Vector3(0, 1, 0), shake);
+
+    // El tirón crece con el peso, pero de forma sublineal: un siluro de 50 kg
+    // es muchísimo más fuerte que una perca, no cien veces más.
+    const power = species.strength
+      * (0.5 + Math.pow(fish.weight, 0.45) * 0.7)
+      * (0.5 + f.burst * 1.2)
+      * (0.25 + 0.75 * f.stamina);
+    const pullSpeed = species.speed * 0.42 * (0.4 + f.burst) * clamp(f.stamina, 0.12, 1);
+    // La tensión frena al pez: tirar cansa a los dos.
+    const resisted = pullSpeed / (1 + this.tensionRatio * 1.6);
+
+    fish.velocity.copy(away).multiplyScalar(resisted);
+    if (f.jumping > 0) {
+      f.jumping -= dt;
+      fish.velocity.y = 2.4;                    // salto fuera del agua
+    } else {
+      const bed = this.terrain.heightAt(fish.position.x, fish.position.z);
+      const target = clamp(this.terrain.waterLevel - 0.6, bed + 0.25, this.terrain.waterLevel - 0.15);
+      fish.velocity.y = (target - fish.position.y) * 0.8;
+    }
+    fish.position.addScaledVector(fish.velocity, dt);
+    // No se mete en la orilla: si toca fondo, gira.
+    const bed = this.terrain.heightAt(fish.position.x, fish.position.z);
+    if (fish.position.y < bed + 0.12) fish.position.y = bed + 0.12;
+
+    // --- carrete y línea ---------------------------------------------------
+    const distance = this._rodTip.distanceTo(fish.position);
+    if (this.retrieveInput > 0.05) {
+      // Cuanta más tensión, más cuesta recuperar hilo.
+      const effort = stats.retrieveSpeed * this.retrieveInput / (1 + this.tensionRatio * 2.2);
+      this.lineOut = Math.max(0.8, this.lineOut - effort * dt);
+    }
+
+    // La línea es una cuerda: si hay menos hilo fuera que distancia, el pez
+    // viene hacia la caña. Cuanto más cansado, menos se resiste — y eso es lo
+    // que convierte "cansarlo" en la forma de cobrarlo.
+    let stretch = distance - this.lineOut;
+    const netPull = this.tension - power * 0.85;
+    if (stretch > 0 && netPull > 0) {
+      const rate = netPull * 0.5 * (1 + (1 - f.stamina) * 2.4);
+      const give = Math.min(stretch, rate * dt);
+      const toRod = this._rodTip.clone().sub(fish.position).normalize();
+      fish.position.addScaledVector(toRod, give);
+      stretch -= give;
+    }
+
+    // El freno es un embrague: mientras la carga lo supere, el carrete cede
+    // hilo y la tensión se queda clavada en el valor del freno. Lo único que
+    // lo atraviesa son los picos (embestidas y saltos), y por eso apretar el
+    // freno al máximo es la forma más rápida de romper la línea.
+    const stiffness = lerp(9, 3.5, stats.elasticity);
+    const load = Math.max(0, stretch) * stiffness + power * 0.55;
+    const slipping = load > this.dragForce;
+    const shock = slipping ? Math.min(load - this.dragForce, load * 0.2) * (1 - stats.elasticity * 0.5) : 0;
+    this.tension = damp(this.tension, Math.min(load, this.dragForce + shock), 11, dt);
+
+    if (slipping) {
+      const slip = (load - this.dragForce) * 0.4;
+      this.lineOut = Math.min(stats.capacity, this.lineOut + slip * dt);
+      this.events?.onDragSlip?.(slip);
+    }
+
+    // El pez se cansa por la tensión sostenida.
+    const drain = (0.028 + this.tensionRatio * 0.16) / species.stamina;
+    f.stamina = clamp(f.stamina - drain * dt, 0, 1);
+    fish.energy = f.stamina;
+
+    // --- desenlaces --------------------------------------------------------
+    if (this.tension > stats.lineStrength) {
+      this._breakLine(fish);
+      return;
+    }
+    if (this.lineOut >= stats.capacity - 0.5) {
+      this._breakLine(fish, 'Se acabó el hilo del carrete');
+      return;
+    }
+
+    // El hilo que cede el freno no es holgura: el pez se lo está llevando.
+    // Sólo cuenta como holgura si la línea se afloja sin que nadie tire.
+    const slack = this.lineOut - distance;
+    if (!slipping && slack > SLACK_TOLERANCE) {
+      this.slackTimer += dt;
+      if (this.slackTimer > SLACK_GRACE) {
+        this._loseFish(fish, 'Demasiada holgura: el anzuelo se ha soltado');
+        return;
+      }
+    } else {
+      this.slackTimer = Math.max(0, this.slackTimer - dt * 1.5);
+    }
+
+    if (distance < LAND_DISTANCE && f.stamina < 0.3) {
+      this._land(fish);
+    }
+  }
+
+  _breakLine(fish, reason = 'La línea ha roto') {
+    this.retrieveInput = 0;
+    this.events?.onLineBreak?.(fish);
+    this.fishManager.release(fish);
+    this.hooked = null;
+    this.fight = null;
+    this.lure.stow();
+    this.line.setVisible(false);
+    this.state = FishingState.IDLE;
+    this.tension = 0;
+    this._say(reason, 'bad');
+  }
+
+  _loseFish(fish, reason) {
+    this.retrieveInput = 0;
+    this.events?.onFishLost?.(fish);
+    this.fishManager.release(fish);
+    this.hooked = null;
+    this.fight = null;
+    this.lure.stow();
+    this.line.setVisible(false);
+    this.state = FishingState.IDLE;
+    this.tension = 0;
+    this._say(reason, 'bad');
+  }
+
+  _land(fish) {
+    this.retrieveInput = 0;
+    this.state = FishingState.LANDED;
+    this.lastCatch = fish;
+    this.tension = 0;
+    this.lure.stow();
+    this.line.setVisible(false);
+    this.water.splash(fish.position, 1.4);
+    this.events?.onLanded?.(fish);
+    this.hooked = null;
+    this.fight = null;
+  }
+
+  /** Se llama desde la UI cuando el jugador cierra la ficha de captura. */
+  finishCatch(keep = true) {
+    const fish = this.lastCatch;
+    this.lastCatch = null;
+    this.state = FishingState.IDLE;
+    if (fish) {
+      if (keep) this.fishManager.remove(fish);
+      else this.fishManager.release(fish);
+    }
+  }
+
+  _updateLineVisual(dt, context) {
+    if (!this.line.mesh.visible) return;
+    const end = this.hooked ? this.hooked.position : this.lure.position;
+    const visualLineOut = this.state === FishingState.FIGHTING
+      ? this.lineOut
+      : Math.max(this.lineOut, this._rodTip.distanceTo(end));
+    this.line.update(dt, this._rodTip, end, visualLineOut, context.wind);
+    this.line.setTension(this.tensionRatio);
+  }
+
+  /** Datos para el HUD. */
+  get hud() {
+    return {
+      state: this.state,
+      power: this.power,
+      tension: this.tension,
+      tensionRatio: this.tensionRatio,
+      lineStrength: this.stats.lineStrength,
+      drag: this.dragForce,
+      dragSetting: this.dragSetting,
+      lineOut: this.lineOut,
+      capacity: this.stats.capacity,
+      lure: this.equipment.lure,
+      hooked: this.hooked ? {
+        name: this.hooked.displayName,
+        weight: this.hooked.weight,
+        stamina: this.fight?.stamina ?? 1
+      } : null,
+      message: this.message
+    };
+  }
+
+  dispose() {
+    this.rod.dispose();
+    this.line.dispose();
+    this.lure.dispose();
+  }
+}
+
+/* ===== src/player/Player.js ===== */
+/**
+ * Jugador en primera persona.
+ *
+ * La cámara vive dentro de un "rig" para dejar preparada la tercera persona:
+ * basta con alejar `camera` del pivote y añadir un modelo visible; el resto
+ * del control no cambia. El movimiento sigue el terreno de forma analítica
+ * (sin física de cuerpos) y sólo lanza un rayo hacia abajo para subirse al
+ * muelle y demás construcciones.
+ */
+
+const EYE_HEIGHT = 1.68;
+const WALK_SPEED = 3.1;
+const RUN_SPEED = 5.6;
+const WADE_DEPTH = 1.05;
+
+class Player {
+  constructor(camera, terrain, { spawn = new THREE.Vector3(0, 0, 0), walkables = [] } = {}) {
+    this.terrain = terrain;
+    this.camera = camera;
+    this.walkables = walkables;
+
+    this.rig = new THREE.Object3D();
+    this.rig.position.copy(spawn);
+    this.rig.add(camera);
+    camera.position.set(0, EYE_HEIGHT, 0);
+
+    this.yaw = 0;
+    this.pitch = 0;
+    this.velocity = new THREE.Vector3();
+    this.grounded = true;
+    this.bobPhase = 0;
+    this.bobAmount = 0;
+    this.surface = 'tierra';
+    this.mode = 'first';          // 'first' | 'third' (preparado, no expuesto aún)
+    this.thirdPersonDistance = 3.4;
+
+    this._raycaster = new THREE.Raycaster();
+    this._down = new THREE.Vector3(0, -1, 0);
+    this._forward = new THREE.Vector3();
+    this._right = new THREE.Vector3();
+    this.lookDelta = new THREE.Vector2();
+  }
+
+  get position() { return this.rig.position; }
+
+  /** Altura pisable: terreno o cualquier estructura por encima (muelle, barca). */
+  groundHeight(x, z) {
+    const terrainY = this.terrain.heightAt(x, z);
+    if (!this.walkables.length) return { y: terrainY, surface: 'tierra' };
+
+    this._raycaster.set(new THREE.Vector3(x, terrainY + 6, z), this._down);
+    this._raycaster.far = 8;
+    const hits = this._raycaster.intersectObjects(this.walkables, true);
+    if (hits.length && hits[0].point.y > terrainY + 0.15) {
+      return { y: hits[0].point.y, surface: 'madera' };
+    }
+    return { y: terrainY, surface: terrainY < this.terrain.waterLevel ? 'agua' : 'tierra' };
+  }
+
+  look(dx, dy, sensitivity = 1, invertY = false) {
+    this.lookDelta.set(dx, dy);
+    this.yaw -= dx * 0.0022 * sensitivity;
+    this.pitch -= dy * 0.0022 * sensitivity * (invertY ? -1 : 1);
+    this.pitch = clamp(this.pitch, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05);
+  }
+
+  update(dt, input) {
+    const forwardInput = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
+    const strafeInput = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
+    const running = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+
+    this._forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)).multiplyScalar(-1);
+    this._right.set(this._forward.z, 0, -this._forward.x);
+
+    const wish = new THREE.Vector3()
+      .addScaledVector(this._forward, forwardInput)
+      .addScaledVector(this._right, strafeInput);
+    if (wish.lengthSq() > 0) wish.normalize();
+
+    const depth = this.terrain.depthAt(this.rig.position.x, this.rig.position.z);
+    // Andar dentro del agua cuesta; a partir de cierto calado no se avanza.
+    const wadeFactor = depth > 0 ? clamp(1 - depth / WADE_DEPTH, 0.25, 1) : 1;
+    const speed = (running ? RUN_SPEED : WALK_SPEED) * wadeFactor;
+
+    this.velocity.x = damp(this.velocity.x, wish.x * speed, 12, dt);
+    this.velocity.z = damp(this.velocity.z, wish.z * speed, 12, dt);
+
+    const next = this.rig.position.clone().addScaledVector(this.velocity, dt);
+    const ground = this.groundHeight(next.x, next.z);
+    const nextDepth = this.terrain.waterLevel - ground.y;
+
+    // Bloqueo suave: no se entra a nadar.
+    if (ground.surface === 'agua' && nextDepth > WADE_DEPTH) {
+      this.velocity.multiplyScalar(0.1);
+    } else {
+      this.rig.position.x = next.x;
+      this.rig.position.z = next.z;
+    }
+
+    const target = this.groundHeight(this.rig.position.x, this.rig.position.z);
+    this.surface = target.surface;
+    this.rig.position.y = damp(this.rig.position.y, target.y, 14, dt);
+
+    // Balanceo de cabeza proporcional a la velocidad real.
+    const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    this.stepping = horizontalSpeed > 0.6;
+    this.bobPhase += dt * horizontalSpeed * 2.1;
+    this.bobAmount = damp(this.bobAmount, clamp(horizontalSpeed / RUN_SPEED, 0, 1), 6, dt);
+
+    const bobY = Math.sin(this.bobPhase * 2) * 0.035 * this.bobAmount;
+    const bobX = Math.cos(this.bobPhase) * 0.028 * this.bobAmount;
+
+    this.rig.rotation.y = this.yaw;
+    this.camera.rotation.set(this.pitch, 0, bobX * 0.35);
+    this.camera.position.set(
+      this.mode === 'third' ? 0 : bobX * 0.5,
+      EYE_HEIGHT + bobY,
+      this.mode === 'third' ? this.thirdPersonDistance : 0
+    );
+
+    this.lookDelta.multiplyScalar(0.82);
+    return { speed: horizontalSpeed, surface: this.surface, depth: Math.max(0, depth) };
+  }
+
+  /** Prepara la tercera persona sin cambiar el resto del control. */
+  setCameraMode(mode) {
+    this.mode = mode === 'third' ? 'third' : 'first';
+  }
+
+  teleport(position) {
+    this.rig.position.copy(position);
+    const g = this.groundHeight(position.x, position.z);
+    this.rig.position.y = g.y;
+  }
+}
+
+/* ===== src/ui/UI.js ===== */
+/**
+ * Interfaz: HUD de pesca y pantallas (equipo, tienda, capturas, estadísticas,
+ * ajustes y pausa).
+ *
+ * La UI no toca el estado del juego directamente: recibe datos en `update()` y
+ * comunica intenciones por callbacks. Así se puede rediseñar sin arriesgar la
+ * lógica.
+ */
+
+const CSS = `
+.sw-root, .sw-root * { box-sizing: border-box; margin: 0; font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif; }
+.sw-root { position: fixed; inset: 0; pointer-events: none; color: #eef4f6; z-index: 10;
+  --panel: rgba(14,19,24,.92); --edge: rgba(255,255,255,.12); --dim: #9fb0bb;
+  --accent: #6fd3c7; --warn: #f2c14e; --bad: #e2604a; --good: #74d68a; }
+.sw-root button { font: inherit; color: inherit; cursor: pointer; pointer-events: auto; }
+
+.sw-crosshair { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px;
+  border-radius: 50%; background: rgba(255,255,255,.75); box-shadow: 0 0 4px rgba(0,0,0,.8); }
+
+.sw-topbar { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 8px; align-items: center; }
+.sw-chip { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+  padding: 5px 11px; font-size: 12px; letter-spacing: .02em; display: flex; gap: 7px; align-items: baseline; backdrop-filter: blur(8px); }
+.sw-chip b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.sw-chip .k { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+.sw-money b { color: var(--warn); }
+
+.sw-gear { position: absolute; left: 16px; bottom: 16px; background: var(--panel);
+  border: 1px solid var(--edge); border-radius: 10px; padding: 10px 13px; min-width: 205px; backdrop-filter: blur(8px); }
+.sw-gear h4 { font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: var(--dim); font-weight: 500; margin-bottom: 6px; }
+.sw-gear .row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 2px 0; }
+.sw-gear .row span:last-child { color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.sw-tension { position: absolute; right: 18px; bottom: 16px; width: 190px; background: var(--panel);
+  border: 1px solid var(--edge); border-radius: 10px; padding: 11px 13px; backdrop-filter: blur(8px); }
+.sw-tension .label { display: flex; justify-content: space-between; font-size: 10px;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--dim); margin-bottom: 5px; }
+.sw-tension .label b { color: #eef4f6; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.sw-bar { height: 9px; border-radius: 99px; background: rgba(255,255,255,.09); overflow: hidden; position: relative; }
+.sw-bar i { display: block; height: 100%; width: 0; background: var(--good); transition: width .06s linear, background .2s; }
+.sw-bar .mark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: rgba(255,255,255,.8); }
+.sw-tension .sub { margin-top: 9px; }
+
+.sw-prompt { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); text-align: center; width: 460px; }
+.sw-prompt .big { font-size: 26px; font-weight: 700; letter-spacing: .01em; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
+.sw-prompt .small { font-size: 13px; color: #d6e2e8; text-shadow: 0 2px 8px rgba(0,0,0,.9); margin-top: 3px; }
+.sw-prompt .bite { color: var(--warn); animation: swpulse .45s ease-in-out infinite alternate; }
+@keyframes swpulse { from { transform: scale(1); } to { transform: scale(1.05); } }
+.sw-power { width: 260px; height: 10px; margin: 8px auto 0; border-radius: 99px;
+  background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
+.sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
+
+.sw-toast { position: absolute; left: 50%; top: 90px; transform: translateX(-50%);
+  background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 8px 15px; font-size: 13px; }
+.sw-toast.bad { border-color: rgba(226,96,74,.6); color: #ffc9bd; }
+
+.sw-overlay { position: absolute; inset: 0; background: rgba(6,10,13,.82); backdrop-filter: blur(7px);
+  display: flex; align-items: center; justify-content: center; pointer-events: auto; padding: 22px; }
+.sw-panel { background: #0e1318; border: 1px solid var(--edge); border-radius: 14px;
+  width: min(760px, 100%); max-height: 86vh; display: flex; flex-direction: column; box-shadow: 0 30px 80px -30px #000; }
+.sw-panel > header { display: flex; align-items: center; justify-content: space-between;
+  padding: 15px 18px; border-bottom: 1px solid var(--edge); }
+.sw-panel h2 { font-size: 17px; font-weight: 650; }
+.sw-panel .body { padding: 16px 18px 20px; overflow-y: auto; }
+.sw-close { background: none; border: none; font-size: 22px; line-height: 1; color: var(--dim); padding: 2px 6px; }
+.sw-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.sw-tabs button { background: rgba(255,255,255,.05); border: 1px solid var(--edge); border-radius: 7px;
+  padding: 7px 13px; font-size: 12px; font-weight: 550; }
+.sw-tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #06231f; }
+
+.sw-item { display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 11px 13px; border: 1px solid var(--edge); border-radius: 9px; margin-bottom: 7px; background: rgba(255,255,255,.03); }
+.sw-item .t { font-size: 14px; font-weight: 600; }
+.sw-item .d { font-size: 11.5px; color: var(--dim); margin-top: 3px; line-height: 1.45; }
+.sw-item .stats { font-size: 11px; color: var(--accent); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.sw-item .act { display: flex; gap: 6px; flex-shrink: 0; }
+.sw-btn { background: var(--accent); border: 1px solid var(--accent); color: #06231f;
+  border-radius: 7px; padding: 7px 13px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.sw-btn.ghost { background: transparent; color: #eef4f6; border-color: var(--edge); }
+.sw-btn:disabled { opacity: .35; cursor: not-allowed; }
+.sw-item.equipped { border-color: rgba(111,211,199,.55); }
+.sw-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent); }
+
+.sw-catch { text-align: center; }
+.sw-catch .name { font-size: 26px; font-weight: 700; }
+.sw-catch .latin { font-style: italic; color: var(--dim); font-size: 13px; margin-top: 2px; }
+.sw-catch .measures { display: flex; gap: 26px; justify-content: center; margin: 18px 0; }
+.sw-catch .measures div { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .1em; }
+.sw-catch .measures b { display: block; font-size: 25px; color: #eef4f6; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.sw-catch .badges { display: flex; gap: 7px; justify-content: center; margin-bottom: 16px; flex-wrap: wrap; }
+.sw-badge { font-size: 10px; text-transform: uppercase; letter-spacing: .11em; padding: 4px 10px;
+  border-radius: 99px; border: 1px solid currentColor; }
+.sw-actions { display: flex; gap: 9px; justify-content: center; }
+
+.sw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.sw-card { border: 1px solid var(--edge); border-radius: 9px; padding: 11px 12px; background: rgba(255,255,255,.03); }
+.sw-card .t { font-size: 13px; font-weight: 600; }
+.sw-card .m { font-size: 11px; color: var(--dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.sw-card.unknown { opacity: .45; }
+.sw-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 9px; }
+.sw-stat { border: 1px solid var(--edge); border-radius: 9px; padding: 11px 12px; }
+.sw-stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: .11em; color: var(--dim); }
+.sw-stat .v { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 3px; }
+.sw-field { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 0; border-bottom: 1px solid var(--edge); }
+.sw-field:last-child { border-bottom: none; }
+.sw-field label { font-size: 13px; }
+.sw-field input[type=range] { width: 180px; pointer-events: auto; }
+.sw-hint { font-size: 12px; color: var(--dim); line-height: 1.6; }
+.sw-keys { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 12.5px; margin-top: 6px; }
+.sw-keys b { color: var(--accent); font-weight: 600; }
+`;
+
+const el = (tag, className, html) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (html !== undefined) node.innerHTML = html;
+  return node;
+};
+
+class UI {
+  constructor(callbacks = {}) {
+    this.cb = callbacks;
+    this.openPanel = null;
+    this.shopTab = 'rods';
+    this.gearTab = 'rods';
+
+    const style = document.createElement('style');
+    style.textContent = CSS;
+    document.head.appendChild(style);
+
+    this.root = el('div', 'sw-root');
+    document.body.appendChild(this.root);
+
+    this.crosshair = el('div', 'sw-crosshair');
+    this.root.appendChild(this.crosshair);
+
+    this.topbar = el('div', 'sw-topbar');
+    this.chips = {
+      time: this._chip('Hora', '07:30'),
+      weather: this._chip('Tiempo', 'Despejado'),
+      money: this._chip('Monedas', '60')
+    };
+    this.chips.money.classList.add('sw-money');
+    Object.values(this.chips).forEach((c) => this.topbar.appendChild(c));
+    this.root.appendChild(this.topbar);
+
+    this.gearBox = el('div', 'sw-gear');
+    this.root.appendChild(this.gearBox);
+
+    this.tensionBox = el('div', 'sw-tension');
+    this.tensionBox.innerHTML = `
+      <div class="label"><span>Tensión</span><b class="t-val">0.0 kg</b></div>
+      <div class="sw-bar"><i class="t-fill"></i><div class="mark"></div></div>
+      <div class="sub">
+        <div class="label"><span>Freno</span><b class="d-val">1.4 kg</b></div>
+        <div class="sw-bar"><i class="d-fill" style="background:var(--warn)"></i></div>
+      </div>
+      <div class="sub">
+        <div class="label"><span>Hilo fuera</span><b class="l-val">0 m</b></div>
+      </div>`;
+    this.root.appendChild(this.tensionBox);
+
+    this.prompt = el('div', 'sw-prompt');
+    this.root.appendChild(this.prompt);
+
+    this.toast = el('div', 'sw-toast');
+    this.toast.style.display = 'none';
+    this.root.appendChild(this.toast);
+  }
+
+  _chip(key, value) {
+    const chip = el('div', 'sw-chip');
+    chip.innerHTML = `<span class="k">${key}</span><b>${value}</b>`;
+    return chip;
+  }
+
+  setChip(name, value) {
+    const b = this.chips[name]?.querySelector('b');
+    if (b && b.textContent !== String(value)) b.textContent = value;
+  }
+
+  // ------------------------------------------------------------------ HUD
+  update(data) {
+    const { fishing, time, weather, money, equipment } = data;
+    this.setChip('time', time.label);
+    this.setChip('weather', weather.label);
+    this.setChip('money', money);
+
+    const s = equipment.stats;
+    this.gearBox.innerHTML = `
+      <h4>Montaje</h4>
+      <div class="row"><span>${equipment.rod.name}</span><span>${s.castDistance.toFixed(0)} m</span></div>
+      <div class="row"><span>${equipment.reel.name}</span><span>freno ${s.maxDrag.toFixed(1)} kg</span></div>
+      <div class="row"><span>${equipment.line.name}</span><span>${s.lineStrength.toFixed(1)} kg</span></div>
+      <div class="row"><span>${equipment.lure.name}</span><span>${equipment.lure.workingDepth.toFixed(1)} m</span></div>`;
+
+    const hud = fishing;
+    const ratio = clamp(hud.tensionRatio, 0, 1);
+    const fill = this.tensionBox.querySelector('.t-fill');
+    fill.style.width = `${ratio * 100}%`;
+    fill.style.background = ratio > 0.82 ? 'var(--bad)' : ratio > 0.55 ? 'var(--warn)' : 'var(--good)';
+    this.tensionBox.querySelector('.t-val').textContent = `${hud.tension.toFixed(1)} kg`;
+    this.tensionBox.querySelector('.mark').style.left =
+      `${clamp(hud.drag / Math.max(0.1, hud.lineStrength), 0, 1) * 100}%`;
+    this.tensionBox.querySelector('.d-fill').style.width = `${hud.dragSetting * 100}%`;
+    this.tensionBox.querySelector('.d-val').textContent = `${hud.drag.toFixed(1)} kg`;
+    this.tensionBox.querySelector('.l-val').textContent =
+      `${hud.lineOut.toFixed(0)} / ${hud.capacity} m`;
+
+    this._updatePrompt(hud);
+    this._updateToast(hud.message);
+  }
+
+  _updatePrompt(hud) {
+    let html = '';
+    switch (hud.state) {
+      case FishingState.IDLE:
+        html = `<div class="small">Mantén <b>clic izquierdo</b> para cargar el lanzamiento</div>`;
+        break;
+      case FishingState.AIMING:
+        html = `<div class="small">Suelta para lanzar</div>
+                <div class="sw-power"><i style="width:${hud.power * 100}%"></i></div>`;
+        break;
+      case FishingState.CASTING:
+        html = `<div class="small">…</div>`;
+        break;
+      case FishingState.FISHING:
+        html = `<div class="small">Mantén <b>clic derecho</b> para recoger · rueda para el freno</div>`;
+        break;
+      case FishingState.BITE:
+        html = `<div class="big bite">¡PICADA!</div><div class="small">Clic izquierdo para clavar</div>`;
+        break;
+      case FishingState.FIGHTING:
+        html = `<div class="small"><b>${hud.hooked?.name ?? ''}</b> · ${(hud.hooked?.weight ?? 0).toFixed(2)} kg
+                — recoge sin pasarte de tensión</div>`;
+        break;
+      default:
+        html = '';
+    }
+    if (this.prompt.innerHTML !== html) this.prompt.innerHTML = html;
+  }
+
+  _updateToast(message) {
+    if (!message) { this.toast.style.display = 'none'; return; }
+    this.toast.style.display = 'block';
+    this.toast.textContent = message.text;
+    this.toast.className = `sw-toast${message.kind === 'bad' ? ' bad' : ''}`;
+  }
+
+  setCrosshairVisible(value) {
+    this.crosshair.style.display = value ? 'block' : 'none';
+  }
+
+  // -------------------------------------------------------------- paneles
+  _overlay(title, bodyNode, { onClose = null } = {}) {
+    this.closePanel();
+    const overlay = el('div', 'sw-overlay');
+    const panel = el('div', 'sw-panel');
+    const header = el('header');
+    header.appendChild(el('h2', null, title));
+    const close = el('button', 'sw-close', '&times;');
+    close.addEventListener('click', () => { this.closePanel(); onClose?.(); });
+    header.appendChild(close);
+    const body = el('div', 'body');
+    body.appendChild(bodyNode);
+    panel.appendChild(header);
+    panel.appendChild(body);
+    overlay.appendChild(panel);
+    this.root.appendChild(overlay);
+    this.openPanel = { overlay, onClose };
+    this.cb.onPanelOpen?.();
+    return { overlay, body };
+  }
+
+  closePanel() {
+    if (!this.openPanel) return;
+    this.root.removeChild(this.openPanel.overlay);
+    const cb = this.openPanel.onClose;
+    this.openPanel = null;
+    this.cb.onPanelClose?.();
+    cb?.();
+  }
+
+  get isPanelOpen() { return !!this.openPanel; }
+
+  showCatch(fish, result, { onKeep, onRelease }) {
+    const body = el('div', 'sw-catch');
+    const badges = [];
+    if (result.isNew) badges.push('<span class="sw-badge" style="color:var(--accent)">Especie nueva</span>');
+    if (result.isRecord) badges.push('<span class="sw-badge" style="color:var(--warn)">Récord personal</span>');
+    if (fish.trophy > 0.8) badges.push('<span class="sw-badge" style="color:var(--good)">Ejemplar de trofeo</span>');
+
+    body.innerHTML = `
+      <div class="name">${fish.species.name}</div>
+      <div class="latin">${fish.species.latin}</div>
+      <div class="measures">
+        <div>Longitud<b>${fish.length.toFixed(1)} cm</b></div>
+        <div>Peso<b>${fish.weight.toFixed(2)} kg</b></div>
+        <div>Valor<b>${result.value}</b></div>
+      </div>
+      <div class="badges">${badges.join('')}</div>`;
+
+    const actions = el('div', 'sw-actions');
+    const keep = el('button', 'sw-btn', `Quedárselo · ${result.value} monedas`);
+    const release = el('button', 'sw-btn ghost', 'Devolver al agua');
+    keep.addEventListener('click', () => { this.closePanel(); onKeep(); });
+    release.addEventListener('click', () => { this.closePanel(); onRelease(); });
+    actions.appendChild(keep);
+    actions.appendChild(release);
+    body.appendChild(actions);
+
+    this._overlay('Captura', body, { onClose: onRelease });
+  }
+
+  showGear(inventory, equipment) {
+    const body = el('div');
+    const render = () => {
+      body.innerHTML = '';
+      const tabs = el('div', 'sw-tabs');
+      Object.keys(CATALOG).forEach((category) => {
+        const b = el('button', null, CATEGORY_LABELS[category]);
+        b.setAttribute('aria-selected', String(this.gearTab === category));
+        b.addEventListener('click', () => { this.gearTab = category; render(); });
+        tabs.appendChild(b);
+      });
+      body.appendChild(tabs);
+
+      inventory.list(this.gearTab).forEach((item) => {
+        const equipped = equipment.equipped[this.gearTab] === item.id;
+        const row = el('div', `sw-item${equipped ? ' equipped' : ''}`);
+        row.innerHTML = `<div><div class="t">${item.name}</div>
+          <div class="d">${item.description}</div>
+          <div class="stats">${this._itemStats(this.gearTab, item)}</div></div>`;
+        const act = el('div', 'act');
+        if (equipped) {
+          act.appendChild(el('span', 'sw-tag', 'Equipado'));
+        } else {
+          const b = el('button', 'sw-btn', 'Equipar');
+          b.addEventListener('click', () => { this.cb.onEquip?.(this.gearTab, item.id); render(); });
+          act.appendChild(b);
+        }
+        row.appendChild(act);
+        body.appendChild(row);
+      });
+    };
+    render();
+    this._overlay('Equipo', body);
+  }
+
+  _itemStats(category, item) {
+    switch (category) {
+      case 'rods': return `potencia ${item.power} · resistencia ${item.strength} kg · sensibilidad ${(item.sensitivity * 100).toFixed(0)}%`;
+      case 'reels': return `${item.capacity} m · recogida ${item.retrieve} · freno máx ${item.maxDrag} kg`;
+      case 'lines': return `${item.strength} kg · ⌀ ${item.diameter} mm · elasticidad ${(item.elasticity * 100).toFixed(0)}%`;
+      case 'lures': return `${item.weightG} g · trabaja a ${item.workingDepth} m · acción ${(item.action * 100).toFixed(0)}%`;
+      default: return '';
+    }
+  }
+
+  showShop(inventory, economy) {
+    const body = el('div');
+    const render = () => {
+      body.innerHTML = '';
+      const money = el('div', 'sw-hint', `Monedas disponibles: <b style="color:var(--warn)">${economy.money}</b>`);
+      money.style.marginBottom = '12px';
+      body.appendChild(money);
+
+      const tabs = el('div', 'sw-tabs');
+      Object.keys(CATALOG).forEach((category) => {
+        const b = el('button', null, CATEGORY_LABELS[category]);
+        b.setAttribute('aria-selected', String(this.shopTab === category));
+        b.addEventListener('click', () => { this.shopTab = category; render(); });
+        tabs.appendChild(b);
+      });
+      body.appendChild(tabs);
+
+      CATALOG[this.shopTab].forEach((item) => {
+        const owned = inventory.has(this.shopTab, item.id);
+        const row = el('div', `sw-item${owned ? ' equipped' : ''}`);
+        row.innerHTML = `<div><div class="t">${item.name}</div>
+          <div class="d">${item.description}</div>
+          <div class="stats">${this._itemStats(this.shopTab, item)}</div></div>`;
+        const act = el('div', 'act');
+        if (owned) {
+          act.appendChild(el('span', 'sw-tag', 'En propiedad'));
+        } else {
+          const b = el('button', 'sw-btn', `${item.price}`);
+          b.disabled = !economy.canAfford(item.price);
+          b.addEventListener('click', () => { this.cb.onBuy?.(this.shopTab, item.id); render(); });
+          act.appendChild(b);
+        }
+        row.appendChild(act);
+        body.appendChild(row);
+      });
+    };
+    render();
+    this._overlay('Tienda del embarcadero', body);
+  }
+
+  showRecords(economy) {
+    const body = el('div');
+    const grid = el('div', 'sw-grid');
+    SPECIES.forEach((species) => {
+      const record = economy.records[species.id];
+      const card = el('div', `sw-card${record ? '' : ' unknown'}`);
+      card.innerHTML = record
+        ? `<div class="t">${species.name}</div>
+           <div class="m">${record.count} capturas · récord ${record.bestLength.toFixed(1)} cm / ${record.bestWeight.toFixed(2)} kg</div>`
+        : `<div class="t">? ? ?</div><div class="m">Sin capturar</div>`;
+      grid.appendChild(card);
+    });
+    body.appendChild(grid);
+    this._overlay(`Capturas · ${economy.discovered}/${economy.speciesTotal}`, body);
+  }
+
+  showStats(economy) {
+    const body = el('div', 'sw-stats');
+    const s = economy.stats;
+    const items = [
+      ['Lances', s.casts],
+      ['Picadas clavadas', s.hooked],
+      ['Cobrados', s.landed],
+      ['Perdidos', s.lost],
+      ['Líneas rotas', s.lineBreaks],
+      ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
+      ['Mayor captura', `${s.biggest.toFixed(2)} kg`],
+      ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
+    ];
+    items.forEach(([k, v]) => {
+      const stat = el('div', 'sw-stat');
+      stat.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
+      body.appendChild(stat);
+    });
+    this._overlay('Estadísticas', body);
+  }
+
+  showSettings(settings) {
+    const body = el('div');
+    const quality = el('div', 'sw-field');
+    quality.innerHTML = '<label>Calidad gráfica</label>';
+    const buttons = el('div', 'sw-tabs');
+    buttons.style.margin = '0';
+    Object.entries(QUALITY_PRESETS).forEach(([key, preset]) => {
+      const b = el('button', null, preset.label);
+      b.setAttribute('aria-selected', String(settings.quality === key));
+      b.addEventListener('click', () => {
+        this.cb.onSetting?.('quality', key);
+        [...buttons.children].forEach((c) => c.setAttribute('aria-selected', String(c === b)));
+      });
+      buttons.appendChild(b);
+    });
+    quality.appendChild(buttons);
+    body.appendChild(quality);
+
+    const slider = (label, key, min, max, step, value, format) => {
+      const field = el('div', 'sw-field');
+      field.innerHTML = `<label>${label}</label>`;
+      const wrap = el('div');
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = min; input.max = max; input.step = step; input.value = value;
+      const out = el('span', null, format(value));
+      out.style.cssText = 'margin-left:10px;color:var(--dim);font-size:12px';
+      input.addEventListener('input', () => {
+        out.textContent = format(Number(input.value));
+        this.cb.onSetting?.(key, Number(input.value));
+      });
+      wrap.appendChild(input);
+      wrap.appendChild(out);
+      field.appendChild(wrap);
+      body.appendChild(field);
+    };
+    slider('Campo de visión', 'fov', 55, 100, 1, settings.fov, (v) => `${v}°`);
+    slider('Sensibilidad', 'sensitivity', 0.2, 3, 0.1, settings.sensitivity, (v) => v.toFixed(1));
+    slider('Volumen', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
+
+    const hint = el('div', 'sw-hint');
+    hint.style.marginTop = '14px';
+    hint.innerHTML = 'La calidad se aplica al reiniciar el mundo desde el menú de pausa.';
+    body.appendChild(hint);
+
+    this._overlay('Configuración', body);
+  }
+
+  showPause({ onResume, onSave, onSettings, onReset }) {
+    const body = el('div');
+    const keys = el('div', 'sw-keys');
+    keys.innerHTML = `
+      <b>WASD</b><span>Moverse (Mayús para correr)</span>
+      <b>Ratón</b><span>Mirar</span>
+      <b>Clic izq. (mantener)</b><span>Cargar y lanzar</span>
+      <b>Clic izq.</b><span>Clavar durante la picada</span>
+      <b>Clic der. (mantener)</b><span>Recoger carrete</span>
+      <b>Rueda</b><span>Ajustar el freno</span>
+      <b>R</b><span>Recoger el sedal</span>
+      <b>Tab</b><span>Equipo</span>
+      <b>B</b><span>Tienda</span>
+      <b>C</b><span>Capturas</span>
+      <b>G</b><span>Estadísticas</span>
+      <b>F</b><span>Cambiar cámara</span>
+      <b>Esc</b><span>Pausa</span>`;
+    body.appendChild(keys);
+
+    const actions = el('div', 'sw-actions');
+    actions.style.marginTop = '18px';
+    const mk = (label, cls, fn) => {
+      const b = el('button', `sw-btn${cls}`, label);
+      b.addEventListener('click', fn);
+      return b;
+    };
+    actions.appendChild(mk('Continuar', '', () => { this.closePanel(); onResume(); }));
+    actions.appendChild(mk('Guardar', ' ghost', onSave));
+    actions.appendChild(mk('Configuración', ' ghost', () => { this.closePanel(); onSettings(); }));
+    actions.appendChild(mk('Empezar de cero', ' ghost', onReset));
+    body.appendChild(actions);
+
+    this._overlay('Pausa', body, { onClose: onResume });
+  }
+}
+
+/* ===== src/audio/AudioSystem.js ===== */
+/**
+ * Audio sintetizado con WebAudio.
+ *
+ * No se descarga ningún fichero: el viento y la lluvia son ruido filtrado, el
+ * agua es ruido con un filtro que respira, los pájaros y los grillos son
+ * osciladores con envolvente. La mezcla responde a la hora y al tiempo
+ * atmosférico, así que el paisaje sonoro cambia solo.
+ */
+
+class AudioSystem {
+  constructor() {
+    this.ctx = null;
+    this.ready = false;
+    this.master = null;
+    this.volume = 0.8;
+    this.muted = false;
+    this.layers = {};
+    this._birdTimer = 3;
+    this._cricketTimer = 5;
+  }
+
+  /** Debe llamarse desde un gesto del usuario (política de autoplay). */
+  init() {
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    this.ctx = new Ctx();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.volume;
+    this.master.connect(this.ctx.destination);
+
+    this.layers.wind = this._noiseLayer({ type: 'lowpass', frequency: 480, q: 0.7, gain: 0 });
+    this.layers.water = this._noiseLayer({ type: 'bandpass', frequency: 900, q: 1.4, gain: 0 });
+    this.layers.rain = this._noiseLayer({ type: 'highpass', frequency: 1500, q: 0.6, gain: 0 });
+    this.ready = true;
+  }
+
+  _noiseBuffer(seconds = 3) {
+    const length = Math.floor(this.ctx.sampleRate * seconds);
+    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+    return buffer;
+  }
+
+  _noiseLayer({ type, frequency, q, gain }) {
+    const source = this.ctx.createBufferSource();
+    source.buffer = this._noiseBuffer();
+    source.loop = true;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.value = frequency;
+    filter.Q.value = q;
+    const amp = this.ctx.createGain();
+    amp.gain.value = gain;
+    // LFO lento sobre el filtro: evita que el ruido suene estático.
+    const lfo = this.ctx.createOscillator();
+    const lfoGain = this.ctx.createGain();
+    lfo.frequency.value = 0.07 + Math.random() * 0.1;
+    lfoGain.gain.value = frequency * 0.28;
+    lfo.connect(lfoGain);
+    lfoGain.connect(filter.frequency);
+    lfo.start();
+
+    source.connect(filter);
+    filter.connect(amp);
+    amp.connect(this.master);
+    source.start();
+    return { source, filter, amp };
+  }
+
+  _tone(freq, duration, { type = 'sine', gain = 0.12, slideTo = null, delay = 0, attack = 0.01 } = {}) {
+    if (!this.ready || this.muted) return;
+    const t0 = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    const amp = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + duration);
+    amp.gain.setValueAtTime(0.0001, t0);
+    amp.gain.exponentialRampToValueAtTime(gain, t0 + attack);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    osc.connect(amp);
+    amp.connect(this.master);
+    osc.start(t0);
+    osc.stop(t0 + duration + 0.05);
+  }
+
+  _burst(duration, { gain = 0.2, type = 'lowpass', from = 3000, to = 300 } = {}) {
+    if (!this.ready || this.muted) return;
+    const t0 = this.ctx.currentTime;
+    const source = this.ctx.createBufferSource();
+    source.buffer = this._noiseBuffer(Math.max(0.4, duration));
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.setValueAtTime(from, t0);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(60, to), t0 + duration);
+    const amp = this.ctx.createGain();
+    amp.gain.setValueAtTime(gain, t0);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    source.connect(filter); filter.connect(amp); amp.connect(this.master);
+    source.start(t0);
+    source.stop(t0 + duration + 0.05);
+  }
+
+  // ------------------------------------------------------------- efectos
+  cast() { this._burst(0.32, { gain: 0.16, from: 600, to: 2600, type: 'bandpass' }); }
+  splash(strength = 1) { this._burst(0.45 * strength, { gain: 0.26, from: 2600, to: 280 }); }
+  reelClick() { this._tone(1500 + Math.random() * 400, 0.03, { type: 'square', gain: 0.045 }); }
+  dragSlip() { this._tone(820, 0.16, { type: 'sawtooth', gain: 0.09, slideTo: 1250 }); }
+  hookSet() { this._tone(240, 0.16, { type: 'square', gain: 0.16, slideTo: 520 }); }
+  bite() { this._tone(700, 0.09, { type: 'sine', gain: 0.16 }); this._tone(1040, 0.12, { type: 'sine', gain: 0.14, delay: 0.08 }); }
+  lineBreak() { this._burst(0.3, { gain: 0.3, from: 4000, to: 700, type: 'highpass' }); this._tone(180, 0.4, { type: 'sawtooth', gain: 0.16, slideTo: 60 }); }
+  landed() { [523, 659, 784, 1046].forEach((f, i) => this._tone(f, 0.18, { type: 'triangle', gain: 0.13, delay: i * 0.09 })); }
+  coin() { this._tone(880, 0.07, { type: 'square', gain: 0.1 }); this._tone(1320, 0.09, { type: 'square', gain: 0.09, delay: 0.06 }); }
+  footstep(surface) {
+    if (surface === 'madera') this._tone(140 + Math.random() * 40, 0.07, { type: 'square', gain: 0.055 });
+    else if (surface === 'agua') this._burst(0.2, { gain: 0.11, from: 1800, to: 400 });
+    else this._burst(0.09, { gain: 0.06, from: 900, to: 200 });
+  }
+
+  // ------------------------------------------------------------- ambiente
+  update(dt, { windSpeed = 2, rain = 0, nightFactor = 0, nearWater = 1, cloudiness = 0 } = {}) {
+    if (!this.ready) return;
+    const now = this.ctx.currentTime;
+    const set = (layer, value) => {
+      if (layer) layer.amp.gain.setTargetAtTime(this.muted ? 0 : value, now, 0.4);
+    };
+
+    set(this.layers.wind, clamp(0.012 + windSpeed * 0.011, 0, 0.14));
+    if (this.layers.wind) {
+      this.layers.wind.filter.frequency.setTargetAtTime(320 + windSpeed * 90, now, 0.6);
+    }
+    set(this.layers.water, clamp(nearWater * (0.02 + windSpeed * 0.006), 0, 0.09));
+    set(this.layers.rain, clamp(rain * 0.13, 0, 0.13));
+
+    // Pájaros de día, grillos de noche.
+    this._birdTimer -= dt;
+    if (this._birdTimer <= 0) {
+      this._birdTimer = lerp(1.4, 9, nightFactor) + Math.random() * 4 + cloudiness * 3;
+      if (nightFactor < 0.55 && rain < 0.4 && !this.muted) {
+        const base = 1600 + Math.random() * 1400;
+        const notes = 2 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < notes; i++) {
+          this._tone(base * (1 + i * 0.12), 0.09, {
+            type: 'sine', gain: 0.035, slideTo: base * 1.35, delay: i * 0.13
+          });
+        }
+      }
+    }
+
+    this._cricketTimer -= dt;
+    if (this._cricketTimer <= 0) {
+      this._cricketTimer = 0.35 + Math.random() * 0.5;
+      if (nightFactor > 0.45 && rain < 0.3 && !this.muted) {
+        this._tone(4200 + Math.random() * 600, 0.035, { type: 'square', gain: 0.016 });
+      }
+    }
+  }
+
+  setVolume(value) {
+    this.volume = clamp(value, 0, 1);
+    if (this.master) this.master.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.1);
+  }
+
+  setMuted(value) {
+    this.muted = value;
+    if (this.master) this.master.gain.setTargetAtTime(value ? 0 : this.volume, this.ctx.currentTime, 0.1);
+  }
+}
+
+/* ===== src/core/Game.js ===== */
+/**
+ * Orquestador.
+ *
+ * Construye los sistemas, los conecta y ejecuta el bucle. Ningún sistema
+ * conoce a los demás: el Game les pasa cada frame el contexto que necesitan
+ * (hora, viento, posición del jugador…) y reparte los eventos.
+ */
+class Game {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.save = new SaveSystem();
+    this.settings = { ...DEFAULT_SETTINGS, ...(this.save.load()?.settings || {}) };
+    this.preset = presetFor(this.settings);
+    this.clock = new THREE.Clock();
+    this.running = false;
+    this.paused = false;
+    this.autosaveTimer = 0;
+    this.footstepTimer = 0;
+
+    this._initRenderer();
+    this._initWorld();
+    this._initPlayer();
+    this._initProgress();
+    this._initFishing();
+    this._initUI();
+    this._bindInput();
+    this._loadProgress();
+  }
+
+  // --------------------------------------------------------------- montaje
+  _initRenderer() {
+    this.renderer = new THREE.WebGLRenderer({
+      canvas: this.canvas,
+      antialias: this.preset.antialias,
+      powerPreference: 'high-performance'
+    });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * this.preset.pixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.shadowMap.enabled = this.preset.shadows;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    // El cielo de Preetham emite valores muy altos: con exposición 1 se
+    // satura a blanco y el lago lo refleja como una lámina de leche.
+    this.renderer.toneMappingExposure = 0.34;
+
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(
+      this.settings.fov, window.innerWidth / window.innerHeight, 0.08, 5000
+    );
+
+    window.addEventListener('resize', () => this._resize());
+  }
+
+  _initWorld() {
+    this.textures = new TextureLibrary();
+    this.time = new TimeOfDay({ hour: 9.4 });
+
+    this.terrain = new Terrain(this.textures, { resolution: 300 });
+    this.scene.add(this.terrain.mesh);
+
+    this.water = new WaterBody(this.textures, {
+      reflectionSize: this.preset.waterReflection,
+      sunDirection: this.time.sunDirection
+    });
+    this.water.addTo(this.scene);
+
+    this.sky = new SkyDome(this.scene, this.textures, this.preset);
+    this.weather = new Weather(this.scene, this.textures, this.preset);
+    this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset);
+    this.props = new Props(this.scene, this.terrain, this.textures, this.preset);
+  }
+
+  _initPlayer() {
+    const spot = this.props.fishingSpots[0];
+    const spawn = spot.position.clone().add(new THREE.Vector3(0, 0, 0));
+    this.player = new Player(this.camera, this.terrain, {
+      spawn,
+      walkables: [this.props.group]
+    });
+    this.scene.add(this.player.rig);
+    // Mirando al centro del lago.
+    this.player.yaw = Math.atan2(-spawn.x, -spawn.z) + Math.PI;
+    this.fishManager = new FishManager(this.scene, this.terrain);
+  }
+
+  _initProgress() {
+    this.inventory = new Inventory();
+    this.equipment = new Equipment(this.inventory);
+    this.economy = new Economy();
+  }
+
+  _initFishing() {
+    this.audio = new AudioSystem();
+    this.fishing = new FishingSystem({
+      scene: this.scene,
+      camera: this.camera,
+      terrain: this.terrain,
+      water: this.water,
+      fishManager: this.fishManager,
+      equipment: this.equipment,
+      events: {
+        onCast: () => { this.economy.stats.casts++; this.audio.cast(); },
+        onSplash: (p) => this.audio.splash(0.9),
+        onBite: () => this.audio.bite(),
+        onHookSet: () => { this.economy.stats.hooked++; this.audio.hookSet(); },
+        onDragSlip: () => { if (Math.random() < 0.35) this.audio.dragSlip(); },
+        onJump: (fish) => this.water.splash(fish.position, 1.1),
+        onLineBreak: () => { this.economy.stats.lineBreaks++; this.economy.stats.lost++; this.audio.lineBreak(); },
+        onFishLost: () => { this.economy.stats.lost++; },
+        onLanded: (fish) => this._onLanded(fish)
+      }
+    });
+  }
+
+  _initUI() {
+    this.ui = new UI({
+      onEquip: (category, id) => { this.equipment.equip(category, id); this._persist(); },
+      onBuy: (category, id) => {
+        if (this.economy.buy(category, id)) {
+          this.inventory.add(category, id);
+          this.audio.coin();
+          this._persist();
+        }
+      },
+      onSetting: (key, value) => this._applySetting(key, value),
+      onPanelOpen: () => { this.input.releaseLock(); this.ui.setCrosshairVisible(false); },
+      onPanelClose: () => { this.ui.setCrosshairVisible(true); }
+    });
+  }
+
+  _bindInput() {
+    this.input = new Input(this.canvas);
+
+    this.canvas.addEventListener('click', () => {
+      if (!this.ui.isPanelOpen && !this.input.locked) {
+        this.audio.init();
+        this.input.requestLock();
+      }
+    });
+
+    this.input.on('pointerdown', (e) => {
+      if (this.ui.isPanelOpen || !this.input.locked) return;
+      if (e.button === 0) {
+        if (this.fishing.state === FishingState.BITE) this.fishing.strike();
+        else this.fishing.beginCast();
+      }
+    });
+    this.input.on('pointerup', (e) => {
+      if (e.button === 0) this.fishing.releaseCast();
+    });
+
+    this.input.on('keydown', (e) => {
+      if (e.repeat) return;
+      switch (e.code) {
+        case 'Escape': this._togglePause(); break;
+        case 'Tab': this._panel(() => this.ui.showGear(this.inventory, this.equipment)); break;
+        case 'KeyB': this._panel(() => this.ui.showShop(this.inventory, this.economy)); break;
+        case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
+        case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
+        case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
+        case 'KeyF':
+          this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
+          this.fishing.rod.setVisible(this.player.mode === 'first');
+          break;
+        default: break;
+      }
+    });
+  }
+
+  _panel(open) {
+    if (this.ui.isPanelOpen) { this.ui.closePanel(); return; }
+    open();
+  }
+
+  _togglePause() {
+    if (this.ui.isPanelOpen) { this.ui.closePanel(); return; }
+    this.ui.showPause({
+      onResume: () => {},
+      onSave: () => { this._persist(); this.fishing._say('Partida guardada'); },
+      onSettings: () => this.ui.showSettings(this.settings),
+      onReset: () => {
+        this.save.clear();
+        window.location.reload();
+      }
+    });
+  }
+
+  // -------------------------------------------------------------- eventos
+  _onLanded(fish) {
+    this.audio.landed();
+    const result = this.economy.registerCatch(fish);
+    this.ui.showCatch(fish, result, {
+      onKeep: () => {
+        this.economy.sell(result.value);
+        this.audio.coin();
+        this.fishing.finishCatch(true);
+        this._persist();
+      },
+      onRelease: () => {
+        this.fishing.finishCatch(false);
+        this._persist();
+      }
+    });
+  }
+
+  _applySetting(key, value) {
+    this.settings[key] = value;
+    if (key === 'fov') {
+      this.camera.fov = value;
+      this.camera.updateProjectionMatrix();
+    }
+    if (key === 'masterVolume') this.audio.setVolume(value);
+    this._persist();
+  }
+
+  // ----------------------------------------------------------- persistencia
+  _persist() {
+    this.save.save({
+      settings: this.settings,
+      inventory: this.inventory.toJSON(),
+      equipment: this.equipment.toJSON(),
+      economy: this.economy.toJSON(),
+      world: { hour: this.time.hour, weather: this.weather.current }
+    });
+  }
+
+  _loadProgress() {
+    const data = this.save.load();
+    if (!data) return;
+    this.inventory = Inventory.fromJSON(data.inventory);
+    this.equipment = Equipment.fromJSON(this.inventory, data.equipment);
+    this.economy = new Economy(data.economy);
+    this.fishing.equipment = this.equipment;
+    if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
+    if (data.world?.weather) this.weather.setWeather(data.world.weather);
+    this.audio.setVolume(this.settings.masterVolume);
+  }
+
+  // ---------------------------------------------------------------- bucle
+  start() {
+    this.running = true;
+    this.clock.start();
+    this.renderer.setAnimationLoop(() => this._frame());
+  }
+
+  _resize() {
+    this.camera.aspect = window.innerWidth / window.innerHeight;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  _frame() {
+    const dt = Math.min(0.05, this.clock.getDelta());
+    this.simulate(dt);
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * Un paso de simulación, independiente del dibujado.
+   *
+   * Separarlo permite ejecutar el juego a velocidad de cálculo (pruebas
+   * automáticas, ajuste de equilibrio) sin pasar por la GPU, y deja la puerta
+   * abierta a un paso fijo si en el futuro hace falta determinismo.
+   */
+  simulate(dt, { headless = false } = {}) {
+    const panelOpen = this.ui.isPanelOpen;
+    const controllable = headless || (!panelOpen && this.input.locked);
+
+    if (controllable && !headless) {
+      const mouse = this.input.consumeMouseDelta();
+      this.player.look(mouse.dx, mouse.dy, this.settings.sensitivity, this.settings.invertY);
+      if (mouse.wheel) this.fishing.adjustDrag(-mouse.wheel * 0.06);
+      this.fishing.setRetrieve(this.input.mouse.right ? 1 : 0);
+    } else if (!headless) {
+      this.input.consumeMouseDelta();
+      this.fishing.setRetrieve(0);
+    }
+
+    const moving = controllable && !headless
+      ? this.player.update(dt, this.input)
+      : { speed: 0, surface: this.player.surface, depth: 0 };
+
+    this.time.update(panelOpen ? 0 : dt);
+    this.weather.update(dt, this.player.position, this.time.fogColor);
+    this.sky.update(this.time, this.weather, dt, this.player.position);
+
+    const wind = new THREE.Vector3(
+      this.weather.windDirection.x, 0, this.weather.windDirection.y
+    ).multiplyScalar(this.weather.windSpeed);
+
+    this.water.update(dt, {
+      sunDirection: this.time.sunDirection,
+      sunColor: this.time.sunColor,
+      waterColor: new THREE.Color(0x0d2630).lerp(this.time.skyColor, 0.16),
+      choppiness: this.weather.choppiness
+    });
+    this.vegetation.update(dt, wind, this.player.position);
+
+    const context = {
+      terrain: this.terrain,
+      hour: this.time.hour,
+      time: this.clock.elapsedTime,
+      weatherModifier: this.weather.biteModifier,
+      feeding: this.time.feedingFactor,
+      wind,
+      lookDelta: this.player.lookDelta,
+      cameraPosition: this.player.position,
+      lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
+      lureAction: this.fishing.lure.action,
+      onBite: () => {},
+      onSpit: () => {}
+    };
+
+    if (!panelOpen) {
+      this.fishing.update(dt, context);
+      this.fishManager.update(dt, context);
+    }
+
+    if (!headless) {
+      this._updateAudio(dt, moving);
+      this.ui.update({
+        fishing: this.fishing.hud,
+        time: this.time,
+        weather: this.weather,
+        money: this.economy.money,
+        equipment: this.equipment
+      });
+      this.autosaveTimer += dt;
+      if (this.autosaveTimer > 30) { this.autosaveTimer = 0; this._persist(); }
+    }
+  }
+
+  _updateAudio(dt, moving) {
+    const depthUnderPlayer = this.terrain.depthAt(this.player.position.x, this.player.position.z);
+    const distanceToWater = clamp(1 - Math.max(0, this.player.position.y) / 12, 0.15, 1);
+    this.audio.update(dt, {
+      windSpeed: this.weather.windSpeed,
+      rain: this.weather.rainAmount,
+      nightFactor: this.time.nightFactor,
+      nearWater: depthUnderPlayer > 0 ? 1 : distanceToWater,
+      cloudiness: this.weather.cloudiness
+    });
+
+    if (moving.speed > 0.8) {
+      this.footstepTimer -= dt * moving.speed;
+      if (this.footstepTimer <= 0) {
+        this.footstepTimer = 1.5;
+        this.audio.footstep(moving.surface);
+      }
+    }
+  }
+
+  dispose() {
+    this.renderer.setAnimationLoop(null);
+    this.fishing.dispose();
+    this.fishManager.dispose();
+    this.vegetation.dispose();
+    this.props.dispose();
+    this.water.dispose();
+    this.sky.dispose();
+    this.weather.dispose();
+    this.terrain.dispose();
+    this.textures.dispose();
+    this.renderer.dispose();
+  }
+}
+
+/* ===== src/main.js ===== */
+/** Punto de entrada: monta el juego y quita la pantalla de carga. */
+const canvas = document.getElementById('viewport');
+const loader = document.getElementById('loading');
+const loaderText = document.getElementById('loading-text');
+
+function fail(error) {
+  console.error(error);
+  if (loaderText) {
+    loaderText.innerHTML = `<b>No se pudo iniciar el juego.</b><br>${error.message}<br>
+      <small>Requiere un navegador con WebGL 2.</small>`;
+  }
+}
+
+try {
+  if (loaderText) loaderText.textContent = 'Generando el lago…';
+  const game = new Game(canvas);
+  window.game = game;                     // útil para depurar desde la consola
+  game.start();
+  requestAnimationFrame(() => {
+    loader?.classList.add('done');
+    setTimeout(() => loader?.remove(), 700);
+  });
+} catch (error) {
+  fail(error);
+}
+</script>
+
+<script>
+  // Si el módulo no llega a arrancar (three.js bloqueado, WebGL 2 ausente),
+  // el usuario vería una pantalla de carga eterna. Esto lo explica.
+  setTimeout(function () {
+    if (window.game) return;
+    var t = document.getElementById('loading-text');
+    if (t) t.innerHTML = '<b>No se pudo iniciar.</b><br>' +
+      'Necesita WebGL 2 y acceso a la librería three.js.<br>' +
+      '<small>Prueba con Chrome o Firefox actualizados en un ordenador.</small>';
+  }, 20000);
+</script>

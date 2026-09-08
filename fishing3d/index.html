@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Still Waters — simulador de pesca</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #05080b; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #loading { position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px; background: #070c10;
+      color: #dbe6ec; font-family: system-ui, sans-serif; z-index: 100;
+      transition: opacity .6s ease; }
+    #loading.done { opacity: 0; pointer-events: none; }
+    #loading h1 { font-size: 26px; font-weight: 600; letter-spacing: .04em; margin: 0; }
+    #loading p { color: #8ea0ac; font-size: 14px; margin: 0; text-align: center; max-width: 420px; }
+    .spinner { width: 26px; height: 26px; border: 2px solid #223039;
+      border-top-color: #6fd3c7; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./node_modules/three/build/three.module.js",
+      "three/addons/": "./node_modules/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="viewport"></canvas>
+  <div id="loading">
+    <div class="spinner"></div>
+    <h1>Still Waters</h1>
+    <p id="loading-text">Cargando…</p>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

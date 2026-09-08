@@ -5,3 +5,9 @@ __pycache__/
 # Portable Git toolchain bundled in this folder — not part of the project
 /Git/
 /.claude/
+
+# Dependencias del juego 3D (se instalan con npm install)
+fishing3d/node_modules/
+
+# Build local de pruebas (se regenera con build.py --local)
+fishing3d/dist/index.local.html
