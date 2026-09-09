@@ -15,7 +15,8 @@ export class Equipment {
       rods: 'cana_iniciacion',
       reels: 'carrete_basico',
       lines: 'nylon_022',
-      lures: 'cucharilla'
+      lures: 'cucharilla',
+      boats: 'barca_remos'
     };
   }
 
@@ -23,6 +24,7 @@ export class Equipment {
   get reel() { return findItem('reels', this.equipped.reels) || CATALOG.reels[0]; }
   get line() { return findItem('lines', this.equipped.lines) || CATALOG.lines[0]; }
   get lure() { return findItem('lures', this.equipped.lures) || CATALOG.lures[0]; }
+  get boat() { return findItem('boats', this.equipped.boats) || CATALOG.boats[0]; }
 
   /**
    * Equipar. `guard` permite a la pesca vetar el cambio: no se cambia de

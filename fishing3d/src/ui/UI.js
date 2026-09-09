@@ -618,6 +618,8 @@ export class UI {
       case 'reels': return `${item.capacity} m · recogida ${item.retrieve} · freno máx ${item.maxDrag} kg`;
       case 'lines': return `${item.strength} kg · ⌀ ${item.diameter} mm · elasticidad ${(item.elasticity * 100).toFixed(0)}%`;
       case 'lures': return `${item.weightG} g · trabaja a ${item.workingDepth} m · acción ${(item.action * 100).toFixed(0)}%`;
+      case 'boats': return `${item.speed} m/s · aguanta oleaje ${(item.stability * 100).toFixed(0)}%` +
+        (item.troll ? ' · permite curricar' : '');
       default: return '';
     }
   }
@@ -662,40 +664,52 @@ export class UI {
     this._overlay('Tienda del embarcadero', body);
   }
 
-  showRecords(economy) {
+  showStats(economy, extras = {}) {
+    const { totalQuests = 0, totalSpecies = 0, totalZones = 0 } = extras;
     const body = el('div');
-    const grid = el('div', 'sw-grid');
-    SPECIES.forEach((species) => {
-      const record = economy.records[species.id];
-      const card = el('div', `sw-card${record ? '' : ' unknown'}`);
-      card.innerHTML = record
-        ? `<div class="t">${species.name}</div>
-           <div class="m">${record.count} capturas · récord ${record.bestLength.toFixed(1)} cm / ${record.bestWeight.toFixed(2)} kg</div>`
-        : `<div class="t">? ? ?</div><div class="m">Sin capturar</div>`;
-      grid.appendChild(card);
-    });
-    body.appendChild(grid);
-    this._overlay(`Capturas · ${economy.discovered}/${economy.speciesTotal}`, body);
-  }
-
-  showStats(economy) {
-    const body = el('div', 'sw-stats');
     const s = economy.stats;
-    const items = [
-      ['Lances', s.casts],
-      ['Picadas clavadas', s.hooked],
-      ['Cobrados', s.landed],
-      ['Perdidos', s.lost],
-      ['Líneas rotas', s.lineBreaks],
-      ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
-      ['Mayor captura', `${s.biggest.toFixed(2)} kg`],
-      ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
+    const [have, need] = economy.levelProgress;
+
+    const cabecera = el('div', 'sw-hint');
+    cabecera.innerHTML = `Nivel <b>${economy.level}</b> · <b>${economy.title}</b> ·
+      ${have}/${need} XP hasta el siguiente`;
+    cabecera.style.marginBottom = '14px';
+    body.appendChild(cabecera);
+
+    const grupos = [
+      ['Progreso', [
+        ['Nivel', economy.level],
+        ['Experiencia', economy.xp],
+        ['Misiones completadas', `${s.questsDone ?? 0}${totalQuests ? ` / ${totalQuests}` : ''}`],
+        ['Especies descubiertas', `${economy.discovered}${totalSpecies ? ` / ${totalSpecies}` : ''}`],
+        ['Aguas visitadas', `${economy.zonesVisited.size}${totalZones ? ` / ${totalZones}` : ''}`],
+        ['Monedas ganadas', economy.earned ?? 0]
+      ]],
+      ['Pesca', [
+        ['Lances', s.casts],
+        ['Picadas clavadas', s.hooked],
+        ['Cobrados', s.landed],
+        ['Perdidos', s.lost],
+        ['Líneas rotas', s.lineBreaks],
+        ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
+      ]],
+      ['Récords', [
+        ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
+        ['Mayor captura', `${s.biggest.toFixed(2)} kg`],
+        ['Especie del récord', s.biggestSpecies ?? '—'],
+        ['Mayor longitud', s.longest ? `${s.longest.toFixed(1)} cm` : '—']
+      ]]
     ];
-    items.forEach(([k, v]) => {
-      const stat = el('div', 'sw-stat');
-      stat.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
-      body.appendChild(stat);
-    });
+    for (const [titulo, items] of grupos) {
+      body.appendChild(el('div', 'sw-chaptitle', titulo));
+      const grid = el('div', 'sw-stats');
+      items.forEach(([k, v]) => {
+        const stat = el('div', 'sw-stat');
+        stat.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
+        grid.appendChild(stat);
+      });
+      body.appendChild(grid);
+    }
     this._overlay('Estadísticas', body);
   }
 
@@ -1104,7 +1118,8 @@ export class UI {
     };
     slider('Campo de visión', 'fov', 55, 100, 1, settings.fov, (v) => `${v}°`);
     slider('Sensibilidad', 'sensitivity', 0.2, 3, 0.1, settings.sensitivity, (v) => v.toFixed(1));
-    slider('Volumen', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
+    slider('Volumen general', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
+    slider('Música', 'musicVolume', 0, 1, 0.05, settings.musicVolume ?? 0.5, (v) => `${Math.round(v * 100)}%`);
 
     const toggle = (label, key, value, note) => {
       const field = el('div', 'sw-field');

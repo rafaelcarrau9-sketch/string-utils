@@ -11,8 +11,6 @@ import { clamp, damp } from '../core/MathUtils.js';
 
 const MIN_DEPTH = 0.55;          // calado mínimo para navegar
 const ROW_ACCEL = 2.4;
-const MAX_SPEED = 3.6;
-const TURN_RATE = 1.15;
 
 export class Boat {
   constructor(scene, terrain, textures, preset, { position = new THREE.Vector3(), heading = 0 } = {}) {
@@ -22,6 +20,10 @@ export class Boat {
     this.speed = 0;
     this.occupied = false;
     this.wakeTimer = 0;
+    // Las prestaciones vienen de la embarcación equipada; la barca de remos es
+    // el valor de partida.
+    this.spec = { speed: 3.6, turn: 1.15, stability: 0.45, troll: false };
+    this.rough = 0;               // 0 tranquila, 1 pasándolo mal
 
     const wood = textures.material('madera', { repeat: 1.5 });
     this.group = new THREE.Group();
@@ -100,11 +102,22 @@ export class Boat {
    * @param row  -1..1 (bogar hacia adelante o ciar)
    * @param turn -1..1
    */
-  update(dt, { row = 0, turn = 0, time = 0, water = null } = {}) {
+  /** Prestaciones de la embarcación equipada. */
+  setSpec(spec) { if (spec) this.spec = spec; }
+
+  update(dt, { row = 0, turn = 0, time = 0, water = null, choppiness = 0 } = {}) {
+    const maxSpeed = this.spec.speed;
+    // Con más oleaje del que aguanta el casco, la barca pierde gobierno. No
+    // impide navegar: avisa y castiga, que es lo que hace el mar de verdad.
+    this.rough = clamp((choppiness - this.spec.stability) / 0.6, 0, 1);
+    const castigo = 1 - this.rough * 0.55;
+
     if (this.occupied) {
-      this.speed = damp(this.speed, row * MAX_SPEED, ROW_ACCEL, dt);
+      this.speed = damp(this.speed, row * maxSpeed * castigo, ROW_ACCEL, dt);
       // Virar sólo tiene efecto con algo de arrancada, como en el agua real.
-      this.heading += turn * TURN_RATE * dt * clamp(0.35 + Math.abs(this.speed) / MAX_SPEED, 0.35, 1.3);
+      this.heading += turn * this.spec.turn * dt * clamp(0.35 + Math.abs(this.speed) / maxSpeed, 0.35, 1.3);
+      // El oleaje también la desvía sola.
+      if (this.rough > 0.05) this.heading += Math.sin(time * 0.7) * this.rough * 0.4 * dt;
     } else {
       this.speed = damp(this.speed, 0, 1.4, dt);
     }
@@ -128,15 +141,17 @@ export class Boat {
     }
 
     // Flotación: cabeceo y balanceo suaves.
-    const bobY = Math.sin(time * 1.4) * 0.035 + Math.sin(time * 2.1 + 1.3) * 0.02;
+    const bobY = (Math.sin(time * 1.4) * 0.035 + Math.sin(time * 2.1 + 1.3) * 0.02) * (1 + this.rough * 3);
     this.group.position.set(this.position.x, this.terrain.waterLevel + 0.12 + bobY, this.position.z);
     this.group.rotation.y = this.heading;
-    this.group.rotation.z = Math.sin(time * 1.1) * 0.025 - this.speed * 0.02;
-    this.group.rotation.x = Math.sin(time * 1.7) * 0.018;
+    // Con mala mar cabecea de verdad.
+    const mar = 1 + this.rough * 4;
+    this.group.rotation.z = Math.sin(time * 1.1) * 0.025 * mar - this.speed * 0.02;
+    this.group.rotation.x = Math.sin(time * 1.7) * 0.018 * mar;
     this.group.updateMatrixWorld();
 
     // Los remos bogan al ritmo del avance.
-    const stroke = Math.sin(time * 3.2) * clamp(Math.abs(this.speed) / MAX_SPEED, 0, 1);
+    const stroke = Math.sin(time * 3.2) * clamp(Math.abs(this.speed) / this.spec.speed, 0, 1);
     this.oars.forEach(({ object, side }) => {
       object.rotation.x = stroke * 0.5;
       object.rotation.y = stroke * 0.28 * side;

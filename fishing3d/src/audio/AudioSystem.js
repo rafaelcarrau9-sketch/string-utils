@@ -1,3 +1,4 @@
+import { Music } from './Music.js';
 import { clamp, lerp } from '../core/MathUtils.js';
 
 /**
@@ -19,6 +20,9 @@ export class AudioSystem {
     this.layers = {};
     this._birdTimer = 3;
     this._cricketTimer = 5;
+    this._frogTimer = 4;
+    this.music = null;
+    this.musicVolume = 0.55;
   }
 
   /** Debe llamarse desde un gesto del usuario (política de autoplay). */
@@ -34,6 +38,10 @@ export class AudioSystem {
     this.layers.wind = this._noiseLayer({ type: 'lowpass', frequency: 480, q: 0.7, gain: 0 });
     this.layers.water = this._noiseLayer({ type: 'bandpass', frequency: 900, q: 1.4, gain: 0 });
     this.layers.rain = this._noiseLayer({ type: 'highpass', frequency: 1500, q: 0.6, gain: 0 });
+
+    // La música cuelga del mismo maestro que el resto: un solo volumen manda.
+    this.music = new Music(this.ctx, this.master);
+    this.music.setVolume(this.musicVolume);
     this.ready = true;
   }
 
@@ -162,7 +170,7 @@ export class AudioSystem {
   }
 
   // ------------------------------------------------------------- ambiente
-  update(dt, { windSpeed = 2, rain = 0, nightFactor = 0, nearWater = 1, cloudiness = 0 } = {}) {
+  update(dt, { windSpeed = 2, rain = 0, nightFactor = 0, nearWater = 1, cloudiness = 0, music = null, frogs = 0 } = {}) {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
     const set = (layer, value) => {
@@ -191,6 +199,22 @@ export class AudioSystem {
       }
     }
 
+    // Ranas: sólo donde hay marisma y a partir del atardecer. Es el sonido que
+    // le da carácter a esa zona y la distingue del lago con los ojos cerrados.
+    this._frogTimer -= dt;
+    if (this._frogTimer <= 0) {
+      this._frogTimer = (0.9 + Math.random() * 1.6) / Math.max(0.15, frogs);
+      if (frogs > 0.05 && nightFactor > 0.3 && !this.muted) {
+        const base = 150 + Math.random() * 90;
+        const n = 2 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < n; i++) {
+          this._tone(base * (1 + Math.random() * 0.06), 0.075, {
+            type: 'sawtooth', gain: 0.03 * Math.min(1, frogs), delay: i * 0.11, attack: 0.005
+          });
+        }
+      }
+    }
+
     this._cricketTimer -= dt;
     if (this._cricketTimer <= 0) {
       this._cricketTimer = 0.35 + Math.random() * 0.5;
@@ -198,7 +222,18 @@ export class AudioSystem {
         this._tone(4200 + Math.random() * 600, 0.035, { type: 'square', gain: 0.016 });
       }
     }
+    if (this.music && music) this.music.update(dt, music);
   }
+
+  /** Volumen propio de la música, aparte del general. */
+  setMusicVolume(value) {
+    this.musicVolume = clamp(value, 0, 1);
+    this.music?.setVolume(this.musicVolume);
+    this.music?.setEnabled(this.musicVolume > 0.001);
+  }
+
+  /** Baja la música un momento para que se oiga lo que acaba de pasar. */
+  duckMusic(seconds = 2.5) { this.music?.duckFor(seconds); }
 
   setVolume(value) {
     this.volume = clamp(value, 0, 1);

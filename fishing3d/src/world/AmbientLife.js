@@ -17,7 +17,7 @@ const JUMP_POOL = 4;
 const BIRD_POOL = 6;
 
 export class AmbientLife {
-  constructor(scene, terrain, water, { seed = 606, audio = null } = {}) {
+  constructor(scene, terrain, water, { seed = 606, audio = null, life = null } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.water = water;
@@ -28,6 +28,8 @@ export class AmbientLife {
     this.group.name = 'ambiente';
     scene.add(this.group);
 
+    // Cada agua tiene su fauna: la marisma bulle, el cañón está callado.
+    this.life = { jumps: 1, birds: 1, ...(life ?? {}) };
     this.jumpTimer = 6 + this.rng() * 10;
     this.birdTimer = 12 + this.rng() * 20;
     this.gustTimer = 8 + this.rng() * 14;
@@ -149,7 +151,7 @@ export class AmbientLife {
     // --- peces saltando -------------------------------------------------
     this.jumpTimer -= dt * (0.35 + feeding * 0.5);
     if (this.jumpTimer <= 0) {
-      this.jumpTimer = 14 + this.rng() * 38 / Math.max(0.4, feeding);
+      this.jumpTimer = (14 + this.rng() * 38 / Math.max(0.4, feeding)) / Math.max(0.15, this.life.jumps);
       this._startJump(player, 0.6 + feeding * 0.6);
     }
     for (const j of this.jumpers) {
@@ -172,8 +174,10 @@ export class AmbientLife {
     // --- pájaros ---------------------------------------------------------
     this.birdTimer -= dt * calm;
     if (this.birdTimer <= 0) {
-      this.birdTimer = 25 + this.rng() * 55;
-      if (time.nightFactor < 0.6) this._startFlock(player, 2 + Math.floor(this.rng() * 4));
+      this.birdTimer = (25 + this.rng() * 55) / Math.max(0.15, this.life.birds);
+      if (time.nightFactor < 0.6 && this.life.birds > 0.05) {
+        this._startFlock(player, 2 + Math.floor(this.rng() * 4 * this.life.birds));
+      }
     }
     for (const bird of this.birds) {
       if (!bird.active) continue;

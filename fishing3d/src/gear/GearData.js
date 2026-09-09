@@ -61,13 +61,31 @@ export const LURES = [
     description: 'Cebo quieto cerca del fondo. Paciencia, pero peces grandes.' }
 ];
 
-export const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES };
+/**
+ * Embarcaciones.
+ *
+ * No son un adorno de progresión: cambian a dónde se puede llegar y cuándo.
+ * `stability` es el oleaje que aguantan antes de tener que volver a resguardo;
+ * `troll` permite avanzar con el sedal fuera, que es la única forma de peinar
+ * una tabla de agua honda buscando peces grandes.
+ */
+export const BOATS = [
+  { id: 'barca_remos', name: 'Barca de remos', speed: 3.6, turn: 1.15, stability: 0.45, troll: false, price: 0,
+    description: 'La de siempre. Sirve para cruzar, no para faenar con mal tiempo.' },
+  { id: 'barca_aluminio', name: 'Barca de aluminio', speed: 4.8, turn: 1.35, stability: 0.75, troll: false, price: 900,
+    description: 'Más ligera y más seca. Aguanta oleaje que a la de madera la manda a puerto.' },
+  { id: 'lancha_motor', name: 'Lancha con fueraborda', speed: 7.2, turn: 1.6, stability: 1.0, troll: true, price: 3800,
+    description: 'Llega al otro extremo en un minuto y permite curricar: avanzar despacio con el señuelo fuera.' }
+];
+
+export const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES, boats: BOATS };
 
 export const CATEGORY_LABELS = {
   rods: 'Cañas',
   reels: 'Carretes',
   lines: 'Líneas',
-  lures: 'Señuelos'
+  lures: 'Señuelos',
+  boats: 'Embarcaciones'
 };
 
 export function findItem(category, id) {

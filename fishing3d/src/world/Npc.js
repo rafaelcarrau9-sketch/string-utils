@@ -97,6 +97,7 @@ export class Npc {
       this.legs[side] = { hip, knee };
     }
 
+    this._buildProp(data.activity, coat, skin);
     this._buildMarker();
 
     // Estado de animación.
@@ -111,6 +112,56 @@ export class Npc {
     this.glanceYaw = 0;
     this.attention = 0;          // 0 a lo suyo, 1 mirando al jugador
     this.gesture = 0;            // realce del gesto al hablar
+  }
+
+  /**
+   * Lo que tiene entre manos. Cada oficio lleva su cacharro, y ese cacharro es
+   * lo que justifica la postura: quien anota tiene la libreta delante, quien
+   * pesca sostiene la caña, quien amarra tiene el cabo recogido. Sin esto los
+   * personajes gesticulan con las manos vacías y se nota.
+   */
+  _buildProp(activity, coat, skin) {
+    this.prop = new THREE.Group();
+    this.activity = activity ?? 'espera';
+    const mat = (color, rough = 0.8) =>
+      new THREE.MeshStandardMaterial({ color, roughness: rough });
+
+    if (activity === 'pesca') {
+      const rodMat = mat(0x2a2f36, 0.45);
+      this._materials.push(rodMat);
+      const blank = new THREE.Mesh(
+        sharedGeometry('npcRod', () => new THREE.CylinderGeometry(0.006, 0.016, 2.0, 6)), rodMat);
+      blank.position.y = 0.95;
+      this.prop.add(blank);
+      this.prop.rotation.set(1.05, 0, -0.2);
+    } else if (activity === 'anota') {
+      const board = mat(0xb9a67c, 0.9);
+      this._materials.push(board);
+      const tabla = new THREE.Mesh(
+        sharedGeometry('npcBoard', () => new THREE.BoxGeometry(0.22, 0.3, 0.014)), board);
+      this.prop.add(tabla);
+      this.prop.rotation.set(-1.15, 0.2, 0);
+    } else if (activity === 'amarra') {
+      const rope = mat(0x9a8c62, 0.95);
+      this._materials.push(rope);
+      const coil = new THREE.Mesh(
+        sharedGeometry('npcCoil', () => new THREE.TorusGeometry(0.13, 0.028, 5, 12)), rope);
+      coil.rotation.x = Math.PI / 2;
+      this.prop.add(coil);
+      this.prop.rotation.set(-0.4, 0, 0);
+    } else if (activity === 'vende') {
+      const crate = mat(0x6d5433, 0.92);
+      this._materials.push(crate);
+      const caja = new THREE.Mesh(
+        sharedGeometry('npcCrate', () => new THREE.BoxGeometry(0.3, 0.17, 0.2)), crate);
+      this.prop.add(caja);
+      this.prop.rotation.set(-0.5, 0, 0);
+    } else {
+      this.prop.visible = false;
+    }
+    // Cuelga del antebrazo derecho, como cualquier cosa que se sostiene.
+    this.prop.position.set(0, -0.29, 0.03);
+    this.arms.R.elbow.add(this.prop);
   }
 
   _buildMarker() {
@@ -220,23 +271,65 @@ export class Npc {
     this.neck.rotation.set(this.lookPitch, this.lookYaw * 0.62, this.lookYaw * 0.06);
     this.torso.rotation.y = this.lookYaw * 0.34;
 
-    // Brazos: sueltos, con un balanceo mínimo. Al hablar, gesticulan.
+    // Brazos: la pose base la decide el oficio; encima va el gesto de hablar,
+    // que se impone porque al hablar se suelta lo que se tenga entre manos.
     this.gesture = damp(this.gesture, talking ? 1 : 0, talking ? 5 : 1.8, dt);
     const idleSwing = Math.sin(this.t * 0.62) * 0.035;
     const habla = Math.sin(this.t * 4.3) * 0.5 + Math.sin(this.t * 2.7 + 1.1) * 0.35;
+    const pose = this._activityPose();
+    const g = this.gesture, w = 1 - g;
+
     this.arms.R.shoulder.rotation.set(
-      idleSwing + this.gesture * (0.28 + habla * 0.34), 0, -0.09 - this.gesture * 0.22
+      w * (pose.rs + idleSwing) + g * (0.28 + habla * 0.34), 0, w * pose.rz - g * 0.22
     );
-    this.arms.R.elbow.rotation.x = -0.22 - this.gesture * (0.75 + habla * 0.3);
+    this.arms.R.elbow.rotation.x = w * pose.re - g * (0.75 + habla * 0.3);
     this.arms.L.shoulder.rotation.set(
-      -idleSwing + this.gesture * (0.14 + habla * 0.16), 0, 0.09 + this.gesture * 0.1
+      w * (pose.ls - idleSwing) + g * (0.14 + habla * 0.16), 0, w * pose.lz + g * 0.1
     );
-    this.arms.L.elbow.rotation.x = -0.2 - this.gesture * 0.4;
+    this.arms.L.elbow.rotation.x = w * pose.le - g * 0.4;
+    if (this.prop) {
+      // Lo que sostiene se guarda mientras habla: nadie conversa con la caña
+      // en la mano.
+      this.prop.visible = this.activity !== 'espera' && g < 0.45;
+      this.prop.scale.setScalar(clamp(w, 0.001, 1));
+    }
 
     // El indicador flota y gira: se ve desde lejos sin ser un cartel.
     if (this.marker.visible) {
       this.marker.rotation.y += dt * 1.5;
       this.marker.position.y = 1.86 + Math.sin(this.t * 1.9) * 0.06;
+    }
+  }
+
+  /**
+   * Ángulos de brazo de cada oficio, con su pequeño movimiento propio: la mano
+   * que anota se mueve, la caña se levanta de vez en cuando, el cabo se recoge.
+   */
+  _activityPose() {
+    const t = this.t;
+    switch (this.activity) {
+      case 'pesca': {
+        // De vez en cuando levanta la puntera, como quien comprueba el cebo.
+        const tirón = Math.max(0, Math.sin(t * 0.31)) ** 8 * 0.5;
+        return { rs: -0.72 - tirón, re: -0.85, rz: -0.2, ls: -0.5, le: -1.15, lz: 0.22 };
+      }
+      case 'anota': {
+        const escribe = Math.sin(t * 5.2) * 0.05 + Math.sin(t * 2.1) * 0.02;
+        return { rs: -1.02 + escribe, re: -1.25, rz: -0.3, ls: -0.95, le: -1.5, lz: 0.34 };
+      }
+      case 'amarra': {
+        const recoge = Math.sin(t * 1.4) * 0.16;
+        return { rs: -0.85 + recoge, re: -1.35 - recoge * 0.6, rz: -0.26, ls: -0.8 - recoge, le: -1.3, lz: 0.3 };
+      }
+      case 'vende': {
+        const carga = Math.sin(t * 0.9) * 0.1;
+        return { rs: -0.95 + carga, re: -1.15, rz: -0.34, ls: -0.9 + carga, le: -1.2, lz: 0.36 };
+      }
+      case 'vigila':
+        // Brazos cruzados: la postura de quien está ahí para mirar.
+        return { rs: -0.62, re: -1.55, rz: -0.5, ls: -0.6, le: -1.6, lz: 0.5 };
+      default:
+        return { rs: 0, re: -0.22, rz: -0.09, ls: 0, le: -0.2, lz: 0.09 };
     }
   }
 
@@ -282,8 +375,60 @@ export class NpcCrew {
 
   byId(id) { return this.npcs.find((n) => n.id === id) ?? null; }
 
+  /**
+   * A distancia, un personaje ocupa veinte píxeles: ni se anima ni se dibuja.
+   * Animarlos a todos siempre era gastar en algo que nadie puede ver.
+   */
   update(dt, playerPosition, talkingId = null) {
-    for (const npc of this.npcs) npc.update(dt, playerPosition, npc.id === talkingId);
+    for (const npc of this.npcs) {
+      const dx = npc.position.x - playerPosition.x;
+      const dz = npc.position.z - playerPosition.z;
+      const dist2 = dx * dx + dz * dz;
+      const visible = dist2 < 120 * 120;
+      if (npc.root.visible !== visible) npc.root.visible = visible;
+      if (!visible) continue;
+      // Más allá de cuarenta metros basta con refrescarlo de vez en cuando.
+      if (dist2 > 40 * 40) {
+        npc._lazy = (npc._lazy ?? 0) + dt;
+        if (npc._lazy < 0.2) continue;
+        npc.update(npc._lazy, playerPosition, false);
+        npc._lazy = 0;
+        continue;
+      }
+      npc.update(dt, playerPosition, npc.id === talkingId);
+    }
+  }
+
+  /**
+   * Ángulos de brazo de cada oficio, con su pequeño movimiento propio: la mano
+   * que anota se mueve, la caña se levanta de vez en cuando, el cabo se recoge.
+   */
+  _activityPose() {
+    const t = this.t;
+    switch (this.activity) {
+      case 'pesca': {
+        // De vez en cuando levanta la puntera, como quien comprueba el cebo.
+        const tirón = Math.max(0, Math.sin(t * 0.31)) ** 8 * 0.5;
+        return { rs: -0.72 - tirón, re: -0.85, rz: -0.2, ls: -0.5, le: -1.15, lz: 0.22 };
+      }
+      case 'anota': {
+        const escribe = Math.sin(t * 5.2) * 0.05 + Math.sin(t * 2.1) * 0.02;
+        return { rs: -1.02 + escribe, re: -1.25, rz: -0.3, ls: -0.95, le: -1.5, lz: 0.34 };
+      }
+      case 'amarra': {
+        const recoge = Math.sin(t * 1.4) * 0.16;
+        return { rs: -0.85 + recoge, re: -1.35 - recoge * 0.6, rz: -0.26, ls: -0.8 - recoge, le: -1.3, lz: 0.3 };
+      }
+      case 'vende': {
+        const carga = Math.sin(t * 0.9) * 0.1;
+        return { rs: -0.95 + carga, re: -1.15, rz: -0.34, ls: -0.9 + carga, le: -1.2, lz: 0.36 };
+      }
+      case 'vigila':
+        // Brazos cruzados: la postura de quien está ahí para mirar.
+        return { rs: -0.62, re: -1.55, rz: -0.5, ls: -0.6, le: -1.6, lz: 0.5 };
+      default:
+        return { rs: 0, re: -0.22, rz: -0.09, ls: 0, le: -0.2, lz: 0.09 };
+    }
   }
 
   dispose() {

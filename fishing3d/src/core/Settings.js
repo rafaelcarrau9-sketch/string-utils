@@ -46,6 +46,7 @@ export const DEFAULT_SETTINGS = {
   sensitivity: 1,
   invertY: false,
   masterVolume: 0.8,
+  musicVolume: 0.5,
   showFps: false,
   autoQuality: true
 };

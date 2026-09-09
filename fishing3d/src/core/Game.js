@@ -65,6 +65,7 @@ export class Game {
     this.paused = false;
     this.autosaveTimer = 0;
     this.footstepTimer = 0;
+    this._celebrating = 0;
 
     this._initRenderer();
     this._initWorld();
@@ -75,6 +76,7 @@ export class Game {
     // Una sola fuente de verdad para "qué caña se ve": la del modelo de primera
     // persona o la que sujeta el cuerpo, nunca las dos.
     this.player.onModeChange = (mode) => this.fishing.rod.setVisible(mode === 'first');
+    this.fishing.onBoard = () => this.player.platform === this.boat;
 
     this.interaction = new InteractionSystem(this.camera);
     // El mundo se construye antes que este sistema, así que la primera zona
@@ -214,7 +216,7 @@ export class Game {
     );
     if (this.interaction) this._registerInteractables();
     this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
-      seed: zone.terrain.seed + 7, audio: this.audio
+      seed: zone.terrain.seed + 7, audio: this.audio, life: zone.life
     });
   }
 
@@ -366,14 +368,22 @@ export class Game {
     if (reward.page) partes.push(`página ${reward.page} del cuaderno`);
     this.economy.stats.questsDone = (this.economy.stats.questsDone ?? 0) + 1;
     if (reward.page) this.audio?.page(); else this.audio?.questDone();
+    this._celebrate(reward.page ? 14 : 8);
     this.ui?.note(`Misión completada: ${quest.title}${partes.length ? ' · ' + partes.join(' · ') : ''}`, 'gold');
     this.quests.notify('deliver', { value: this.quests.pages.length });
     this._persist();
   }
 
+  /** Un momento importante: la música se aparta y luego celebra. */
+  _celebrate(seconds = 12) {
+    this._celebrating = seconds;
+    this.audio?.duckMusic(3);
+  }
+
   _onLevelUp(level) {
     this.ui?.note(`¡Nivel ${level}! Ahora eres ${this.economy.title}`, 'gold');
     this.audio?.levelUp();
+    this._celebrate(10);
     this.quests.notify('level', { value: level });
   }
 
@@ -464,6 +474,9 @@ export class Game {
       onBuy: (category, id) => {
         if (this.economy.buy(category, id)) {
           this.inventory.add(category, id);
+          // Una embarcación nueva se bota nada más comprarla: nadie compra una
+          // lancha para dejarla en el remolque.
+          if (category === 'boats') this.equipment.equip('boats', id);
           this.audio.coin();
           this.quests.notify('own', { category, item: id });
           this._persist();
@@ -522,7 +535,9 @@ export class Game {
         case 'KeyB': this._panel(() => this.ui.showShop(this.inventory, this.economy)); break;
         case 'KeyC': this._panel(() => this._openJournal()); break;
         case 'KeyJ': this._panel(() => this._openQuests()); break;
-        case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
+        case 'KeyG': this._panel(() => this.ui.showStats(this.economy, {
+          totalQuests: STORY.QUESTS.length, totalSpecies: SPECIES.length, totalZones: ZONES.length
+        })); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
           if (!this.ui.isPanelOpen) this.interaction.interact();
@@ -549,6 +564,26 @@ export class Game {
     return null;
   }
 
+  /**
+   * Avisos de a bordo: mala mar para el casco que se lleva, y curricar. Sólo
+   * la lancha permite avanzar con el sedal fuera; con las otras, remar con el
+   * aparejo en el agua lo enreda y se recoge solo.
+   */
+  _boatWarnings(dt) {
+    this._boatTimer = (this._boatTimer ?? 0) - dt;
+    if (this.boat.rough > 0.35 && this._boatTimer <= 0) {
+      this._boatTimer = 14;
+      this.fishing._say(
+        `${this.equipment.boat.name} con este oleaje va justa: busca resguardo o compra un casco mejor`, 'bad'
+      );
+      this.cameraFx.addShake(0.12);
+    }
+    const moviendo = Math.abs(this.boat.speed) > 0.7;
+    if (moviendo && !this.equipment.boat.troll && this.fishing.state === 'fishing') {
+      this.fishing.reelIn('Bogando con el sedal fuera se enreda: recogido');
+    }
+  }
+
   _toggleBoat() {
     if (this.player.platform) {
       const busy = this._busyMessage('bajar de la barca');
@@ -567,6 +602,9 @@ export class Game {
       if (busy) { this.fishing._say(busy, 'bad'); return; }
       if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de subir');
       this.player.setPlatform(this.boat);
+      // Las instrucciones de a bordo tienen que poder leerse: el aviso de mala
+      // mar espera unos segundos antes de pisarlas.
+      this._boatTimer = 6;
       this.fishing._say('A bordo · W/S para bogar, A/D para virar, E para bajar');
     }
   }
@@ -614,6 +652,7 @@ export class Game {
   // -------------------------------------------------------------- eventos
   _onLanded(fish) {
     this.audio.landed();
+    this.audio.duckMusic(4);
     const nuevaEspecie = !this.economy.records[fish.species.id]?.count;
     const result = this.economy.registerCatch(fish);
 
@@ -662,6 +701,7 @@ export class Game {
       this.camera.updateProjectionMatrix();
     }
     if (key === 'masterVolume') this.audio.setVolume(value);
+    if (key === 'musicVolume') this.audio.setMusicVolume(value);
     this._persist();
   }
 
@@ -693,6 +733,7 @@ export class Game {
       this.travelTo(data.world.zone);
     }
     this.audio.setVolume(this.settings.masterVolume);
+    this.audio.setMusicVolume(this.settings.musicVolume ?? 0.55);
     if (Array.isArray(data.coach)) this.coach.seen = new Set(data.coach);
   }
 
@@ -765,14 +806,17 @@ export class Game {
     this.trees.update(this.player.position);
 
     const aboard = this.player.platform === this.boat;
+    this.boat.setSpec(this.equipment.boat);
     this.boat.update(dt, {
       row: aboard && controllable
         ? (this.input.isDown('KeyW') ? 1 : 0) - (this.input.isDown('KeyS') ? 1 : 0) : 0,
       turn: aboard && controllable
         ? (this.input.isDown('KeyA') ? 1 : 0) - (this.input.isDown('KeyD') ? 1 : 0) : 0,
       time: this.clock.elapsedTime,
-      water: this.water
+      water: this.water,
+      choppiness: this.weather.choppiness
     });
+    if (aboard) this._boatWarnings(dt);
 
     const context = {
       terrain: this.terrain,
@@ -813,6 +857,13 @@ export class Game {
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    // Repaso periódico de los objetivos comprobables: barato y evita que un
+    // aviso perdido deje una misión encallada.
+    this._questSync = (this._questSync ?? 0) - dt;
+    if (!panelOpen && this._questSync <= 0) {
+      this._questSync = 1.5;
+      this.quests.reconcile(this._questSnapshot());
+    }
     if (this.crew) {
       // Los personajes siguen vivos con un panel abierto: al cerrarlo no se
       // ven dar un salto para recolocarse.
@@ -841,7 +892,10 @@ export class Game {
         hasCurrent: !!this.terrain.field.hasCurrent,
         worldEvent: !!this.worldEvents.current,
         nearBoat: this.boat.canBoard(this.player.position),
-        rig: this.fishing.lure.rig
+        rig: this.fishing.lure.rig,
+        lureDepth: this.fishing.lure.isFishable
+          ? this.terrain.depthAt(this.fishing.lure.position.x, this.fishing.lure.position.z)
+          : null
       }, dt);
       if (tip) { this.ui.showCoach(tip); this._persist(); }
       else if (!this.coach.text) this.ui.showCoach(null);
@@ -907,6 +961,7 @@ export class Game {
       I.register({
         object: npc.root,
         anchorHeight: 1.35,          // el pecho, no los pies
+        highlightColor: 0x0a1614,    // un apunte, no un foco
         range: 3.6,
         label: () => {
           const marca = this.quests.npcMarker(npc.id);
@@ -942,6 +997,7 @@ export class Game {
       : null;
     actor?.speak();
     this.audio?.greet();
+    this.audio?.duckMusic(4);
     this.input.releaseLock();
 
     const primera = !this.quests.metNpcs.has(npcId);
@@ -1103,34 +1159,6 @@ export class Game {
     this.fishing._say(`El cubo huele fuerte. ${band.charAt(0).toUpperCase() + band.slice(1)} y ${this.weather.label.toLowerCase()}: ${consejo}`);
   }
 
-  /**
-   * Puntos con los que se puede interactuar, en orden de prioridad.
-   *
-   * Todos comparten la misma tecla y el mismo aviso bajo el punto de mira, de
-   * modo que el jugador aprende un solo gesto y vale para todo.
-   */
-  _interactables() {
-    const list = [];
-    const here = this.player.position;
-
-    if (this.player.platform) {
-      list.push({ label: 'W/S bogar · A/D virar · E desembarcar', action: () => this._toggleBoat() });
-      return list;
-    }
-    if (this.boat.canBoard(here)) {
-      list.push({ label: 'E · subir a la barca', action: () => this._toggleBoat() });
-    }
-    const camp = this.props.camp?.position;
-    if (camp && here.distanceTo(camp) < 3.6) {
-      const next = this._nextFeedingHour();
-      list.push({
-        label: `E · descansar junto al fuego hasta las ${String(Math.floor(next)).padStart(2, '0')}:00`,
-        action: () => this._rest(next)
-      });
-    }
-    return list;
-  }
-
   _contextHint() {
     if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
     return this.interaction?.label ?? '';
@@ -1210,8 +1238,19 @@ export class Game {
       rain: this.weather.rainAmount,
       nightFactor: this.time.nightFactor,
       nearWater: depthUnderPlayer > 0 ? 1 : distanceToWater,
-      cloudiness: this.weather.cloudiness
+      cloudiness: this.weather.cloudiness,
+      frogs: this.zone.life?.frogs ?? 0,
+      // La música lee el mismo estado que el jugador está viendo.
+      music: {
+        fighting: this.fishing.state === 'fighting',
+        night: this.time.nightFactor,
+        hour: this.time.hour,
+        zone: this.zone.id,
+        weather: this.weather.cloudiness,
+        celebration: this._celebrating > 0
+      }
     });
+    if (this._celebrating > 0) this._celebrating -= dt;
 
     // El paso suena cuando el pie toca de verdad, no cada N segundos: así el
     // sonido va sincronizado con la animación por construcción.
@@ -1222,6 +1261,8 @@ export class Game {
     this.renderer.setAnimationLoop(null);
     this.fishing.dispose();
     this.fishManager.dispose();
+    this.crew?.dispose();
+    this.audio?.music?.dispose();
     this.vegetation.dispose();
     this.trees.dispose();
     this.grass.dispose();

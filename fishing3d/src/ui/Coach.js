@@ -37,6 +37,11 @@ const TIPS = [
     text: 'Cobrado. Con B abres la tienda: mejores cañas llegan más lejos y mejores líneas aguantan más.'
   },
   {
+    id: 'bajio',
+    when: (s) => s.lureDepth !== null && s.lureDepth < 1 && s.fishingState === 'fishing',
+    text: 'Tu señuelo está en medio metro de agua: ahí no hay nada. Camina hasta la punta del muelle o busca calado antes de lanzar.'
+  },
+  {
     id: 'cebo',
     when: (s) => s.casts >= 4 && s.landed === 0,
     text: 'Prueba otro señuelo (Tab): cada especie tiene sus preferencias y su profundidad.'

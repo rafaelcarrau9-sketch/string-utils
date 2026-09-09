@@ -33,8 +33,11 @@ export class Props {
       this._bestShoreAngle({ idealDepth: 1.6, reach: 8, avoid: [dockAngle] }), -0.9
     );
     this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
-    this._buildCamp(this._bestShoreAngle({ idealDepth: 1.2, reach: 7, avoid: [dockAngle] }),
-      wood, textures, preset);
+    // El campamento se separa del muelle, pero no al otro lado del lago: es
+    // parte del arranque de la partida y tiene que verse desde el embarcadero.
+    this._buildCamp(this._bestShoreAngle({
+      idealDepth: 1.2, reach: 7, avoid: [dockAngle], separation: 0.45, maxFrom: dockAngle, maxArc: 1.1
+    }), wood, textures, preset);
     this._buildSign(wood, preset);
     this._buildBucket(preset);
     this._placeNpcAnchors();
@@ -121,10 +124,18 @@ export class Props {
    * puntúa cada punto por el calado que hay `reach` metros mar adentro. Lo
    * ideal es una orilla con `idealDepth` delante, ni un bajío ni un tajo.
    */
-  _bestShoreAngle({ idealDepth = 2.5, reach = 12, avoid = [], samples = 48 } = {}) {
-    let best = 0, bestScore = -Infinity;
+  _bestShoreAngle({
+    idealDepth = 2.5, reach = 12, avoid = [], samples = 48,
+    separation = 1.2, maxFrom = null, maxArc = Math.PI
+  } = {}) {
+    let best = maxFrom ?? 0, bestScore = -Infinity;
     for (let i = 0; i < samples; i++) {
       const angle = (i / samples) * Math.PI * 2;
+      if (maxFrom !== null) {
+        let arc = Math.abs(angle - maxFrom);
+        if (arc > Math.PI) arc = Math.PI * 2 - arc;
+        if (arc > maxArc) continue;              // demasiado lejos del ancla
+      }
       const shore = this.shorePoint(angle, 0.55);
       if (shore.y < 0.2) continue;                      // no encontró tierra
       const inward = { x: -Math.cos(angle), z: -Math.sin(angle) };
@@ -136,7 +147,7 @@ export class Props {
       for (const other of avoid) {
         let d = Math.abs(angle - other);
         if (d > Math.PI) d = Math.PI * 2 - d;
-        score -= Math.max(0, 1.2 - d) * 4;              // separados entre sí
+        score -= Math.max(0, separation - d) * 4;       // separados entre sí
       }
       if (score > bestScore) { bestScore = score; best = angle; }
     }

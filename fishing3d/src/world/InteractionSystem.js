@@ -38,6 +38,10 @@ export class InteractionSystem {
    * @param target.label    texto del aviso; puede ser función
    * @param target.action   qué ocurre al interactuar
    * @param target.enabled  condición opcional
+   * @param target.highlightColor  emisivo al apuntarlo. Sobre una persona el
+   *        realce fuerte de un objeto la convierte en una estatua encendida;
+   *        para la gente basta un apunte, que ya llevan su indicador y su
+   *        rótulo.
    */
   register(target) {
     this.targets.push({ range: 3.5, ...target });
@@ -72,7 +76,7 @@ export class InteractionSystem {
         if (!o.isMesh || !o.material?.emissive) return;
         if (on) {
           o.userData._emissive ??= o.material.emissive.getHex();
-          o.material.emissive.setHex(0x1c3a3a);
+          o.material.emissive.setHex(t.highlightColor ?? 0x1c3a3a);
         } else if (o.userData._emissive !== undefined) {
           o.material.emissive.setHex(o.userData._emissive);
         }

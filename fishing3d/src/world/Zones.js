@@ -26,6 +26,7 @@ export const ZONES = [
     vegetation: { grass: 1, trees: 420, conifer: 0.38 },
     palette: { grass: 0x53703a, water: 0x0d2630 },
     lighting: { ambient: 1, hemi: 1, sun: 1 },
+    life: { jumps: 1, birds: 1, frogs: 0.4 },
     weather: 'despejado',
     startHour: 9.4,
     ambientNote: 'El agua huele a barro tibio y a juncos.'
@@ -43,6 +44,7 @@ export const ZONES = [
     vegetation: { grass: 0.9, trees: 470, conifer: 0.5 },
     palette: { grass: 0x50713c, water: 0x1d3b30 },
     lighting: { ambient: 1.05, hemi: 1.0, sun: 1.0 },
+    life: { jumps: 1.3, birds: 1.2, frogs: 0.2 },
     weather: 'despejado',
     startHour: 8.1,
     ambientNote: 'El rumor del agua tapa cualquier otro ruido.'
@@ -60,6 +62,7 @@ export const ZONES = [
     vegetation: { grass: 1.25, trees: 300, conifer: 0.12 },
     palette: { grass: 0x4d6b33, water: 0x22301d },
     lighting: { ambient: 1.1, hemi: 1.15, sun: 0.95 },
+    life: { jumps: 1.6, birds: 1.8, frogs: 1.6 },
     weather: 'niebla',
     startHour: 6.4,
     ambientNote: 'Niebla baja, ranas y un olor a agua parada.'
@@ -77,6 +80,7 @@ export const ZONES = [
     vegetation: { grass: 0.7, trees: 520, conifer: 0.82 },
     palette: { grass: 0x46613a, water: 0x0d2733 },
     lighting: { ambient: 1.0, hemi: 1.05, sun: 1.0 },
+    life: { jumps: 0.75, birds: 0.8, frogs: 0 },
     weather: 'nubes',
     startHour: 7.2,
     ambientNote: 'El viento baja de la sierra y riza el agua sin descanso.'
@@ -95,6 +99,7 @@ export const ZONES = [
     palette: { grass: 0x3d5236, water: 0x11303a },
     // Las paredes tapan el cielo: sin este empujón la garganta es una foto en negro.
     lighting: { ambient: 2.6, hemi: 2.2, sun: 1.35, exposure: 1.35 },
+    life: { jumps: 0.4, birds: 0.25, frogs: 0 },
     weather: 'nubes',
     startHour: 5.6,
     ambientNote: 'Aquí abajo el eco devuelve tu propia respiración.'

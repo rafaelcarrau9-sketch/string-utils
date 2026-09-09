@@ -21,6 +21,7 @@
 export const NPCS = {
   tome: {
     id: 'tome',
+    activity: 'vende',
     name: 'Tomé Roca',
     role: 'Embarcadero y tienda',
     zone: 'lago_niebla',
@@ -41,6 +42,7 @@ export const NPCS = {
   },
   sabela: {
     id: 'sabela',
+    activity: 'anota',
     name: 'Sabela Ferrer',
     role: 'Bióloga de la cuenca',
     zone: 'lago_niebla',
@@ -58,6 +60,7 @@ export const NPCS = {
   },
   nuno: {
     id: 'nuno',
+    activity: 'vigila',
     name: 'Nuno Aldaz',
     role: 'Guarda de la cuenca',
     zone: 'lago_niebla',
@@ -76,6 +79,7 @@ export const NPCS = {
   },
   iria: {
     id: 'iria',
+    activity: 'espera',
     name: 'Iria',
     role: 'Del pueblo de abajo',
     zone: 'rio_trenzado',
@@ -93,6 +97,7 @@ export const NPCS = {
   },
   ovidio: {
     id: 'ovidio',
+    activity: 'pesca',
     name: 'Ovidio Sanz',
     role: 'Vive en la marisma',
     zone: 'marisma_argan',
@@ -110,6 +115,7 @@ export const NPCS = {
   },
   marga: {
     id: 'marga',
+    activity: 'amarra',
     name: 'Marga Elizalde',
     role: 'Patrona del embalse',
     zone: 'embalse_alto',
@@ -338,6 +344,22 @@ export const QUESTS = [
       '—Da a la garganta. Lleva veinte años cerrada y el agua sigue bajando igual.',
       'Entre las juntas hay una hoja de papel metida en una bolsa de plástico. La letra es la misma.',
       '«Página 4 · No la cierran para guardar agua. La cierran para que nadie baje a ver qué hay debajo.»'
+    ]
+  },
+
+  {
+    id: 'sec_barca',
+    chapter: 4, type: 'equipo',
+    npc: 'marga', turnIn: 'marga',
+    requires: ['cap4_lacustre'],
+    title: 'Un casco decente',
+    summary: 'Marga no piensa dejarte salir al centro con esa barca de madera. Consigue una mejor.',
+    objectives: [{ kind: 'own', category: 'boats', item: 'barca_aluminio', label: 'Tener la barca de aluminio' }],
+    reward: { money: 400, xp: 90 },
+    hint: 'Las embarcaciones se compran en la tienda, como el resto del aparejo.',
+    complete: [
+      '—Ahora sí. Con esa aguantas un día de viento sin achicar cada diez minutos.',
+      '—Y si algún día te sobra el dinero, ponle un fueraborda: podrás curricar, avanzar despacio con el señuelo fuera. Es otra forma de pescar.'
     ]
   },
 

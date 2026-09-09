@@ -252,6 +252,7 @@ const DEFAULT_SETTINGS = {
   sensitivity: 1,
   invertY: false,
   masterVolume: 0.8,
+  musicVolume: 0.5,
   showFps: false,
   autoQuality: true
 };
@@ -543,6 +544,7 @@ const ZONES = [
     vegetation: { grass: 1, trees: 420, conifer: 0.38 },
     palette: { grass: 0x53703a, water: 0x0d2630 },
     lighting: { ambient: 1, hemi: 1, sun: 1 },
+    life: { jumps: 1, birds: 1, frogs: 0.4 },
     weather: 'despejado',
     startHour: 9.4,
     ambientNote: 'El agua huele a barro tibio y a juncos.'
@@ -560,6 +562,7 @@ const ZONES = [
     vegetation: { grass: 0.9, trees: 470, conifer: 0.5 },
     palette: { grass: 0x50713c, water: 0x1d3b30 },
     lighting: { ambient: 1.05, hemi: 1.0, sun: 1.0 },
+    life: { jumps: 1.3, birds: 1.2, frogs: 0.2 },
     weather: 'despejado',
     startHour: 8.1,
     ambientNote: 'El rumor del agua tapa cualquier otro ruido.'
@@ -577,6 +580,7 @@ const ZONES = [
     vegetation: { grass: 1.25, trees: 300, conifer: 0.12 },
     palette: { grass: 0x4d6b33, water: 0x22301d },
     lighting: { ambient: 1.1, hemi: 1.15, sun: 0.95 },
+    life: { jumps: 1.6, birds: 1.8, frogs: 1.6 },
     weather: 'niebla',
     startHour: 6.4,
     ambientNote: 'Niebla baja, ranas y un olor a agua parada.'
@@ -594,6 +598,7 @@ const ZONES = [
     vegetation: { grass: 0.7, trees: 520, conifer: 0.82 },
     palette: { grass: 0x46613a, water: 0x0d2733 },
     lighting: { ambient: 1.0, hemi: 1.05, sun: 1.0 },
+    life: { jumps: 0.75, birds: 0.8, frogs: 0 },
     weather: 'nubes',
     startHour: 7.2,
     ambientNote: 'El viento baja de la sierra y riza el agua sin descanso.'
@@ -612,6 +617,7 @@ const ZONES = [
     palette: { grass: 0x3d5236, water: 0x11303a },
     // Las paredes tapan el cielo: sin este empujón la garganta es una foto en negro.
     lighting: { ambient: 2.6, hemi: 2.2, sun: 1.35, exposure: 1.35 },
+    life: { jumps: 0.4, birds: 0.25, frogs: 0 },
     weather: 'nubes',
     startHour: 5.6,
     ambientNote: 'Aquí abajo el eco devuelve tu propia respiración.'
@@ -2319,6 +2325,10 @@ class InteractionSystem {
    * @param target.label    texto del aviso; puede ser función
    * @param target.action   qué ocurre al interactuar
    * @param target.enabled  condición opcional
+   * @param target.highlightColor  emisivo al apuntarlo. Sobre una persona el
+   *        realce fuerte de un objeto la convierte en una estatua encendida;
+   *        para la gente basta un apunte, que ya llevan su indicador y su
+   *        rótulo.
    */
   register(target) {
     this.targets.push({ range: 3.5, ...target });
@@ -2353,7 +2363,7 @@ class InteractionSystem {
         if (!o.isMesh || !o.material?.emissive) return;
         if (on) {
           o.userData._emissive ??= o.material.emissive.getHex();
-          o.material.emissive.setHex(0x1c3a3a);
+          o.material.emissive.setHex(t.highlightColor ?? 0x1c3a3a);
         } else if (o.userData._emissive !== undefined) {
           o.material.emissive.setHex(o.userData._emissive);
         }
@@ -2504,6 +2514,7 @@ class Npc {
       this.legs[side] = { hip, knee };
     }
 
+    this._buildProp(data.activity, coat, skin);
     this._buildMarker();
 
     // Estado de animación.
@@ -2518,6 +2529,56 @@ class Npc {
     this.glanceYaw = 0;
     this.attention = 0;          // 0 a lo suyo, 1 mirando al jugador
     this.gesture = 0;            // realce del gesto al hablar
+  }
+
+  /**
+   * Lo que tiene entre manos. Cada oficio lleva su cacharro, y ese cacharro es
+   * lo que justifica la postura: quien anota tiene la libreta delante, quien
+   * pesca sostiene la caña, quien amarra tiene el cabo recogido. Sin esto los
+   * personajes gesticulan con las manos vacías y se nota.
+   */
+  _buildProp(activity, coat, skin) {
+    this.prop = new THREE.Group();
+    this.activity = activity ?? 'espera';
+    const mat = (color, rough = 0.8) =>
+      new THREE.MeshStandardMaterial({ color, roughness: rough });
+
+    if (activity === 'pesca') {
+      const rodMat = mat(0x2a2f36, 0.45);
+      this._materials.push(rodMat);
+      const blank = new THREE.Mesh(
+        sharedGeometry('npcRod', () => new THREE.CylinderGeometry(0.006, 0.016, 2.0, 6)), rodMat);
+      blank.position.y = 0.95;
+      this.prop.add(blank);
+      this.prop.rotation.set(1.05, 0, -0.2);
+    } else if (activity === 'anota') {
+      const board = mat(0xb9a67c, 0.9);
+      this._materials.push(board);
+      const tabla = new THREE.Mesh(
+        sharedGeometry('npcBoard', () => new THREE.BoxGeometry(0.22, 0.3, 0.014)), board);
+      this.prop.add(tabla);
+      this.prop.rotation.set(-1.15, 0.2, 0);
+    } else if (activity === 'amarra') {
+      const rope = mat(0x9a8c62, 0.95);
+      this._materials.push(rope);
+      const coil = new THREE.Mesh(
+        sharedGeometry('npcCoil', () => new THREE.TorusGeometry(0.13, 0.028, 5, 12)), rope);
+      coil.rotation.x = Math.PI / 2;
+      this.prop.add(coil);
+      this.prop.rotation.set(-0.4, 0, 0);
+    } else if (activity === 'vende') {
+      const crate = mat(0x6d5433, 0.92);
+      this._materials.push(crate);
+      const caja = new THREE.Mesh(
+        sharedGeometry('npcCrate', () => new THREE.BoxGeometry(0.3, 0.17, 0.2)), crate);
+      this.prop.add(caja);
+      this.prop.rotation.set(-0.5, 0, 0);
+    } else {
+      this.prop.visible = false;
+    }
+    // Cuelga del antebrazo derecho, como cualquier cosa que se sostiene.
+    this.prop.position.set(0, -0.29, 0.03);
+    this.arms.R.elbow.add(this.prop);
   }
 
   _buildMarker() {
@@ -2627,23 +2688,65 @@ class Npc {
     this.neck.rotation.set(this.lookPitch, this.lookYaw * 0.62, this.lookYaw * 0.06);
     this.torso.rotation.y = this.lookYaw * 0.34;
 
-    // Brazos: sueltos, con un balanceo mínimo. Al hablar, gesticulan.
+    // Brazos: la pose base la decide el oficio; encima va el gesto de hablar,
+    // que se impone porque al hablar se suelta lo que se tenga entre manos.
     this.gesture = damp(this.gesture, talking ? 1 : 0, talking ? 5 : 1.8, dt);
     const idleSwing = Math.sin(this.t * 0.62) * 0.035;
     const habla = Math.sin(this.t * 4.3) * 0.5 + Math.sin(this.t * 2.7 + 1.1) * 0.35;
+    const pose = this._activityPose();
+    const g = this.gesture, w = 1 - g;
+
     this.arms.R.shoulder.rotation.set(
-      idleSwing + this.gesture * (0.28 + habla * 0.34), 0, -0.09 - this.gesture * 0.22
+      w * (pose.rs + idleSwing) + g * (0.28 + habla * 0.34), 0, w * pose.rz - g * 0.22
     );
-    this.arms.R.elbow.rotation.x = -0.22 - this.gesture * (0.75 + habla * 0.3);
+    this.arms.R.elbow.rotation.x = w * pose.re - g * (0.75 + habla * 0.3);
     this.arms.L.shoulder.rotation.set(
-      -idleSwing + this.gesture * (0.14 + habla * 0.16), 0, 0.09 + this.gesture * 0.1
+      w * (pose.ls - idleSwing) + g * (0.14 + habla * 0.16), 0, w * pose.lz + g * 0.1
     );
-    this.arms.L.elbow.rotation.x = -0.2 - this.gesture * 0.4;
+    this.arms.L.elbow.rotation.x = w * pose.le - g * 0.4;
+    if (this.prop) {
+      // Lo que sostiene se guarda mientras habla: nadie conversa con la caña
+      // en la mano.
+      this.prop.visible = this.activity !== 'espera' && g < 0.45;
+      this.prop.scale.setScalar(clamp(w, 0.001, 1));
+    }
 
     // El indicador flota y gira: se ve desde lejos sin ser un cartel.
     if (this.marker.visible) {
       this.marker.rotation.y += dt * 1.5;
       this.marker.position.y = 1.86 + Math.sin(this.t * 1.9) * 0.06;
+    }
+  }
+
+  /**
+   * Ángulos de brazo de cada oficio, con su pequeño movimiento propio: la mano
+   * que anota se mueve, la caña se levanta de vez en cuando, el cabo se recoge.
+   */
+  _activityPose() {
+    const t = this.t;
+    switch (this.activity) {
+      case 'pesca': {
+        // De vez en cuando levanta la puntera, como quien comprueba el cebo.
+        const tirón = Math.max(0, Math.sin(t * 0.31)) ** 8 * 0.5;
+        return { rs: -0.72 - tirón, re: -0.85, rz: -0.2, ls: -0.5, le: -1.15, lz: 0.22 };
+      }
+      case 'anota': {
+        const escribe = Math.sin(t * 5.2) * 0.05 + Math.sin(t * 2.1) * 0.02;
+        return { rs: -1.02 + escribe, re: -1.25, rz: -0.3, ls: -0.95, le: -1.5, lz: 0.34 };
+      }
+      case 'amarra': {
+        const recoge = Math.sin(t * 1.4) * 0.16;
+        return { rs: -0.85 + recoge, re: -1.35 - recoge * 0.6, rz: -0.26, ls: -0.8 - recoge, le: -1.3, lz: 0.3 };
+      }
+      case 'vende': {
+        const carga = Math.sin(t * 0.9) * 0.1;
+        return { rs: -0.95 + carga, re: -1.15, rz: -0.34, ls: -0.9 + carga, le: -1.2, lz: 0.36 };
+      }
+      case 'vigila':
+        // Brazos cruzados: la postura de quien está ahí para mirar.
+        return { rs: -0.62, re: -1.55, rz: -0.5, ls: -0.6, le: -1.6, lz: 0.5 };
+      default:
+        return { rs: 0, re: -0.22, rz: -0.09, ls: 0, le: -0.2, lz: 0.09 };
     }
   }
 
@@ -2689,8 +2792,60 @@ class NpcCrew {
 
   byId(id) { return this.npcs.find((n) => n.id === id) ?? null; }
 
+  /**
+   * A distancia, un personaje ocupa veinte píxeles: ni se anima ni se dibuja.
+   * Animarlos a todos siempre era gastar en algo que nadie puede ver.
+   */
   update(dt, playerPosition, talkingId = null) {
-    for (const npc of this.npcs) npc.update(dt, playerPosition, npc.id === talkingId);
+    for (const npc of this.npcs) {
+      const dx = npc.position.x - playerPosition.x;
+      const dz = npc.position.z - playerPosition.z;
+      const dist2 = dx * dx + dz * dz;
+      const visible = dist2 < 120 * 120;
+      if (npc.root.visible !== visible) npc.root.visible = visible;
+      if (!visible) continue;
+      // Más allá de cuarenta metros basta con refrescarlo de vez en cuando.
+      if (dist2 > 40 * 40) {
+        npc._lazy = (npc._lazy ?? 0) + dt;
+        if (npc._lazy < 0.2) continue;
+        npc.update(npc._lazy, playerPosition, false);
+        npc._lazy = 0;
+        continue;
+      }
+      npc.update(dt, playerPosition, npc.id === talkingId);
+    }
+  }
+
+  /**
+   * Ángulos de brazo de cada oficio, con su pequeño movimiento propio: la mano
+   * que anota se mueve, la caña se levanta de vez en cuando, el cabo se recoge.
+   */
+  _activityPose() {
+    const t = this.t;
+    switch (this.activity) {
+      case 'pesca': {
+        // De vez en cuando levanta la puntera, como quien comprueba el cebo.
+        const tirón = Math.max(0, Math.sin(t * 0.31)) ** 8 * 0.5;
+        return { rs: -0.72 - tirón, re: -0.85, rz: -0.2, ls: -0.5, le: -1.15, lz: 0.22 };
+      }
+      case 'anota': {
+        const escribe = Math.sin(t * 5.2) * 0.05 + Math.sin(t * 2.1) * 0.02;
+        return { rs: -1.02 + escribe, re: -1.25, rz: -0.3, ls: -0.95, le: -1.5, lz: 0.34 };
+      }
+      case 'amarra': {
+        const recoge = Math.sin(t * 1.4) * 0.16;
+        return { rs: -0.85 + recoge, re: -1.35 - recoge * 0.6, rz: -0.26, ls: -0.8 - recoge, le: -1.3, lz: 0.3 };
+      }
+      case 'vende': {
+        const carga = Math.sin(t * 0.9) * 0.1;
+        return { rs: -0.95 + carga, re: -1.15, rz: -0.34, ls: -0.9 + carga, le: -1.2, lz: 0.36 };
+      }
+      case 'vigila':
+        // Brazos cruzados: la postura de quien está ahí para mirar.
+        return { rs: -0.62, re: -1.55, rz: -0.5, ls: -0.6, le: -1.6, lz: 0.5 };
+      default:
+        return { rs: 0, re: -0.22, rz: -0.09, ls: 0, le: -0.2, lz: 0.09 };
+    }
   }
 
   dispose() {
@@ -2717,7 +2872,7 @@ const JUMP_POOL = 4;
 const BIRD_POOL = 6;
 
 class AmbientLife {
-  constructor(scene, terrain, water, { seed = 606, audio = null } = {}) {
+  constructor(scene, terrain, water, { seed = 606, audio = null, life = null } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.water = water;
@@ -2728,6 +2883,8 @@ class AmbientLife {
     this.group.name = 'ambiente';
     scene.add(this.group);
 
+    // Cada agua tiene su fauna: la marisma bulle, el cañón está callado.
+    this.life = { jumps: 1, birds: 1, ...(life ?? {}) };
     this.jumpTimer = 6 + this.rng() * 10;
     this.birdTimer = 12 + this.rng() * 20;
     this.gustTimer = 8 + this.rng() * 14;
@@ -2849,7 +3006,7 @@ class AmbientLife {
     // --- peces saltando -------------------------------------------------
     this.jumpTimer -= dt * (0.35 + feeding * 0.5);
     if (this.jumpTimer <= 0) {
-      this.jumpTimer = 14 + this.rng() * 38 / Math.max(0.4, feeding);
+      this.jumpTimer = (14 + this.rng() * 38 / Math.max(0.4, feeding)) / Math.max(0.15, this.life.jumps);
       this._startJump(player, 0.6 + feeding * 0.6);
     }
     for (const j of this.jumpers) {
@@ -2872,8 +3029,10 @@ class AmbientLife {
     // --- pájaros ---------------------------------------------------------
     this.birdTimer -= dt * calm;
     if (this.birdTimer <= 0) {
-      this.birdTimer = 25 + this.rng() * 55;
-      if (time.nightFactor < 0.6) this._startFlock(player, 2 + Math.floor(this.rng() * 4));
+      this.birdTimer = (25 + this.rng() * 55) / Math.max(0.15, this.life.birds);
+      if (time.nightFactor < 0.6 && this.life.birds > 0.05) {
+        this._startFlock(player, 2 + Math.floor(this.rng() * 4 * this.life.birds));
+      }
     }
     for (const bird of this.birds) {
       if (!bird.active) continue;
@@ -2952,8 +3111,11 @@ class Props {
       this._bestShoreAngle({ idealDepth: 1.6, reach: 8, avoid: [dockAngle] }), -0.9
     );
     this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
-    this._buildCamp(this._bestShoreAngle({ idealDepth: 1.2, reach: 7, avoid: [dockAngle] }),
-      wood, textures, preset);
+    // El campamento se separa del muelle, pero no al otro lado del lago: es
+    // parte del arranque de la partida y tiene que verse desde el embarcadero.
+    this._buildCamp(this._bestShoreAngle({
+      idealDepth: 1.2, reach: 7, avoid: [dockAngle], separation: 0.45, maxFrom: dockAngle, maxArc: 1.1
+    }), wood, textures, preset);
     this._buildSign(wood, preset);
     this._buildBucket(preset);
     this._placeNpcAnchors();
@@ -3040,10 +3202,18 @@ class Props {
    * puntúa cada punto por el calado que hay `reach` metros mar adentro. Lo
    * ideal es una orilla con `idealDepth` delante, ni un bajío ni un tajo.
    */
-  _bestShoreAngle({ idealDepth = 2.5, reach = 12, avoid = [], samples = 48 } = {}) {
-    let best = 0, bestScore = -Infinity;
+  _bestShoreAngle({
+    idealDepth = 2.5, reach = 12, avoid = [], samples = 48,
+    separation = 1.2, maxFrom = null, maxArc = Math.PI
+  } = {}) {
+    let best = maxFrom ?? 0, bestScore = -Infinity;
     for (let i = 0; i < samples; i++) {
       const angle = (i / samples) * Math.PI * 2;
+      if (maxFrom !== null) {
+        let arc = Math.abs(angle - maxFrom);
+        if (arc > Math.PI) arc = Math.PI * 2 - arc;
+        if (arc > maxArc) continue;              // demasiado lejos del ancla
+      }
       const shore = this.shorePoint(angle, 0.55);
       if (shore.y < 0.2) continue;                      // no encontró tierra
       const inward = { x: -Math.cos(angle), z: -Math.sin(angle) };
@@ -3055,7 +3225,7 @@ class Props {
       for (const other of avoid) {
         let d = Math.abs(angle - other);
         if (d > Math.PI) d = Math.PI * 2 - d;
-        score -= Math.max(0, 1.2 - d) * 4;              // separados entre sí
+        score -= Math.max(0, separation - d) * 4;       // separados entre sí
       }
       if (score > bestScore) { bestScore = score; best = angle; }
     }
@@ -3243,8 +3413,6 @@ class Props {
 
 const MIN_DEPTH = 0.55;          // calado mínimo para navegar
 const ROW_ACCEL = 2.4;
-const MAX_SPEED = 3.6;
-const TURN_RATE = 1.15;
 
 class Boat {
   constructor(scene, terrain, textures, preset, { position = new THREE.Vector3(), heading = 0 } = {}) {
@@ -3254,6 +3422,10 @@ class Boat {
     this.speed = 0;
     this.occupied = false;
     this.wakeTimer = 0;
+    // Las prestaciones vienen de la embarcación equipada; la barca de remos es
+    // el valor de partida.
+    this.spec = { speed: 3.6, turn: 1.15, stability: 0.45, troll: false };
+    this.rough = 0;               // 0 tranquila, 1 pasándolo mal
 
     const wood = textures.material('madera', { repeat: 1.5 });
     this.group = new THREE.Group();
@@ -3332,11 +3504,22 @@ class Boat {
    * @param row  -1..1 (bogar hacia adelante o ciar)
    * @param turn -1..1
    */
-  update(dt, { row = 0, turn = 0, time = 0, water = null } = {}) {
+  /** Prestaciones de la embarcación equipada. */
+  setSpec(spec) { if (spec) this.spec = spec; }
+
+  update(dt, { row = 0, turn = 0, time = 0, water = null, choppiness = 0 } = {}) {
+    const maxSpeed = this.spec.speed;
+    // Con más oleaje del que aguanta el casco, la barca pierde gobierno. No
+    // impide navegar: avisa y castiga, que es lo que hace el mar de verdad.
+    this.rough = clamp((choppiness - this.spec.stability) / 0.6, 0, 1);
+    const castigo = 1 - this.rough * 0.55;
+
     if (this.occupied) {
-      this.speed = damp(this.speed, row * MAX_SPEED, ROW_ACCEL, dt);
+      this.speed = damp(this.speed, row * maxSpeed * castigo, ROW_ACCEL, dt);
       // Virar sólo tiene efecto con algo de arrancada, como en el agua real.
-      this.heading += turn * TURN_RATE * dt * clamp(0.35 + Math.abs(this.speed) / MAX_SPEED, 0.35, 1.3);
+      this.heading += turn * this.spec.turn * dt * clamp(0.35 + Math.abs(this.speed) / maxSpeed, 0.35, 1.3);
+      // El oleaje también la desvía sola.
+      if (this.rough > 0.05) this.heading += Math.sin(time * 0.7) * this.rough * 0.4 * dt;
     } else {
       this.speed = damp(this.speed, 0, 1.4, dt);
     }
@@ -3360,15 +3543,17 @@ class Boat {
     }
 
     // Flotación: cabeceo y balanceo suaves.
-    const bobY = Math.sin(time * 1.4) * 0.035 + Math.sin(time * 2.1 + 1.3) * 0.02;
+    const bobY = (Math.sin(time * 1.4) * 0.035 + Math.sin(time * 2.1 + 1.3) * 0.02) * (1 + this.rough * 3);
     this.group.position.set(this.position.x, this.terrain.waterLevel + 0.12 + bobY, this.position.z);
     this.group.rotation.y = this.heading;
-    this.group.rotation.z = Math.sin(time * 1.1) * 0.025 - this.speed * 0.02;
-    this.group.rotation.x = Math.sin(time * 1.7) * 0.018;
+    // Con mala mar cabecea de verdad.
+    const mar = 1 + this.rough * 4;
+    this.group.rotation.z = Math.sin(time * 1.1) * 0.025 * mar - this.speed * 0.02;
+    this.group.rotation.x = Math.sin(time * 1.7) * 0.018 * mar;
     this.group.updateMatrixWorld();
 
     // Los remos bogan al ritmo del avance.
-    const stroke = Math.sin(time * 3.2) * clamp(Math.abs(this.speed) / MAX_SPEED, 0, 1);
+    const stroke = Math.sin(time * 3.2) * clamp(Math.abs(this.speed) / this.spec.speed, 0, 1);
     this.oars.forEach(({ object, side }) => {
       object.rotation.x = stroke * 0.5;
       object.rotation.y = stroke * 0.28 * side;
@@ -4697,13 +4882,31 @@ const LURES = [
     description: 'Cebo quieto cerca del fondo. Paciencia, pero peces grandes.' }
 ];
 
-const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES };
+/**
+ * Embarcaciones.
+ *
+ * No son un adorno de progresión: cambian a dónde se puede llegar y cuándo.
+ * `stability` es el oleaje que aguantan antes de tener que volver a resguardo;
+ * `troll` permite avanzar con el sedal fuera, que es la única forma de peinar
+ * una tabla de agua honda buscando peces grandes.
+ */
+const BOATS = [
+  { id: 'barca_remos', name: 'Barca de remos', speed: 3.6, turn: 1.15, stability: 0.45, troll: false, price: 0,
+    description: 'La de siempre. Sirve para cruzar, no para faenar con mal tiempo.' },
+  { id: 'barca_aluminio', name: 'Barca de aluminio', speed: 4.8, turn: 1.35, stability: 0.75, troll: false, price: 900,
+    description: 'Más ligera y más seca. Aguanta oleaje que a la de madera la manda a puerto.' },
+  { id: 'lancha_motor', name: 'Lancha con fueraborda', speed: 7.2, turn: 1.6, stability: 1.0, troll: true, price: 3800,
+    description: 'Llega al otro extremo en un minuto y permite curricar: avanzar despacio con el señuelo fuera.' }
+];
+
+const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES, boats: BOATS };
 
 const CATEGORY_LABELS = {
   rods: 'Cañas',
   reels: 'Carretes',
   lines: 'Líneas',
-  lures: 'Señuelos'
+  lures: 'Señuelos',
+  boats: 'Embarcaciones'
 };
 
 function findItem(category, id) {
@@ -4718,7 +4921,8 @@ class Inventory {
       rods: ['cana_iniciacion'],
       reels: ['carrete_basico'],
       lines: ['nylon_022'],
-      lures: ['cucharilla']
+      lures: ['cucharilla'],
+      boats: ['barca_remos']
     };
   }
 
@@ -4729,7 +4933,8 @@ class Inventory {
   add(category, id) {
     if (!CATALOG[category] || !findItem(category, id)) return false;
     if (this.has(category, id)) return false;
-    this.owned[category].push(id);
+    // Una partida guardada de antes puede no tener la categoría todavía.
+    (this.owned[category] ??= []).push(id);
     return true;
   }
 
@@ -4765,7 +4970,8 @@ class Equipment {
       rods: 'cana_iniciacion',
       reels: 'carrete_basico',
       lines: 'nylon_022',
-      lures: 'cucharilla'
+      lures: 'cucharilla',
+      boats: 'barca_remos'
     };
   }
 
@@ -4773,6 +4979,7 @@ class Equipment {
   get reel() { return findItem('reels', this.equipped.reels) || CATALOG.reels[0]; }
   get line() { return findItem('lines', this.equipped.lines) || CATALOG.lines[0]; }
   get lure() { return findItem('lures', this.equipped.lures) || CATALOG.lures[0]; }
+  get boat() { return findItem('boats', this.equipped.boats) || CATALOG.boats[0]; }
 
   /**
    * Equipar. `guard` permite a la pesca vetar el cambio: no se cambia de
@@ -4971,6 +5178,7 @@ class Economy {
 const NPCS = {
   tome: {
     id: 'tome',
+    activity: 'vende',
     name: 'Tomé Roca',
     role: 'Embarcadero y tienda',
     zone: 'lago_niebla',
@@ -4991,6 +5199,7 @@ const NPCS = {
   },
   sabela: {
     id: 'sabela',
+    activity: 'anota',
     name: 'Sabela Ferrer',
     role: 'Bióloga de la cuenca',
     zone: 'lago_niebla',
@@ -5008,6 +5217,7 @@ const NPCS = {
   },
   nuno: {
     id: 'nuno',
+    activity: 'vigila',
     name: 'Nuno Aldaz',
     role: 'Guarda de la cuenca',
     zone: 'lago_niebla',
@@ -5026,6 +5236,7 @@ const NPCS = {
   },
   iria: {
     id: 'iria',
+    activity: 'espera',
     name: 'Iria',
     role: 'Del pueblo de abajo',
     zone: 'rio_trenzado',
@@ -5043,6 +5254,7 @@ const NPCS = {
   },
   ovidio: {
     id: 'ovidio',
+    activity: 'pesca',
     name: 'Ovidio Sanz',
     role: 'Vive en la marisma',
     zone: 'marisma_argan',
@@ -5060,6 +5272,7 @@ const NPCS = {
   },
   marga: {
     id: 'marga',
+    activity: 'amarra',
     name: 'Marga Elizalde',
     role: 'Patrona del embalse',
     zone: 'embalse_alto',
@@ -5288,6 +5501,22 @@ const QUESTS = [
       '—Da a la garganta. Lleva veinte años cerrada y el agua sigue bajando igual.',
       'Entre las juntas hay una hoja de papel metida en una bolsa de plástico. La letra es la misma.',
       '«Página 4 · No la cierran para guardar agua. La cierran para que nadie baje a ver qué hay debajo.»'
+    ]
+  },
+
+  {
+    id: 'sec_barca',
+    chapter: 4, type: 'equipo',
+    npc: 'marga', turnIn: 'marga',
+    requires: ['cap4_lacustre'],
+    title: 'Un casco decente',
+    summary: 'Marga no piensa dejarte salir al centro con esa barca de madera. Consigue una mejor.',
+    objectives: [{ kind: 'own', category: 'boats', item: 'barca_aluminio', label: 'Tener la barca de aluminio' }],
+    reward: { money: 400, xp: 90 },
+    hint: 'Las embarcaciones se compran en la tienda, como el resto del aparejo.',
+    complete: [
+      '—Ahora sí. Con esa aguantas un día de viento sin achicar cada diez minutos.',
+      '—Y si algún día te sobra el dinero, ponle un fueraborda: podrás curricar, avanzar despacio con el señuelo fuera. Es otra forma de pescar.'
     ]
   },
 
@@ -5537,6 +5766,35 @@ class QuestSystem {
     return reward;
   }
 
+  /**
+   * Repasa los objetivos que se pueden comprobar mirando el estado actual
+   * —tener un objeto, el nivel, el dinero, las especies, las páginas—. Los
+   * avisos puntuales pueden perderse (un objeto que llega como recompensa, un
+   * nivel subido dentro de otro sistema); esto los recoge igual.
+   *
+   * Los objetivos de suceso —capturas, visitas, conversaciones— no se tocan:
+   * ésos sí son un recuento de cosas que han pasado.
+   */
+  reconcile(snapshot) {
+    let cambio = false;
+    for (const quest of this.active) {
+      const c = this.counters(quest.id);
+      quest.objectives.forEach((o, i) => {
+        if (!RECONCILABLE.has(o.kind)) return;
+        const need = o.count ?? 1;
+        if (c[i] >= need) return;
+        const ya = Math.min(creditFor(o, snapshot), need);
+        if (ya > c[i]) {
+          c[i] = ya;
+          cambio = true;
+          this.events.onProgress?.(quest, i, ya);
+        }
+      });
+      if (cambio && this._objectivesMet(quest)) this.events.onReady?.(quest);
+    }
+    return cambio;
+  }
+
   meet(npcId) {
     const nuevo = !this.metNpcs.has(npcId);
     this.metNpcs.add(npcId);
@@ -5640,6 +5898,9 @@ function creditFor(objective, snap) {
     default: return 0;
   }
 }
+
+/** Objetivos que se pueden recalcular mirando el estado, no el historial. */
+const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit']);
 
 /** Objetivos cuyo contador es un valor alcanzado, no un recuento de sucesos. */
 const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver']);
@@ -6474,6 +6735,7 @@ class FishingSystem {
 
     // Veto de cambios de equipo mientras hay algo en marcha.
     equipment.guard = (category) => {
+      if (category === 'boats' && this.onBoard?.()) return 'No se cambia de barca estando embarcado';
       if (this.state === FishingState.FIGHTING) {
         return 'No puedes cambiar de equipo con un pez enganchado';
       }
@@ -7635,6 +7897,11 @@ const TIPS = [
     text: 'Cobrado. Con B abres la tienda: mejores cañas llegan más lejos y mejores líneas aguantan más.'
   },
   {
+    id: 'bajio',
+    when: (s) => s.lureDepth !== null && s.lureDepth < 1 && s.fishingState === 'fishing',
+    text: 'Tu señuelo está en medio metro de agua: ahí no hay nada. Camina hasta la punta del muelle o busca calado antes de lanzar.'
+  },
+  {
     id: 'cebo',
     when: (s) => s.casts >= 4 && s.landed === 0,
     text: 'Prueba otro señuelo (Tab): cada especie tiene sus preferencias y su profundidad.'
@@ -8336,6 +8603,8 @@ class UI {
       case 'reels': return `${item.capacity} m · recogida ${item.retrieve} · freno máx ${item.maxDrag} kg`;
       case 'lines': return `${item.strength} kg · ⌀ ${item.diameter} mm · elasticidad ${(item.elasticity * 100).toFixed(0)}%`;
       case 'lures': return `${item.weightG} g · trabaja a ${item.workingDepth} m · acción ${(item.action * 100).toFixed(0)}%`;
+      case 'boats': return `${item.speed} m/s · aguanta oleaje ${(item.stability * 100).toFixed(0)}%` +
+        (item.troll ? ' · permite curricar' : '');
       default: return '';
     }
   }
@@ -8380,40 +8649,52 @@ class UI {
     this._overlay('Tienda del embarcadero', body);
   }
 
-  showRecords(economy) {
+  showStats(economy, extras = {}) {
+    const { totalQuests = 0, totalSpecies = 0, totalZones = 0 } = extras;
     const body = el('div');
-    const grid = el('div', 'sw-grid');
-    SPECIES.forEach((species) => {
-      const record = economy.records[species.id];
-      const card = el('div', `sw-card${record ? '' : ' unknown'}`);
-      card.innerHTML = record
-        ? `<div class="t">${species.name}</div>
-           <div class="m">${record.count} capturas · récord ${record.bestLength.toFixed(1)} cm / ${record.bestWeight.toFixed(2)} kg</div>`
-        : `<div class="t">? ? ?</div><div class="m">Sin capturar</div>`;
-      grid.appendChild(card);
-    });
-    body.appendChild(grid);
-    this._overlay(`Capturas · ${economy.discovered}/${economy.speciesTotal}`, body);
-  }
-
-  showStats(economy) {
-    const body = el('div', 'sw-stats');
     const s = economy.stats;
-    const items = [
-      ['Lances', s.casts],
-      ['Picadas clavadas', s.hooked],
-      ['Cobrados', s.landed],
-      ['Perdidos', s.lost],
-      ['Líneas rotas', s.lineBreaks],
-      ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
-      ['Mayor captura', `${s.biggest.toFixed(2)} kg`],
-      ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
+    const [have, need] = economy.levelProgress;
+
+    const cabecera = el('div', 'sw-hint');
+    cabecera.innerHTML = `Nivel <b>${economy.level}</b> · <b>${economy.title}</b> ·
+      ${have}/${need} XP hasta el siguiente`;
+    cabecera.style.marginBottom = '14px';
+    body.appendChild(cabecera);
+
+    const grupos = [
+      ['Progreso', [
+        ['Nivel', economy.level],
+        ['Experiencia', economy.xp],
+        ['Misiones completadas', `${s.questsDone ?? 0}${totalQuests ? ` / ${totalQuests}` : ''}`],
+        ['Especies descubiertas', `${economy.discovered}${totalSpecies ? ` / ${totalSpecies}` : ''}`],
+        ['Aguas visitadas', `${economy.zonesVisited.size}${totalZones ? ` / ${totalZones}` : ''}`],
+        ['Monedas ganadas', economy.earned ?? 0]
+      ]],
+      ['Pesca', [
+        ['Lances', s.casts],
+        ['Picadas clavadas', s.hooked],
+        ['Cobrados', s.landed],
+        ['Perdidos', s.lost],
+        ['Líneas rotas', s.lineBreaks],
+        ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
+      ]],
+      ['Récords', [
+        ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
+        ['Mayor captura', `${s.biggest.toFixed(2)} kg`],
+        ['Especie del récord', s.biggestSpecies ?? '—'],
+        ['Mayor longitud', s.longest ? `${s.longest.toFixed(1)} cm` : '—']
+      ]]
     ];
-    items.forEach(([k, v]) => {
-      const stat = el('div', 'sw-stat');
-      stat.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
-      body.appendChild(stat);
-    });
+    for (const [titulo, items] of grupos) {
+      body.appendChild(el('div', 'sw-chaptitle', titulo));
+      const grid = el('div', 'sw-stats');
+      items.forEach(([k, v]) => {
+        const stat = el('div', 'sw-stat');
+        stat.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
+        grid.appendChild(stat);
+      });
+      body.appendChild(grid);
+    }
     this._overlay('Estadísticas', body);
   }
 
@@ -8822,7 +9103,8 @@ class UI {
     };
     slider('Campo de visión', 'fov', 55, 100, 1, settings.fov, (v) => `${v}°`);
     slider('Sensibilidad', 'sensitivity', 0.2, 3, 0.1, settings.sensitivity, (v) => v.toFixed(1));
-    slider('Volumen', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
+    slider('Volumen general', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
+    slider('Música', 'musicVolume', 0, 1, 0.05, settings.musicVolume ?? 0.5, (v) => `${Math.round(v * 100)}%`);
 
     const toggle = (label, key, value, note) => {
       const field = el('div', 'sw-field');
@@ -8890,6 +9172,175 @@ class UI {
   }
 }
 
+/* ===== src/audio/Music.js ===== */
+/**
+ * Música ambiental generada.
+ *
+ * No hay ficheros: no se pueden cargar en la página publicada. Lo que hay es
+ * un motor armónico sencillo —un bordón, un acorde que respira y una voz que
+ * improvisa sobre una escala— que cambia de humor según dónde y cuándo esté
+ * el jugador.
+ *
+ * La regla que la hace soportable durante horas: toca poco y calla mucho. Las
+ * frases se separan por silencios largos y el volumen baja solo cuando pasa
+ * algo importante, para no competir con el juego.
+ */
+
+// Escalas por humor, en semitonos sobre la tónica.
+const MOODS = {
+  calma:    { scale: [0, 2, 4, 7, 9, 12, 14, 16], root: 196.00, pad: 0.055, voice: 0.05, rate: 7.5 },
+  amanecer: { scale: [0, 2, 4, 7, 9, 11, 12, 16], root: 220.00, pad: 0.05,  voice: 0.058, rate: 6.0 },
+  noche:    { scale: [0, 3, 5, 7, 10, 12, 15, 17], root: 146.83, pad: 0.06, voice: 0.04, rate: 9.5 },
+  tension:  { scale: [0, 2, 3, 7, 8, 10, 12, 15], root: 164.81, pad: 0.075, voice: 0.06, rate: 3.4 },
+  hondo:    { scale: [0, 3, 7, 10, 12, 14, 17, 19], root: 130.81, pad: 0.07, voice: 0.045, rate: 8.5 },
+  triunfo:  { scale: [0, 4, 7, 9, 12, 16, 19, 21], root: 261.63, pad: 0.05, voice: 0.075, rate: 2.2 }
+};
+
+const semitone = (root, n) => root * Math.pow(2, n / 12);
+
+class Music {
+  constructor(context, destination) {
+    this.ctx = context;
+    this.enabled = true;
+    this.mood = 'calma';
+    this.target = 'calma';
+    this.timer = 4;
+    this.duck = 1;              // baja al ocurrir algo importante
+    this.intensity = 1;
+
+    this.out = context.createGain();
+    this.out.gain.value = 0;
+    this.out.connect(destination);
+
+    // Filtro suave: la música vive por debajo del ambiente, no encima.
+    this.filter = context.createBiquadFilter();
+    this.filter.type = 'lowpass';
+    this.filter.frequency.value = 2400;
+    this.filter.Q.value = 0.6;
+    this.filter.connect(this.out);
+
+    this._startDrone();
+  }
+
+  /** Bordón continuo: dos osciladores casi al unísono, que baten despacio. */
+  _startDrone() {
+    const ctx = this.ctx;
+    this.droneGain = ctx.createGain();
+    this.droneGain.gain.value = 0.0;
+    this.droneGain.connect(this.filter);
+    this.drones = [];
+    for (const detune of [-4, 5]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = MOODS.calma.root / 2;
+      osc.detune.value = detune;
+      osc.connect(this.droneGain);
+      osc.start();
+      this.drones.push(osc);
+    }
+  }
+
+  /** Una nota de la voz: ataque lento, cola larga. Nunca percusiva. */
+  _note(freq, duration, gain) {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = freq;
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), now + duration * 0.28);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.connect(env);
+    env.connect(this.filter);
+    osc.start(now);
+    osc.stop(now + duration + 0.05);
+  }
+
+  /** Acorde de fondo, tres notas que entran y salen sin que se note. */
+  _pad(mood) {
+    const m = MOODS[mood];
+    const grados = [0, 2, 4];
+    const octava = Math.random() < 0.4 ? 12 : 0;
+    for (const g of grados) {
+      this._note(semitone(m.root, m.scale[g] + octava), 6 + Math.random() * 4, m.pad * this.intensity);
+    }
+  }
+
+  _phrase(mood) {
+    const m = MOODS[mood];
+    const notas = 2 + Math.floor(Math.random() * 3);
+    let grado = Math.floor(Math.random() * m.scale.length);
+    for (let i = 0; i < notas; i++) {
+      grado = clamp(grado + Math.round((Math.random() - 0.5) * 4), 0, m.scale.length - 1);
+      const freq = semitone(m.root, m.scale[grado] + 12);
+      setTimeout(() => {
+        if (this.enabled) this._note(freq, 2.2 + Math.random() * 1.6, m.voice * this.intensity);
+      }, i * (520 + Math.random() * 420));
+    }
+  }
+
+  /** Qué humor toca según el mundo. El orden es de más urgente a más de fondo. */
+  static moodFor({ fighting, night, hour, zone, weather, celebration }) {
+    if (celebration) return 'triunfo';
+    if (fighting) return 'tension';
+    if (zone === 'garganta') return 'hondo';
+    if (night > 0.6) return 'noche';
+    if ((hour > 5.5 && hour < 9) || (hour > 18.5 && hour < 21)) return 'amanecer';
+    if (weather > 0.7) return 'hondo';
+    return 'calma';
+  }
+
+  setMood(mood) {
+    if (!MOODS[mood] || mood === this.target) return;
+    this.target = mood;
+  }
+
+  /** Baja la música un momento: al pescar algo, al hablar, al saltar un aviso. */
+  duckFor(seconds = 3) { this._duckUntil = this.ctx.currentTime + seconds; }
+
+  setEnabled(on) {
+    this.enabled = on;
+    if (!on) this.out.gain.setTargetAtTime(0, this.ctx.currentTime, 0.6);
+  }
+
+  setVolume(v) { this.volume = clamp(v, 0, 1); }
+
+  update(dt, { fighting = false, night = 0, hour = 12, zone = '', weather = 0, celebration = false } = {}) {
+    if (!this.enabled) return;
+    const quiere = Music.moodFor({ fighting, night, hour, zone, weather, celebration });
+    this.setMood(quiere);
+
+    // El cambio de humor no es un corte: el bordón se desliza a la tónica nueva.
+    if (this.target !== this.mood) {
+      this.mood = this.target;
+      const m = MOODS[this.mood];
+      const now = this.ctx.currentTime;
+      for (const osc of this.drones) osc.frequency.setTargetAtTime(m.root / 2, now, 2.2);
+      this.filter.frequency.setTargetAtTime(this.mood === 'tension' ? 1500 : 2400, now, 1.5);
+      this.timer = Math.min(this.timer, 2);
+    }
+
+    const agachado = this._duckUntil && this.ctx.currentTime < this._duckUntil;
+    const objetivo = (this.volume ?? 0.5) * (agachado ? 0.25 : 1);
+    this.out.gain.setTargetAtTime(objetivo, this.ctx.currentTime, 0.9);
+    this.droneGain.gain.setTargetAtTime(0.05 * this.intensity, this.ctx.currentTime, 3);
+
+    this.timer -= dt;
+    if (this.timer > 0) return;
+    const m = MOODS[this.mood];
+    // Silencios largos entre frases: la música acompaña, no llena.
+    this.timer = m.rate * (0.7 + Math.random() * 0.9);
+    if (Math.random() < 0.55) this._pad(this.mood);
+    else this._phrase(this.mood);
+  }
+
+  dispose() {
+    this.drones.forEach((o) => { try { o.stop(); } catch { /* ya parado */ } });
+    this.out.disconnect();
+  }
+}
+
 /* ===== src/audio/AudioSystem.js ===== */
 /**
  * Audio sintetizado con WebAudio.
@@ -8910,6 +9361,9 @@ class AudioSystem {
     this.layers = {};
     this._birdTimer = 3;
     this._cricketTimer = 5;
+    this._frogTimer = 4;
+    this.music = null;
+    this.musicVolume = 0.55;
   }
 
   /** Debe llamarse desde un gesto del usuario (política de autoplay). */
@@ -8925,6 +9379,10 @@ class AudioSystem {
     this.layers.wind = this._noiseLayer({ type: 'lowpass', frequency: 480, q: 0.7, gain: 0 });
     this.layers.water = this._noiseLayer({ type: 'bandpass', frequency: 900, q: 1.4, gain: 0 });
     this.layers.rain = this._noiseLayer({ type: 'highpass', frequency: 1500, q: 0.6, gain: 0 });
+
+    // La música cuelga del mismo maestro que el resto: un solo volumen manda.
+    this.music = new Music(this.ctx, this.master);
+    this.music.setVolume(this.musicVolume);
     this.ready = true;
   }
 
@@ -9053,7 +9511,7 @@ class AudioSystem {
   }
 
   // ------------------------------------------------------------- ambiente
-  update(dt, { windSpeed = 2, rain = 0, nightFactor = 0, nearWater = 1, cloudiness = 0 } = {}) {
+  update(dt, { windSpeed = 2, rain = 0, nightFactor = 0, nearWater = 1, cloudiness = 0, music = null, frogs = 0 } = {}) {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
     const set = (layer, value) => {
@@ -9082,6 +9540,22 @@ class AudioSystem {
       }
     }
 
+    // Ranas: sólo donde hay marisma y a partir del atardecer. Es el sonido que
+    // le da carácter a esa zona y la distingue del lago con los ojos cerrados.
+    this._frogTimer -= dt;
+    if (this._frogTimer <= 0) {
+      this._frogTimer = (0.9 + Math.random() * 1.6) / Math.max(0.15, frogs);
+      if (frogs > 0.05 && nightFactor > 0.3 && !this.muted) {
+        const base = 150 + Math.random() * 90;
+        const n = 2 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < n; i++) {
+          this._tone(base * (1 + Math.random() * 0.06), 0.075, {
+            type: 'sawtooth', gain: 0.03 * Math.min(1, frogs), delay: i * 0.11, attack: 0.005
+          });
+        }
+      }
+    }
+
     this._cricketTimer -= dt;
     if (this._cricketTimer <= 0) {
       this._cricketTimer = 0.35 + Math.random() * 0.5;
@@ -9089,7 +9563,18 @@ class AudioSystem {
         this._tone(4200 + Math.random() * 600, 0.035, { type: 'square', gain: 0.016 });
       }
     }
+    if (this.music && music) this.music.update(dt, music);
   }
+
+  /** Volumen propio de la música, aparte del general. */
+  setMusicVolume(value) {
+    this.musicVolume = clamp(value, 0, 1);
+    this.music?.setVolume(this.musicVolume);
+    this.music?.setEnabled(this.musicVolume > 0.001);
+  }
+
+  /** Baja la música un momento para que se oiga lo que acaba de pasar. */
+  duckMusic(seconds = 2.5) { this.music?.duckFor(seconds); }
 
   setVolume(value) {
     this.volume = clamp(value, 0, 1);
@@ -9127,6 +9612,7 @@ class Game {
     this.paused = false;
     this.autosaveTimer = 0;
     this.footstepTimer = 0;
+    this._celebrating = 0;
 
     this._initRenderer();
     this._initWorld();
@@ -9137,6 +9623,7 @@ class Game {
     // Una sola fuente de verdad para "qué caña se ve": la del modelo de primera
     // persona o la que sujeta el cuerpo, nunca las dos.
     this.player.onModeChange = (mode) => this.fishing.rod.setVisible(mode === 'first');
+    this.fishing.onBoard = () => this.player.platform === this.boat;
 
     this.interaction = new InteractionSystem(this.camera);
     // El mundo se construye antes que este sistema, así que la primera zona
@@ -9276,7 +9763,7 @@ class Game {
     );
     if (this.interaction) this._registerInteractables();
     this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
-      seed: zone.terrain.seed + 7, audio: this.audio
+      seed: zone.terrain.seed + 7, audio: this.audio, life: zone.life
     });
   }
 
@@ -9428,14 +9915,22 @@ class Game {
     if (reward.page) partes.push(`página ${reward.page} del cuaderno`);
     this.economy.stats.questsDone = (this.economy.stats.questsDone ?? 0) + 1;
     if (reward.page) this.audio?.page(); else this.audio?.questDone();
+    this._celebrate(reward.page ? 14 : 8);
     this.ui?.note(`Misión completada: ${quest.title}${partes.length ? ' · ' + partes.join(' · ') : ''}`, 'gold');
     this.quests.notify('deliver', { value: this.quests.pages.length });
     this._persist();
   }
 
+  /** Un momento importante: la música se aparta y luego celebra. */
+  _celebrate(seconds = 12) {
+    this._celebrating = seconds;
+    this.audio?.duckMusic(3);
+  }
+
   _onLevelUp(level) {
     this.ui?.note(`¡Nivel ${level}! Ahora eres ${this.economy.title}`, 'gold');
     this.audio?.levelUp();
+    this._celebrate(10);
     this.quests.notify('level', { value: level });
   }
 
@@ -9526,6 +10021,9 @@ class Game {
       onBuy: (category, id) => {
         if (this.economy.buy(category, id)) {
           this.inventory.add(category, id);
+          // Una embarcación nueva se bota nada más comprarla: nadie compra una
+          // lancha para dejarla en el remolque.
+          if (category === 'boats') this.equipment.equip('boats', id);
           this.audio.coin();
           this.quests.notify('own', { category, item: id });
           this._persist();
@@ -9584,7 +10082,9 @@ class Game {
         case 'KeyB': this._panel(() => this.ui.showShop(this.inventory, this.economy)); break;
         case 'KeyC': this._panel(() => this._openJournal()); break;
         case 'KeyJ': this._panel(() => this._openQuests()); break;
-        case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
+        case 'KeyG': this._panel(() => this.ui.showStats(this.economy, {
+          totalQuests: STORY.QUESTS.length, totalSpecies: SPECIES.length, totalZones: ZONES.length
+        })); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
           if (!this.ui.isPanelOpen) this.interaction.interact();
@@ -9611,6 +10111,26 @@ class Game {
     return null;
   }
 
+  /**
+   * Avisos de a bordo: mala mar para el casco que se lleva, y curricar. Sólo
+   * la lancha permite avanzar con el sedal fuera; con las otras, remar con el
+   * aparejo en el agua lo enreda y se recoge solo.
+   */
+  _boatWarnings(dt) {
+    this._boatTimer = (this._boatTimer ?? 0) - dt;
+    if (this.boat.rough > 0.35 && this._boatTimer <= 0) {
+      this._boatTimer = 14;
+      this.fishing._say(
+        `${this.equipment.boat.name} con este oleaje va justa: busca resguardo o compra un casco mejor`, 'bad'
+      );
+      this.cameraFx.addShake(0.12);
+    }
+    const moviendo = Math.abs(this.boat.speed) > 0.7;
+    if (moviendo && !this.equipment.boat.troll && this.fishing.state === 'fishing') {
+      this.fishing.reelIn('Bogando con el sedal fuera se enreda: recogido');
+    }
+  }
+
   _toggleBoat() {
     if (this.player.platform) {
       const busy = this._busyMessage('bajar de la barca');
@@ -9629,6 +10149,9 @@ class Game {
       if (busy) { this.fishing._say(busy, 'bad'); return; }
       if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de subir');
       this.player.setPlatform(this.boat);
+      // Las instrucciones de a bordo tienen que poder leerse: el aviso de mala
+      // mar espera unos segundos antes de pisarlas.
+      this._boatTimer = 6;
       this.fishing._say('A bordo · W/S para bogar, A/D para virar, E para bajar');
     }
   }
@@ -9676,6 +10199,7 @@ class Game {
   // -------------------------------------------------------------- eventos
   _onLanded(fish) {
     this.audio.landed();
+    this.audio.duckMusic(4);
     const nuevaEspecie = !this.economy.records[fish.species.id]?.count;
     const result = this.economy.registerCatch(fish);
 
@@ -9724,6 +10248,7 @@ class Game {
       this.camera.updateProjectionMatrix();
     }
     if (key === 'masterVolume') this.audio.setVolume(value);
+    if (key === 'musicVolume') this.audio.setMusicVolume(value);
     this._persist();
   }
 
@@ -9755,6 +10280,7 @@ class Game {
       this.travelTo(data.world.zone);
     }
     this.audio.setVolume(this.settings.masterVolume);
+    this.audio.setMusicVolume(this.settings.musicVolume ?? 0.55);
     if (Array.isArray(data.coach)) this.coach.seen = new Set(data.coach);
   }
 
@@ -9827,14 +10353,17 @@ class Game {
     this.trees.update(this.player.position);
 
     const aboard = this.player.platform === this.boat;
+    this.boat.setSpec(this.equipment.boat);
     this.boat.update(dt, {
       row: aboard && controllable
         ? (this.input.isDown('KeyW') ? 1 : 0) - (this.input.isDown('KeyS') ? 1 : 0) : 0,
       turn: aboard && controllable
         ? (this.input.isDown('KeyA') ? 1 : 0) - (this.input.isDown('KeyD') ? 1 : 0) : 0,
       time: this.clock.elapsedTime,
-      water: this.water
+      water: this.water,
+      choppiness: this.weather.choppiness
     });
+    if (aboard) this._boatWarnings(dt);
 
     const context = {
       terrain: this.terrain,
@@ -9875,6 +10404,13 @@ class Game {
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    // Repaso periódico de los objetivos comprobables: barato y evita que un
+    // aviso perdido deje una misión encallada.
+    this._questSync = (this._questSync ?? 0) - dt;
+    if (!panelOpen && this._questSync <= 0) {
+      this._questSync = 1.5;
+      this.quests.reconcile(this._questSnapshot());
+    }
     if (this.crew) {
       // Los personajes siguen vivos con un panel abierto: al cerrarlo no se
       // ven dar un salto para recolocarse.
@@ -9903,7 +10439,10 @@ class Game {
         hasCurrent: !!this.terrain.field.hasCurrent,
         worldEvent: !!this.worldEvents.current,
         nearBoat: this.boat.canBoard(this.player.position),
-        rig: this.fishing.lure.rig
+        rig: this.fishing.lure.rig,
+        lureDepth: this.fishing.lure.isFishable
+          ? this.terrain.depthAt(this.fishing.lure.position.x, this.fishing.lure.position.z)
+          : null
       }, dt);
       if (tip) { this.ui.showCoach(tip); this._persist(); }
       else if (!this.coach.text) this.ui.showCoach(null);
@@ -9969,6 +10508,7 @@ class Game {
       I.register({
         object: npc.root,
         anchorHeight: 1.35,          // el pecho, no los pies
+        highlightColor: 0x0a1614,    // un apunte, no un foco
         range: 3.6,
         label: () => {
           const marca = this.quests.npcMarker(npc.id);
@@ -10004,6 +10544,7 @@ class Game {
       : null;
     actor?.speak();
     this.audio?.greet();
+    this.audio?.duckMusic(4);
     this.input.releaseLock();
 
     const primera = !this.quests.metNpcs.has(npcId);
@@ -10165,34 +10706,6 @@ class Game {
     this.fishing._say(`El cubo huele fuerte. ${band.charAt(0).toUpperCase() + band.slice(1)} y ${this.weather.label.toLowerCase()}: ${consejo}`);
   }
 
-  /**
-   * Puntos con los que se puede interactuar, en orden de prioridad.
-   *
-   * Todos comparten la misma tecla y el mismo aviso bajo el punto de mira, de
-   * modo que el jugador aprende un solo gesto y vale para todo.
-   */
-  _interactables() {
-    const list = [];
-    const here = this.player.position;
-
-    if (this.player.platform) {
-      list.push({ label: 'W/S bogar · A/D virar · E desembarcar', action: () => this._toggleBoat() });
-      return list;
-    }
-    if (this.boat.canBoard(here)) {
-      list.push({ label: 'E · subir a la barca', action: () => this._toggleBoat() });
-    }
-    const camp = this.props.camp?.position;
-    if (camp && here.distanceTo(camp) < 3.6) {
-      const next = this._nextFeedingHour();
-      list.push({
-        label: `E · descansar junto al fuego hasta las ${String(Math.floor(next)).padStart(2, '0')}:00`,
-        action: () => this._rest(next)
-      });
-    }
-    return list;
-  }
-
   _contextHint() {
     if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
     return this.interaction?.label ?? '';
@@ -10272,8 +10785,19 @@ class Game {
       rain: this.weather.rainAmount,
       nightFactor: this.time.nightFactor,
       nearWater: depthUnderPlayer > 0 ? 1 : distanceToWater,
-      cloudiness: this.weather.cloudiness
+      cloudiness: this.weather.cloudiness,
+      frogs: this.zone.life?.frogs ?? 0,
+      // La música lee el mismo estado que el jugador está viendo.
+      music: {
+        fighting: this.fishing.state === 'fighting',
+        night: this.time.nightFactor,
+        hour: this.time.hour,
+        zone: this.zone.id,
+        weather: this.weather.cloudiness,
+        celebration: this._celebrating > 0
+      }
     });
+    if (this._celebrating > 0) this._celebrating -= dt;
 
     // El paso suena cuando el pie toca de verdad, no cada N segundos: así el
     // sonido va sincronizado con la animación por construcción.
@@ -10284,6 +10808,8 @@ class Game {
     this.renderer.setAnimationLoop(null);
     this.fishing.dispose();
     this.fishManager.dispose();
+    this.crew?.dispose();
+    this.audio?.music?.dispose();
     this.vegetation.dispose();
     this.trees.dispose();
     this.grass.dispose();

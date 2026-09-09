@@ -62,6 +62,7 @@ MODULES = [
     "src/player/CameraFx.js",
     "src/ui/Coach.js",
     "src/ui/UI.js",
+    "src/audio/Music.js",
     "src/audio/AudioSystem.js",
     "src/core/Game.js",
     "src/main.js",

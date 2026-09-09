@@ -151,6 +151,35 @@ export class QuestSystem {
     return reward;
   }
 
+  /**
+   * Repasa los objetivos que se pueden comprobar mirando el estado actual
+   * —tener un objeto, el nivel, el dinero, las especies, las páginas—. Los
+   * avisos puntuales pueden perderse (un objeto que llega como recompensa, un
+   * nivel subido dentro de otro sistema); esto los recoge igual.
+   *
+   * Los objetivos de suceso —capturas, visitas, conversaciones— no se tocan:
+   * ésos sí son un recuento de cosas que han pasado.
+   */
+  reconcile(snapshot) {
+    let cambio = false;
+    for (const quest of this.active) {
+      const c = this.counters(quest.id);
+      quest.objectives.forEach((o, i) => {
+        if (!RECONCILABLE.has(o.kind)) return;
+        const need = o.count ?? 1;
+        if (c[i] >= need) return;
+        const ya = Math.min(creditFor(o, snapshot), need);
+        if (ya > c[i]) {
+          c[i] = ya;
+          cambio = true;
+          this.events.onProgress?.(quest, i, ya);
+        }
+      });
+      if (cambio && this._objectivesMet(quest)) this.events.onReady?.(quest);
+    }
+    return cambio;
+  }
+
   meet(npcId) {
     const nuevo = !this.metNpcs.has(npcId);
     this.metNpcs.add(npcId);
@@ -254,6 +283,9 @@ function creditFor(objective, snap) {
     default: return 0;
   }
 }
+
+/** Objetivos que se pueden recalcular mirando el estado, no el historial. */
+const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit']);
 
 /** Objetivos cuyo contador es un valor alcanzado, no un recuento de sucesos. */
 const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver']);

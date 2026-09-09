@@ -7,7 +7,8 @@ export class Inventory {
       rods: ['cana_iniciacion'],
       reels: ['carrete_basico'],
       lines: ['nylon_022'],
-      lures: ['cucharilla']
+      lures: ['cucharilla'],
+      boats: ['barca_remos']
     };
   }
 
@@ -18,7 +19,8 @@ export class Inventory {
   add(category, id) {
     if (!CATALOG[category] || !findItem(category, id)) return false;
     if (this.has(category, id)) return false;
-    this.owned[category].push(id);
+    // Una partida guardada de antes puede no tener la categoría todavía.
+    (this.owned[category] ??= []).push(id);
     return true;
   }
 

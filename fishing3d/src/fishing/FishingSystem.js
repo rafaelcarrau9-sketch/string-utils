@@ -70,6 +70,7 @@ export class FishingSystem {
 
     // Veto de cambios de equipo mientras hay algo en marcha.
     equipment.guard = (category) => {
+      if (category === 'boats' && this.onBoard?.()) return 'No se cambia de barca estando embarcado';
       if (this.state === FishingState.FIGHTING) {
         return 'No puedes cambiar de equipo con un pez enganchado';
       }
