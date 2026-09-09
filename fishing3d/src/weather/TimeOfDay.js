@@ -21,9 +21,14 @@ const PALETTE = [
 ];
 
 export class TimeOfDay {
-  constructor({ hour = 7.5, speed = 1 / 90 } = {}) {
+  constructor({ hour = 7.5, speed = 1 / 1200 } = {}) {
     this.hour = hour;
-    this.speed = speed;              // horas por segundo real (1/90 ≈ 36 min/día)
+    // `speed` son días por segundo real: 1/1200 deja el día completo en veinte
+    // minutos, es decir una hora de juego cada cincuenta segundos. Antes valía
+    // 1/90 —un día entero en minuto y medio—, y con eso una pelea de treinta
+    // segundos se comía ocho horas: era imposible pescar «al amanecer» o
+    // cumplir un encargo que pidiera capturas de noche.
+    this.speed = speed;
     this.paused = false;
 
     this.sunDirection = new THREE.Vector3();

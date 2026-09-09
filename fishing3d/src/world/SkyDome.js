@@ -117,8 +117,19 @@ export class SkyDome {
     }
   }
 
+  /**
+   * Ajuste de luz propio de cada zona. Un cañón tapa el cielo y con la luz
+   * global de un lago abierto se queda a oscuras; una marisma abierta, al
+   * revés. Son multiplicadores sobre la iluminación calculada, no una luz
+   * distinta: el ciclo de día y la meteorología siguen mandando.
+   */
+  setZoneLighting({ ambient = 1, hemi = 1, sun = 1 } = {}) {
+    this.zoneLight = { ambient, hemi, sun };
+  }
+
   /** `focus` es la posición del jugador: la sombra se encaja a su alrededor. */
   update(time, weather, dt, focus = null) {
+    const zl = this.zoneLight ?? { ambient: 1, hemi: 1, sun: 1 };
     const sunDir = time.sunDirection;
     this.sky.material.uniforms.sunPosition.value.copy(sunDir).multiplyScalar(SKY_SCALE * 0.5);
     this.sky.material.uniforms.turbidity.value = lerp(2.2, 9, weather.cloudiness);
@@ -138,7 +149,7 @@ export class SkyDome {
       this.sun.position.copy(sunDir).multiplyScalar(140);
     }
     this.sun.color.copy(time.sunColor);
-    this.sun.intensity = time.sunIntensity * overcast;
+    this.sun.intensity = time.sunIntensity * overcast * zl.sun;
     this.sun.visible = this.sun.intensity > 0.01;
 
     this.moon.position.copy(focus || new THREE.Vector3()).addScaledVector(time.moonDirection, 140);
@@ -146,9 +157,9 @@ export class SkyDome {
     this.moon.visible = this.moon.intensity > 0.01;
 
     this.hemi.color.copy(time.skyColor);
-    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast;
+    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast * zl.hemi;
     this.ambient.color.copy(time.ambientColor);
-    this.ambient.intensity = lerp(1.2, 1.15, daylight);
+    this.ambient.intensity = lerp(1.2, 1.15, daylight) * zl.ambient;
 
     this.sky.material.uniforms.uNight.value = time.nightFactor * 0.88;
     this.sky.material.uniforms.uNightColor.value.copy(time.skyColor);

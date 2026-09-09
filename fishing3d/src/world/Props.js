@@ -22,27 +22,125 @@ export class Props {
     const wood = textures.material('madera', { repeat: 2 });
     const plank = textures.material('madera', { repeat: 1 });
 
-    this.dock = this._buildDock(Math.PI * 0.18, wood, plank, preset);
+    // El sitio del muelle no es un ángulo fijo: se busca una orilla con buen
+    // calado delante. Un ángulo fijo funcionaba en un lago redondo y ponía el
+    // muelle contra la pared en un cañón o cruzado en mitad del río.
+    const dockAngle = this._bestShoreAngle({ idealDepth: 2.6, reach: 13 });
+    this.dock = this._buildDock(dockAngle, wood, plank, preset);
     // La barca navegable la crea Game (necesita interactuar con el jugador);
     //     aquí sólo se decide dónde está fondeada.
-    this.boatAnchor = this.shorePoint(Math.PI * 0.62, -0.9);
+    this.boatAnchor = this.shorePoint(
+      this._bestShoreAngle({ idealDepth: 1.6, reach: 8, avoid: [dockAngle] }), -0.9
+    );
     this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
-    this._buildCamp(Math.PI * -0.35, wood, textures, preset);
+    this._buildCamp(this._bestShoreAngle({ idealDepth: 1.2, reach: 7, avoid: [dockAngle] }),
+      wood, textures, preset);
     this._buildSign(wood, preset);
     this._buildBucket(preset);
+    this._placeNpcAnchors();
   }
 
-  /** Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`). */
+  /**
+   * Sitios donde puede plantarse un personaje: en tierra firme, mirando al
+   * agua y sin pisar la construcción a la que pertenecen. Se calculan sobre el
+   * relieve real, así que valen igual en un lago, un río o un cañón.
+   */
+  _placeNpcAnchors() {
+    const yaw = (p) => Math.atan2(p.x, p.z) + Math.PI;   // mirando al agua
+    const seco = (p, empuje) => {
+      // Se aparta hacia tierra hasta pisar seco: nadie atiende con los pies
+      // dentro del agua.
+      const dir = new THREE.Vector2(p.x, p.z).normalize();
+      let best = p.clone();
+      for (let d = 0; d <= 9; d += 0.75) {
+        const x = p.x + dir.x * (empuje + d);
+        const z = p.z + dir.y * (empuje + d);
+        const h = this.terrain.heightAt(x, z);
+        best = new THREE.Vector3(x, h, z);
+        if (h > 0.45) break;
+      }
+      return best;
+    };
+
+    const junto = (obj, dx, dz) => {
+      const w = obj.localToWorld(new THREE.Vector3(dx, 0, dz));
+      return seco(new THREE.Vector3(w.x, 0, w.z), 0);
+    };
+
+    // Se apartan de la construcción a la que pertenecen: plantados encima, el
+    // personaje tapaba el objeto y robaba la mirada al apuntar con la vista.
+    const alLado = (p, dx, dz) => seco(new THREE.Vector3(p.x + dx, 0, p.z + dz), 0);
+    this.npcAnchors = {
+      muelle: { position: junto(this.dockObject, 2.6, 1.2), yaw: null },
+      campamento: { position: alLado(seco(this.camp.position.clone(), 2.4), 2.6, -2.2), yaw: null },
+      cartel: { position: alLado(seco(this.sign.position.clone(), 1.6), -2.4, 1.9), yaw: null },
+      orilla: { position: seco(this.shorePoint(Math.PI * 0.9, 0.6), 1.6), yaw: null }
+    };
+    for (const a of Object.values(this.npcAnchors)) {
+      a.position.y = this.terrain.heightAt(a.position.x, a.position.z);
+      a.yaw = yaw(a.position);
+    }
+  }
+
+  /**
+   * Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`).
+   *
+   * Marcha hacia fuera y se queda en el primer cruce en vez de bisecar: la
+   * bisección da por hecho que el agua está dentro y la tierra fuera, y eso
+   * sólo vale para un lago redondo. Un río serpenteante, una marisma con
+   * islotes o un cañón cruzan esa frontera varias veces.
+   */
   shorePoint(angle, targetHeight = 0.35) {
     const dir = new THREE.Vector2(Math.cos(angle), Math.sin(angle));
-    let lo = 0, hi = this.terrain.field.half - 10;
-    for (let i = 0; i < 40; i++) {
-      const mid = (lo + hi) / 2;
-      const h = this.terrain.heightAt(dir.x * mid, dir.y * mid);
-      if (h < targetHeight) lo = mid; else hi = mid;
+    const limit = this.terrain.field.half - 10;
+    const at = (r) => this.terrain.heightAt(dir.x * r, dir.y * r);
+    const step = 1.5;
+    let prevR = 0, prevH = at(0);
+    let fallback = null;
+    for (let r = step; r <= limit; r += step) {
+      const h = at(r);
+      if (prevH < targetHeight && h >= targetHeight) {
+        // Afinar el cruce entre los dos últimos pasos.
+        let lo = prevR, hi = r;
+        for (let i = 0; i < 24; i++) {
+          const mid = (lo + hi) / 2;
+          if (at(mid) < targetHeight) lo = mid; else hi = mid;
+        }
+        const found = (lo + hi) / 2;
+        return new THREE.Vector3(dir.x * found, at(found), dir.y * found);
+      }
+      if (fallback === null && Math.abs(h - targetHeight) < 0.6) fallback = r;
+      prevR = r; prevH = h;
     }
-    const r = (lo + hi) / 2;
-    return new THREE.Vector3(dir.x * r, this.terrain.heightAt(dir.x * r, dir.y * r), dir.y * r);
+    const r = fallback ?? limit * 0.5;
+    return new THREE.Vector3(dir.x * r, at(r), dir.y * r);
+  }
+
+  /**
+   * Mejor ángulo de orilla para una construcción: se recorre el contorno y se
+   * puntúa cada punto por el calado que hay `reach` metros mar adentro. Lo
+   * ideal es una orilla con `idealDepth` delante, ni un bajío ni un tajo.
+   */
+  _bestShoreAngle({ idealDepth = 2.5, reach = 12, avoid = [], samples = 48 } = {}) {
+    let best = 0, bestScore = -Infinity;
+    for (let i = 0; i < samples; i++) {
+      const angle = (i / samples) * Math.PI * 2;
+      const shore = this.shorePoint(angle, 0.55);
+      if (shore.y < 0.2) continue;                      // no encontró tierra
+      const inward = { x: -Math.cos(angle), z: -Math.sin(angle) };
+      const depth = this.terrain.depthAt(shore.x + inward.x * reach, shore.z + inward.z * reach);
+      if (depth < 0.4) continue;                        // delante no hay agua
+      // Pendiente suave detrás: no se construye contra una pared.
+      const back = this.terrain.heightAt(shore.x - inward.x * 6, shore.z - inward.z * 6);
+      let score = -Math.abs(depth - idealDepth) - Math.max(0, back - shore.y - 4) * 0.6;
+      for (const other of avoid) {
+        let d = Math.abs(angle - other);
+        if (d > Math.PI) d = Math.PI * 2 - d;
+        score -= Math.max(0, 1.2 - d) * 4;              // separados entre sí
+      }
+      if (score > bestScore) { bestScore = score; best = angle; }
+    }
+    return best;
   }
 
   _buildDock(angle, wood, plankMat, preset) {
@@ -52,7 +150,14 @@ export class Props {
     dock.position.copy(shore);
     dock.lookAt(shore.clone().add(inward));
 
-    const length = 15;
+    // El muelle llega hasta donde el fondo aún es alcanzable con pilotes: en
+    // un lago son quince metros de tablero; sobre una hoya, mucho menos.
+    let length = 15;
+    for (let l = 15; l >= 4; l -= 1) {
+      const tip = dock.localToWorld(new THREE.Vector3(0, 0, l - 1.5));
+      if (this.terrain.depthAt(tip.x, tip.z) <= 12) { length = l; break; }
+      length = 4;
+    }
     const width = 2.6;
     const deckY = 1.15;
 
@@ -81,8 +186,9 @@ export class Props {
 
     // Pilotes hasta el fondo
     const pileGeo = new THREE.CylinderGeometry(0.14, 0.16, 1, 7);
-    for (let i = 0; i < 5; i++) {
-      const t = 0.7 + i * 3.4;
+    const piles = Math.max(2, Math.round(length / 3.4));
+    for (let i = 0; i < piles; i++) {
+      const t = 0.7 + i * (length - 1.4) / Math.max(1, piles - 1);
       [-width / 2 + 0.2, width / 2 - 0.2].forEach((x) => {
         const world = dock.localToWorld(new THREE.Vector3(x, 0, t));
         const bed = this.terrain.heightAt(world.x, world.z);
@@ -178,8 +284,11 @@ export class Props {
   _buildBucket(preset) {
     const metal = new THREE.MeshStandardMaterial({ color: 0x7d838a, roughness: 0.5, metalness: 0.6 });
     const bucket = new THREE.Group();
+    // Apartado del fuego: pegados, la mirada no podía distinguir uno de otro y
+    // el aviso siempre era el del fuego.
     const spot = this.camp.position;
-    bucket.position.set(spot.x + 1.1, this.terrain.heightAt(spot.x + 1.1, spot.z - 0.7) + 0.16, spot.z - 0.7);
+    const bx = spot.x - 2.4, bz = spot.z + 1.5;
+    bucket.position.set(bx, this.terrain.heightAt(bx, bz) + 0.16, bz);
 
     const body = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.13, 0.3, 12, 1, true), metal);
     body.castShadow = preset.shadows;

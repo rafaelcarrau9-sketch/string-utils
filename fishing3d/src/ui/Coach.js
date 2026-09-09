@@ -48,8 +48,38 @@ const TIPS = [
   },
   {
     id: 'zonas',
-    when: (s) => s.money >= 2500,
-    text: 'Ya te llega para otra zona de pesca: pulsa Z.'
+    when: (s) => s.money >= 600 && s.level >= 2,
+    text: 'Con Z abres el mapa de la cuenca: allí se compran los permisos de las otras aguas.'
+  },
+  {
+    id: 'personajes',
+    when: (s) => s.nearNpc,
+    text: 'Hay alguien delante. Pulsa E para hablar: la gente da encargos, compra pescado y cuenta cosas.'
+  },
+  {
+    id: 'diario',
+    when: (s) => s.questsActive >= 1,
+    text: 'Con J abres el diario: qué llevas entre manos, qué falta y quién te lo pidió.'
+  },
+  {
+    id: 'enciclopedia',
+    when: (s) => s.discovered >= 3,
+    text: 'Con C abres la enciclopedia. Cada especie que cobras abre su ficha: dónde vive, a qué hora y con qué señuelo.'
+  },
+  {
+    id: 'corriente',
+    when: (s) => s.hasCurrent && s.fishingState === 'fishing',
+    text: 'Aquí hay corriente: el señuelo baja solo. Lanza aguas arriba y déjalo trabajar hacia ti.'
+  },
+  {
+    id: 'anzuelo',
+    when: (s) => s.lastEvent === 'hookPull',
+    text: 'El anzuelo se ha abierto: ese pez es demasiado para tu aparejo. Caña más fuerte, freno mayor y un señuelo más grande.'
+  },
+  {
+    id: 'suceso',
+    when: (s) => s.worldEvent,
+    text: 'Algo está pasando en el agua. Estos ratos duran poco y cambian mucho lo que pica: aprovéchalos.'
   },
   {
     id: 'flotador',

@@ -122,7 +122,7 @@ export class Lure {
    * @param retrieve  0..1 cuánto está recogiendo el jugador
    * @returns evento de entrada en el agua, para salpicadura y sonido
    */
-  update(dt, { terrain, waterLevel, retrieve = 0, rodTip, retrieveSpeed = 1.5, wind }) {
+  update(dt, { terrain, waterLevel, retrieve = 0, rodTip, retrieveSpeed = 1.5, wind, flow = null }) {
     let event = null;
 
     if (this.state === LureState.FLYING) {
@@ -165,9 +165,26 @@ export class Lure {
         }
       }
 
+      // La corriente se lleva el señuelo aguas abajo. Un cebo bajo flotador se
+      // va casi entero con el agua; uno plomado, mucho menos. Es lo que obliga
+      // a lanzar aguas arriba y dejarlo bajar en vez de plantarlo en un punto.
+      if (flow && (flow.x || flow.z)) {
+        const arrastre = (this.rig === 'flotador' ? 1.0 : 0.62)
+          / (1 + this.depthTarget * 0.09);
+        this.position.x += flow.x * arrastre * dt;
+        this.position.z += flow.z * arrastre * dt;
+        this.drift = Math.hypot(flow.x, flow.z) * arrastre;
+      } else {
+        this.drift = 0;
+      }
+
       // Un señuelo se trabaja recogiendo; un cebo bajo flotador atrae quieto,
       // así que conserva una acción de fondo en vez de apagarse del todo.
-      const actionTarget = this.rig === 'flotador' ? Math.max(0.4, retrieve) : retrieve;
+      // La propia corriente hace trabajar al señuelo aunque no se recoja.
+      const actionTarget = Math.max(
+        this.rig === 'flotador' ? Math.max(0.4, retrieve) : retrieve,
+        Math.min(0.5, (this.drift ?? 0) * 0.55)
+      );
       this.action = damp(this.action, actionTarget, 6, dt);
       this.object.rotation.z += this.action * dt * 6;
     }

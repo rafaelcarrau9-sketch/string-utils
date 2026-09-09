@@ -37,6 +37,7 @@ MODULES = [
     "src/world/GrassBlades.js",
     "src/world/Trees.js",
     "src/world/InteractionSystem.js",
+    "src/world/Npc.js",
     "src/world/AmbientLife.js",
     "src/world/Props.js",
     "src/world/Boat.js",
@@ -49,6 +50,9 @@ MODULES = [
     "src/gear/Inventory.js",
     "src/gear/Equipment.js",
     "src/economy/Economy.js",
+    "src/story/StoryData.js",
+    "src/story/QuestSystem.js",
+    "src/story/Events.js",
     "src/fishing/Line.js",
     "src/fishing/Lure.js",
     "src/fishing/Rod.js",
@@ -64,6 +68,11 @@ MODULES = [
 ]
 
 IMPORT_RE = re.compile(r"^import\s.*?;\s*$", re.M | re.S)
+# `import * as X` y `import { A as B }` no sobreviven al aplanado: aquí los
+# imports se borran y todo queda en un único ámbito, así que el alias se queda
+# sin definir y el fallo sólo aparece en el paquete, no al desarrollar.
+NAMESPACE_RE = re.compile(r"^import\s+\*\s+as\s+\w+\s+from\s+['\"]\.", re.M)
+ALIAS_RE = re.compile(r"^import\s*\{[^}]*\bas\b[^}]*\}\s*from\s*['\"]\.", re.M | re.S)
 DECL_RE = re.compile(r"^(?:export\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -73,6 +82,17 @@ def strip_module_syntax(source: str) -> str:
     source = re.sub(r"^export\s+(?=(const|let|var|function|class)\s)", "", source, flags=re.M)
     source = re.sub(r"^export\s*\{[^}]*\};?\s*$", "", source, flags=re.M)
     return source.strip()
+
+
+def check_module_syntax(sources):
+    """Formas de import que el aplanado no puede reproducir."""
+    problems = []
+    for path, source in sources:
+        if NAMESPACE_RE.search(source):
+            problems.append(f"  {path}: usa `import * as ...` de un módulo local")
+        if ALIAS_RE.search(source):
+            problems.append(f"  {path}: usa `import {{ X as Y }}` de un módulo local")
+    return problems
 
 
 def check_collisions(sources):
@@ -92,15 +112,20 @@ def build(local=False):
     """`local=True` apunta el import map a node_modules para poder probarlo
     sin salir a Internet."""
     sources = []
+    originals = []
     for rel in MODULES:
         path = ROOT / rel
         if not path.exists():
             sys.exit(f"Falta el módulo {rel}")
-        sources.append((rel, strip_module_syntax(path.read_text(encoding="utf-8"))))
+        raw = path.read_text(encoding="utf-8")
+        originals.append((rel, raw))
+        sources.append((rel, strip_module_syntax(raw)))
 
-    problems = check_collisions(sources)
+    # El chequeo de sintaxis mira el original: los imports ya no están en el
+    # texto aplanado.
+    problems = check_module_syntax(originals) + check_collisions(sources)
     if problems:
-        sys.exit("Nombres duplicados en el ámbito superior:\n" + "\n".join(problems))
+        sys.exit("El paquete no se puede aplanar:\n" + "\n".join(problems))
 
     body = "\n\n".join(
         f"/* ===== {rel} ===== */\n{source}" for rel, source in sources
@@ -120,7 +145,7 @@ def build(local=False):
     head_styles = re.search(r"<style>(.*?)</style>", template, re.S).group(1)
 
     html = f"""<meta charset="utf-8">
-<title>Still Waters</title>
+<title>Aguas de Valdés</title>
 <style>
   html, body {{ margin: 0; height: 100%; background: #05080b; overflow: hidden; }}
 {head_styles}
@@ -129,7 +154,7 @@ def build(local=False):
 <canvas id="viewport"></canvas>
 <div id="loading">
   <div class="spinner"></div>
-  <h1>Still Waters</h1>
+  <h1>Aguas de Valdés</h1>
   <p id="loading-text">Cargando el lago…</p>
 </div>
 

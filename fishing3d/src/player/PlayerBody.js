@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { damp, clamp, lerp } from '../core/MathUtils.js';
+import { sharedGeometry, capsuleLimb } from '../core/GeometryUtils.js';
 
 /**
  * Cuerpo del pescador, animado por código.
@@ -21,13 +22,6 @@ const SKIN = 0xd7ab84;
 const COAT = 0x2c4a5e;
 const TROUSERS = 0x3a4048;
 const HAT = 0x7a6a3c;
-
-function limb(material, radius, length) {
-  const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(radius, length, 4, 8), material);
-  mesh.position.y = -length / 2 - radius * 0.5;   // cuelga de la articulación
-  mesh.castShadow = true;
-  return mesh;
-}
 
 export class PlayerBody {
   constructor() {
@@ -74,12 +68,12 @@ export class PlayerBody {
       const shoulder = new THREE.Group();
       shoulder.position.set(sign * 0.23, 0.44, 0);
       this.torso.add(shoulder);
-      shoulder.add(limb(coat, 0.055, 0.26));
+      shoulder.add(capsuleLimb(coat, 0.055, 0.26));
 
       const elbow = new THREE.Group();
       elbow.position.y = -0.33;
       shoulder.add(elbow);
-      elbow.add(limb(skin, 0.048, 0.24));
+      elbow.add(capsuleLimb(skin, 0.048, 0.24));
 
       this.arms[side] = { shoulder, elbow };
     }
@@ -118,12 +112,12 @@ export class PlayerBody {
       const hip = new THREE.Group();
       hip.position.set(sign * 0.11, 0, 0);
       this.hips.add(hip);
-      hip.add(limb(trousers, 0.075, 0.34));
+      hip.add(capsuleLimb(trousers, 0.075, 0.34));
 
       const knee = new THREE.Group();
       knee.position.y = -0.42;
       hip.add(knee);
-      knee.add(limb(trousers, 0.062, 0.32));
+      knee.add(capsuleLimb(trousers, 0.062, 0.32));
 
       const foot = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.06, 0.24), coat);
       foot.position.set(0, -0.42, 0.05);

@@ -1,5 +1,5 @@
 <meta charset="utf-8">
-<title>Still Waters</title>
+<title>Aguas de Valdés</title>
 <style>
   html, body { margin: 0; height: 100%; background: #05080b; overflow: hidden; }
 
@@ -21,7 +21,7 @@
 <canvas id="viewport"></canvas>
 <div id="loading">
   <div class="spinner"></div>
-  <h1>Still Waters</h1>
+  <h1>Aguas de Valdés</h1>
   <p id="loading-text">Cargando el lago…</p>
 </div>
 
@@ -178,6 +178,29 @@ function crossPlanes(width, height, upBias = 0) {
     normals.needsUpdate = true;
   }
   return merged;
+}
+
+/**
+ * Geometrías cacheadas por clave. Los cuerpos —jugador y personajes— se montan
+ * todos con las mismas cápsulas y esferas: crear una malla nueva por persona
+ * era gastar memoria y llamadas de dibujo para nada.
+ */
+const SHARED = new Map();
+function sharedGeometry(key, build) {
+  let g = SHARED.get(key);
+  if (!g) { g = build(); SHARED.set(key, g); }
+  return g;
+}
+
+/** Segmento de extremidad que cuelga de su articulación. */
+function capsuleLimb(material, radius, length, { shadows = true } = {}) {
+  const mesh = new THREE.Mesh(
+    sharedGeometry(`limb:${radius}:${length}`, () => new THREE.CapsuleGeometry(radius, length, 4, 8)),
+    material
+  );
+  mesh.position.y = -length / 2 - radius * 0.5;
+  mesh.castShadow = shadows;
+  return mesh;
 }
 
 /* ===== src/core/Settings.js ===== */
@@ -493,37 +516,105 @@ class Input {
 
 /* ===== src/world/Zones.js ===== */
 /**
- * Zonas de pesca.
+ * Zonas de pesca de la Cuenca de Valdés.
  *
- * Cada zona es un juego de parámetros: forma del lago, paleta, especies
- * presentes y precio de acceso. El mundo entero se construye a partir de
- * estos datos, así que añadir una zona nueva no toca ni el motor ni la UI.
+ * Cada zona es un juego de parámetros: forma del agua, relieve, paleta,
+ * especies presentes, ambiente y cómo se desbloquea. El mundo entero se
+ * construye a partir de estos datos, así que añadir un mapa nuevo no toca ni
+ * el motor ni la interfaz.
+ *
+ * `unlock` describe la puerta de entrada:
+ *   { free: true }            se entra desde el principio
+ *   { price, level }          hay que pagar el permiso y tener nivel
+ *   { quest }                 la abre la historia, no el dinero
  */
 
 const ZONES = [
   {
     id: 'lago_niebla',
     name: 'Lago de la Niebla',
-    description: 'Aguas mansas rodeadas de arboleda. El sitio donde se aprende.',
+    short: 'El lago',
+    description: 'Aguas mansas rodeadas de arboleda. Aquí tenía su cabaña la abuela.',
+    unlock: { free: true },
     price: 0,
-    terrain: { seed: 20260908, lakeRadius: 118, maxDepth: 9.5, hillHeight: 26 },
-    species: ['perca_negra', 'trucha_arcoiris', 'carpa_comun', 'lucio', 'siluro', 'tenca'],
+    terrain: { shape: 'lago', seed: 20260908, lakeRadius: 118, maxDepth: 9.5, hillHeight: 26,
+      bedShallow: 0x7d7150, bedDeep: 0x3a3524 },
+    species: ['perca_negra', 'trucha_arcoiris', 'carpa_comun', 'lucio', 'siluro', 'tenca', 'anguila'],
     vegetation: { grass: 1, trees: 420, conifer: 0.38 },
     palette: { grass: 0x53703a, water: 0x0d2630 },
+    lighting: { ambient: 1, hemi: 1, sun: 1 },
     weather: 'despejado',
-    startHour: 9.4
+    startHour: 9.4,
+    ambientNote: 'El agua huele a barro tibio y a juncos.'
+  },
+  {
+    id: 'rio_trenzado',
+    name: 'Río Trenzado',
+    short: 'El río',
+    description: 'Corriente viva entre gravas. El pez está donde el agua se remansa.',
+    unlock: { price: 450, level: 2 },
+    price: 450,
+    terrain: { shape: 'rio', seed: 553021, lakeRadius: 150, maxDepth: 6.8, hillHeight: 30, channelWidth: 36, meander: 48,
+      bedShallow: 0x9c9377, bedDeep: 0x55583f },   // grava clara
+    species: ['barbo', 'trucha_comun', 'trucha_arcoiris', 'salmon', 'perca_negra', 'anguila'],
+    vegetation: { grass: 0.9, trees: 470, conifer: 0.5 },
+    palette: { grass: 0x50713c, water: 0x1d3b30 },
+    lighting: { ambient: 1.05, hemi: 1.0, sun: 1.0 },
+    weather: 'despejado',
+    startHour: 8.1,
+    ambientNote: 'El rumor del agua tapa cualquier otro ruido.'
+  },
+  {
+    id: 'marisma_argan',
+    name: 'Marisma de Argán',
+    short: 'La marisma',
+    description: 'Lámina somera sembrada de islotes. Cubre poco y esconde mucho.',
+    unlock: { price: 1200, level: 4 },
+    price: 1200,
+    terrain: { shape: 'marisma', seed: 128877, lakeRadius: 152, maxDepth: 3.6, hillHeight: 16,
+      bedShallow: 0x6a6a41, bedDeep: 0x333a24 },   // fango con vegetación
+    species: ['tenca', 'anguila', 'lucio', 'carpa_comun', 'carpa_espejo', 'perca_negra'],
+    vegetation: { grass: 1.25, trees: 300, conifer: 0.12 },
+    palette: { grass: 0x4d6b33, water: 0x22301d },
+    lighting: { ambient: 1.1, hemi: 1.15, sun: 0.95 },
+    weather: 'niebla',
+    startHour: 6.4,
+    ambientNote: 'Niebla baja, ranas y un olor a agua parada.'
   },
   {
     id: 'embalse_alto',
     name: 'Embalse Alto',
+    short: 'El embalse',
     description: 'Agua fría y honda entre coníferas. Menos peces, pero más grandes.',
-    price: 2500,
-    terrain: { seed: 771145, lakeRadius: 146, maxDepth: 16, hillHeight: 44 },
-    species: ['trucha_arcoiris', 'trucha_comun', 'lucio', 'lucioperca', 'siluro'],
+    unlock: { price: 2600, level: 6 },
+    price: 2600,
+    terrain: { shape: 'lago', seed: 771145, lakeRadius: 146, maxDepth: 17, hillHeight: 44,
+      bedShallow: 0x6e6f63, bedDeep: 0x24291f },   // roca sumergida
+    species: ['trucha_arcoiris', 'trucha_comun', 'trucha_lacustre', 'lucio', 'lucioperca', 'siluro'],
     vegetation: { grass: 0.7, trees: 520, conifer: 0.82 },
-    palette: { grass: 0x46613a, water: 0x0a2028 },
+    palette: { grass: 0x46613a, water: 0x0d2733 },
+    lighting: { ambient: 1.0, hemi: 1.05, sun: 1.0 },
     weather: 'nubes',
-    startHour: 7.2
+    startHour: 7.2,
+    ambientNote: 'El viento baja de la sierra y riza el agua sin descanso.'
+  },
+  {
+    id: 'garganta',
+    name: 'La Garganta',
+    short: 'La garganta',
+    description: 'Un tajo de roca donde el agua no ve el sol. Lo último que anotó Remedios.',
+    unlock: { quest: 'cap5_garganta' },
+    price: 0,
+    terrain: { shape: 'garganta', seed: 990413, lakeRadius: 112, maxDepth: 24, hillHeight: 62, channelWidth: 27, meander: 30,
+      bedShallow: 0x60625c, bedDeep: 0x14170f },   // pizarra
+    species: ['lucioperca', 'siluro', 'trucha_lacustre', 'esturion', 'anguila', 'sombra_valdes'],
+    vegetation: { grass: 0.35, trees: 260, conifer: 0.9 },
+    palette: { grass: 0x3d5236, water: 0x11303a },
+    // Las paredes tapan el cielo: sin este empujón la garganta es una foto en negro.
+    lighting: { ambient: 2.6, hemi: 2.2, sun: 1.35, exposure: 1.35 },
+    weather: 'nubes',
+    startHour: 5.6,
+    ambientNote: 'Aquí abajo el eco devuelve tu propia respiración.'
   }
 ];
 
@@ -531,6 +622,23 @@ const ZONES_BY_ID = Object.fromEntries(ZONES.map((z) => [z.id, z]));
 
 function zoneOf(id) {
   return ZONES_BY_ID[id] || ZONES[0];
+}
+
+/**
+ * Por qué no se puede entrar todavía, o `null` si se puede.
+ * `progress` es el objeto de progresión (nivel, dinero) y `quests` el diario.
+ */
+function lockReason(zone, progress, quests) {
+  if (zone.unlock.free) return null;
+  if (zone.unlock.quest) {
+    return quests?.isUnlocked?.(zone.unlock.quest)
+      ? null
+      : 'Aún no sabes cómo se llega hasta ahí';
+  }
+  if (zone.unlock.level && progress.level < zone.unlock.level) {
+    return `Necesitas nivel ${zone.unlock.level}`;
+  }
+  return null;
 }
 
 /* ===== src/world/Textures.js ===== */
@@ -884,6 +992,14 @@ class TextureLibrary {
  * del jugador— consulten el relieve sin tocar la escena.
  *
  * Convenio: el nivel del agua es y = 0. Todo lo negativo está sumergido.
+ *
+ * Hay cuatro formas de agua, y no son variaciones cosméticas: cambian dónde
+ * están los peces, cómo se lanza y hasta si hay corriente.
+ *
+ *   lago      cuenca redondeada, orilla suave, hoya en el centro
+ *   rio       canal que serpentea de sur a norte, con corriente y pozas
+ *   marisma   lámina ancha y somera sembrada de islotes
+ *   garganta  cañón estrecho de paredes verticales y agua muy honda
  */
 
 const WATER_LEVEL = 0;
@@ -892,43 +1008,138 @@ function createHeightField({
   size = 520,            // lado del mapa en metros
   resolution = 320,      // vértices por lado
   seed = 20260908,
-  lakeRadius = 118,      // radio medio del lago
-  maxDepth = 9.5,        // profundidad máxima en el centro
-  hillHeight = 26
+  shape = 'lago',
+  lakeRadius = 118,      // radio medio del agua (también acota dónde nacen los peces)
+  maxDepth = 9.5,        // profundidad máxima
+  hillHeight = 26,
+  channelWidth = 34,     // sólo río y garganta: media anchura del cauce
+  meander = 46           // sólo río: cuánto se desvía el cauce
 } = {}) {
   const noise = makeValueNoise2D(seed);
   const heights = new Float32Array(resolution * resolution);
   const step = size / (resolution - 1);
   const half = size / 2;
 
-  /** Radio del lago para un ángulo dado: contorno irregular, no un círculo. */
+  /** Radio del agua para un ángulo dado: contorno irregular, no un círculo. */
   function shoreRadius(angle) {
     const wobble = fbm(noise, Math.cos(angle) * 2.4 + 40, Math.sin(angle) * 2.4 + 40, 3, 0.55);
     const lobe = Math.sin(angle * 2.0 + 0.7) * 0.09 + Math.sin(angle * 3.0 - 1.4) * 0.06;
     return lakeRadius * (0.78 + 0.42 * wobble + lobe);
   }
 
-  function sample(x, z) {
-    const dist = Math.hypot(x, z);
-    const angle = Math.atan2(z, x);
-    const shore = shoreRadius(angle);
-    const t = dist / shore;
-    const detail = (fbm(noise, x * 0.055, z * 0.055, 3, 0.5) - 0.5) * 0.9;
+  /** Eje del cauce: x del centro del canal para una z dada. */
+  function channelCenter(z) {
+    return Math.sin(z * 0.0125) * meander
+      + Math.sin(z * 0.0295 + 1.7) * meander * 0.35
+      + (fbm(noise, z * 0.004 + 11, 3.5, 3, 0.5) - 0.5) * meander * 0.5;
+  }
 
-    if (t < 1) {
-      // Cuenca: repisa poco profunda junto a la orilla y hoya en el centro.
-      const bowl = Math.pow(1 - t * t, 1.45);
-      const shelf = smoothstep(1, 0.86, t) * 0.75;   // bajío pegado a la orilla
-      const bed = (fbm(noise, x * 0.021, z * 0.021, 4, 0.5) - 0.5) * 2.1 * (1 - t * 0.7);
-      return -maxDepth * bowl + shelf + bed + detail * 0.35;
+  /** Derivada del eje: sirve para saber hacia dónde corre el agua. */
+  function channelSlope(z) {
+    const d = 2;
+    return (channelCenter(z + d) - channelCenter(z - d)) / (2 * d);
+  }
+
+  const SHAPES = {
+    /** Cuenca clásica: repisa junto a la orilla, hoya en el centro. */
+    lago(x, z, detail) {
+      const dist = Math.hypot(x, z);
+      const t = dist / shoreRadius(Math.atan2(z, x));
+      if (t < 1) {
+        const bowl = Math.pow(1 - t * t, 1.45);
+        const shelf = smoothstep(1, 0.86, t) * 0.75;
+        const bed = (fbm(noise, x * 0.021, z * 0.021, 4, 0.5) - 0.5) * 2.1 * (1 - t * 0.7);
+        return -maxDepth * bowl + shelf + bed + detail * 0.35;
+      }
+      const rise = t - 1;
+      return smoothstep(0, 0.05, rise) * 0.9
+        + smoothstep(0.03, 0.42, rise) * 5.5
+        + fbm(noise, x * 0.0075 + 5, z * 0.0075 + 5, 5, 0.52) * hillHeight * smoothstep(0.12, 1.1, rise)
+        + detail;
+    },
+
+    /**
+     * Canal que serpentea. La profundidad no es simétrica: el agua excava la
+     * orilla exterior de cada curva y deposita grava en la interior, que es
+     * exactamente donde un pescador busca las pozas.
+     */
+    rio(x, z, detail) {
+      const center = channelCenter(z);
+      const slope = channelSlope(z);
+      const offset = x - center;
+      // Ancho variable: estrechos rápidos y ensanches remansados.
+      const width = channelWidth * (0.72 + fbm(noise, z * 0.006 + 31, 7.3, 3, 0.5) * 0.7);
+      const t = Math.abs(offset) / width;
+
+      if (t < 1) {
+        // El signo de la pendiente dice hacia qué lado empuja la corriente.
+        const outer = clamp(offset * slope * 0.09, -0.45, 0.45);
+        const profile = Math.pow(1 - t * t, 0.9) * (1 + outer);
+        // Pozas y tablas: el fondo sube y baja a lo largo del cauce.
+        const pools = (fbm(noise, z * 0.012 + 3, x * 0.01, 3, 0.55) - 0.45) * maxDepth * 0.75;
+        return -maxDepth * profile + pools + detail * 0.3;
+      }
+      const rise = t - 1;
+      return smoothstep(0, 0.08, rise) * 1.1
+        + smoothstep(0.05, 0.7, rise) * 6.5
+        + fbm(noise, x * 0.0068 + 9, z * 0.0068 + 2, 5, 0.5) * hillHeight * smoothstep(0.2, 1.6, rise)
+        + detail;
+    },
+
+    /**
+     * Lámina ancha y somera con islotes de juncal. Casi todo cubre por la
+     * rodilla; lo interesante son los canales entre islas.
+     */
+    marisma(x, z, detail) {
+      const dist = Math.hypot(x, z);
+      const t = dist / (shoreRadius(Math.atan2(z, x)) * 1.06);
+      // Islotes: manchas de ruido que asoman por encima del agua.
+      const isles = fbm(noise, x * 0.019 + 17, z * 0.019 + 17, 4, 0.55);
+      const isleHeight = Math.pow(clamp((isles - 0.53) * 3.4, 0, 1), 1.35) * 2.2;
+      if (t < 1) {
+        const basin = Math.pow(1 - t * t, 0.55);
+        // Canales: vetas hondas que cruzan la marisma.
+        const veins = Math.pow(1 - Math.abs(fbm(noise, x * 0.0085, z * 0.0085, 3, 0.5) - 0.5) * 2, 7);
+        const bed = -maxDepth * basin * (0.42 + veins * 0.85);
+        return bed + isleHeight + detail * 0.4;
+      }
+      const rise = t - 1;
+      return smoothstep(0, 0.06, rise) * 0.7
+        + smoothstep(0.04, 0.5, rise) * 3.2
+        + fbm(noise, x * 0.009 + 4, z * 0.009 + 8, 5, 0.5) * hillHeight * smoothstep(0.15, 1.2, rise)
+        + isleHeight * 0.4 + detail;
+    },
+
+    /**
+     * Cañón: agua muy honda entre paredes casi verticales. La escala se lee
+     * mirando hacia arriba, no hacia los lados.
+     */
+    garganta(x, z, detail) {
+      const center = channelCenter(z) * 0.55;
+      const offset = x - center;
+      const width = channelWidth * (0.85 + fbm(noise, z * 0.009 + 5, 2.2, 3, 0.5) * 0.4);
+      const t = Math.abs(offset) / width;
+      if (t < 1) {
+        // Fondo casi plano, paredes que caen a plomo.
+        const floor = Math.pow(1 - Math.pow(t, 5), 0.55);
+        const rubble = (fbm(noise, x * 0.03, z * 0.02, 3, 0.5) - 0.5) * maxDepth * 0.2;
+        return -maxDepth * floor + rubble + detail * 0.25;
+      }
+      const rise = t - 1;
+      // Repisas escalonadas: la pared no es una rampa lisa.
+      const ledges = Math.sin(rise * 9 + fbm(noise, x * 0.02, z * 0.02, 2, 0.5) * 4) * 1.6;
+      return smoothstep(0, 0.03, rise) * 2.5
+        + Math.pow(smoothstep(0.0, 0.9, rise), 0.65) * hillHeight
+        + ledges * smoothstep(0.05, 0.35, rise)
+        + detail * 1.4;
     }
+  };
 
-    const rise = t - 1;
-    const beach = smoothstep(0, 0.05, rise) * 0.9;
-    const bank = smoothstep(0.03, 0.42, rise) * 5.5;
-    const hills = fbm(noise, x * 0.0075 + 5, z * 0.0075 + 5, 5, 0.52) * hillHeight
-      * smoothstep(0.12, 1.1, rise);
-    return beach + bank + hills + detail;
+  const shapeFn = SHAPES[shape] || SHAPES.lago;
+
+  function sample(x, z) {
+    const detail = (fbm(noise, x * 0.055, z * 0.055, 3, 0.5) - 0.5) * 0.9;
+    return shapeFn(x, z, detail);
   }
 
   for (let j = 0; j < resolution; j++) {
@@ -961,10 +1172,37 @@ function createHeightField({
   const depthAt = (x, z) => Math.max(0, WATER_LEVEL - heightAt(x, z));
   const isSubmerged = (x, z) => heightAt(x, z) < WATER_LEVEL;
 
+  /**
+   * Corriente en un punto, en m/s. Sólo el río la tiene: sigue el eje del
+   * cauce, es más viva en el centro y en los estrechos, y se para en la orilla.
+   * Devuelve `out` para no crear vectores en el bucle de simulación.
+   */
+  const flowSpeed = shape === 'rio' ? 1 : 0;
+  function flowAt(x, z, out = { x: 0, z: 0 }) {
+    out.x = 0; out.z = 0;
+    if (!flowSpeed) return out;
+    const center = channelCenter(z);
+    const width = channelWidth * (0.72 + fbm(noise, z * 0.006 + 31, 7.3, 3, 0.5) * 0.7);
+    const t = Math.abs(x - center) / width;
+    if (t >= 1) return out;
+    const depth = depthAt(x, z);
+    if (depth < 0.15) return out;
+    // Más rápido en el centro y donde el cauce se estrecha; las pozas hondas
+    // van más lentas, que es lo que las hace buenas para pescar.
+    const across = Math.pow(1 - t * t, 0.7);
+    const narrow = clamp(channelWidth / width, 0.6, 1.6);
+    const strength = 1.5 * across * narrow / (1 + depth * 0.10);
+    const slope = channelSlope(z);
+    const len = Math.hypot(slope, 1);
+    out.x = (slope / len) * strength;
+    out.z = (1 / len) * strength;      // el río corre hacia +Z
+    return out;
+  }
+
   return {
-    heights, resolution, size, step, half,
-    lakeRadius, maxDepth, waterLevel: WATER_LEVEL,
-    heightAt, slopeAt, depthAt, isSubmerged, shoreRadius
+    heights, resolution, size, step, half, shape,
+    lakeRadius, maxDepth, waterLevel: WATER_LEVEL, hasCurrent: flowSpeed > 0,
+    heightAt, slopeAt, depthAt, isSubmerged, shoreRadius, flowAt, channelCenter
   };
 }
 
@@ -991,6 +1229,9 @@ class Terrain {
   constructor(textures, options = {}) {
     this.field = createHeightField(options);
     this.waterLevel = WATER_LEVEL;
+    const bedShallow = new THREE.Color(options.bedShallow ?? COLORS.fondo.getHex());
+    const bedDeep = new THREE.Color(options.bedDeep ?? COLORS.limo.getHex());
+    const deepAt = Math.max(2.5, (options.maxDepth ?? 9.5) * 0.62);
 
     const { resolution, size } = this.field;
     const geometry = new THREE.PlaneGeometry(size, size, resolution - 1, resolution - 1);
@@ -1011,8 +1252,10 @@ class Terrain {
       const variation = fbm(tint, x * 0.03, z * 0.03, 3, 0.5);
 
       if (h < -0.35) {
-        // Fondo del lago: arena en el bajío, limo oscuro en lo hondo.
-        color.copy(COLORS.fondo).lerp(COLORS.limo, smoothstep(-1.2, -5.5, h));
+        // Fondo: arena o grava en el bajío, limo oscuro en lo hondo. La
+        // profundidad a la que oscurece depende del calado de la zona, o un
+        // río de tres metros saldría tan negro como una hoya de veinte.
+        color.copy(bedShallow).lerp(bedDeep, smoothstep(-1.2, -deepAt, h));
       } else if (h < 0.85) {
         color.copy(COLORS.arena).lerp(COLORS.fondo, smoothstep(0.85, -0.35, h) * 0.55);
       } else {
@@ -1347,8 +1590,19 @@ class SkyDome {
     }
   }
 
+  /**
+   * Ajuste de luz propio de cada zona. Un cañón tapa el cielo y con la luz
+   * global de un lago abierto se queda a oscuras; una marisma abierta, al
+   * revés. Son multiplicadores sobre la iluminación calculada, no una luz
+   * distinta: el ciclo de día y la meteorología siguen mandando.
+   */
+  setZoneLighting({ ambient = 1, hemi = 1, sun = 1 } = {}) {
+    this.zoneLight = { ambient, hemi, sun };
+  }
+
   /** `focus` es la posición del jugador: la sombra se encaja a su alrededor. */
   update(time, weather, dt, focus = null) {
+    const zl = this.zoneLight ?? { ambient: 1, hemi: 1, sun: 1 };
     const sunDir = time.sunDirection;
     this.sky.material.uniforms.sunPosition.value.copy(sunDir).multiplyScalar(SKY_SCALE * 0.5);
     this.sky.material.uniforms.turbidity.value = lerp(2.2, 9, weather.cloudiness);
@@ -1368,7 +1622,7 @@ class SkyDome {
       this.sun.position.copy(sunDir).multiplyScalar(140);
     }
     this.sun.color.copy(time.sunColor);
-    this.sun.intensity = time.sunIntensity * overcast;
+    this.sun.intensity = time.sunIntensity * overcast * zl.sun;
     this.sun.visible = this.sun.intensity > 0.01;
 
     this.moon.position.copy(focus || new THREE.Vector3()).addScaledVector(time.moonDirection, 140);
@@ -1376,9 +1630,9 @@ class SkyDome {
     this.moon.visible = this.moon.intensity > 0.01;
 
     this.hemi.color.copy(time.skyColor);
-    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast;
+    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast * zl.hemi;
     this.ambient.color.copy(time.ambientColor);
-    this.ambient.intensity = lerp(1.2, 1.15, daylight);
+    this.ambient.intensity = lerp(1.2, 1.15, daylight) * zl.ambient;
 
     this.sky.material.uniforms.uNight.value = time.nightFactor * 0.88;
     this.sky.material.uniforms.uNightColor.value.copy(time.skyColor);
@@ -2058,6 +2312,9 @@ class InteractionSystem {
   /**
    * @param target.object   malla o grupo al que mirar
    * @param target.anchor   punto alternativo si no hay malla
+   * @param target.anchorHeight  altura sobre el origen del objeto a la que se
+   *        apunta. El origen de una persona está en los pies: apuntar ahí
+   *        obliga a mirar al suelo para hablar con ella.
    * @param target.range    distancia máxima en metros
    * @param target.label    texto del aviso; puede ser función
    * @param target.action   qué ocurre al interactuar
@@ -2080,7 +2337,11 @@ class InteractionSystem {
 
   _anchorOf(target, out) {
     if (target.anchor) return out.copy(target.anchor);
-    if (target.object) return target.object.getWorldPosition(out);
+    if (target.object) {
+      target.object.getWorldPosition(out);
+      if (target.anchorHeight) out.y += target.anchorHeight;
+      return out;
+    }
     return out.set(0, 0, 0);
   }
 
@@ -2144,6 +2405,298 @@ class InteractionSystem {
     if (!this.current) return false;
     this.current.action?.();
     return true;
+  }
+}
+
+/* ===== src/world/Npc.js ===== */
+/**
+ * Personajes del mundo.
+ *
+ * Mismo enfoque que el cuerpo del jugador: una jerarquía de articulaciones
+ * animada por código, sin esqueletos ni clips. Cada personaje respira, cambia
+ * el peso de pierna, mira alrededor y, cuando el jugador se acerca, gira la
+ * cabeza y el torso hacia él. No hay ni un solo NPC quieto como un poste.
+ *
+ * Sobre la cabeza llevan un indicador que dice si tienen algo que ofrecer.
+ */
+
+const MARKER_COLORS = { nueva: 0xf2c14e, entregar: 0x74d68a, hablar: 0x6fd3c7 };
+
+class Npc {
+  /** `data` es la ficha de StoryData; `spot` es {position, yaw}. */
+  constructor(data, spot, preset, { shadows = true } = {}) {
+    this.data = data;
+    this.id = data.id;
+    this.name = data.name;
+    this.homeYaw = spot.yaw;
+    this.rng = createRandom(data.id.length * 977 + data.name.length * 31);
+
+    const p = data.palette ?? {};
+    const skin = new THREE.MeshStandardMaterial({ color: p.skin ?? 0xd7ab84, roughness: 0.76 });
+    const coat = new THREE.MeshStandardMaterial({ color: p.coat ?? 0x39505f, roughness: 0.87 });
+    const trousers = new THREE.MeshStandardMaterial({ color: p.trousers ?? 0x33383f, roughness: 0.9 });
+    const hat = new THREE.MeshStandardMaterial({ color: p.hat ?? 0x7a6a3c, roughness: 0.92 });
+    this._materials = [skin, coat, trousers, hat];
+
+    this.root = new THREE.Group();
+    this.root.name = `npc:${data.id}`;
+    this.root.position.copy(spot.position);
+    this.root.rotation.y = spot.yaw;
+
+    // Estatura ligeramente distinta por personaje: no son clones.
+    this.height = 0.94 + this.rng() * 0.11;
+    this.root.scale.setScalar(this.height);
+
+    this.hips = new THREE.Group();
+    this.hips.position.y = 0.92;
+    this.root.add(this.hips);
+
+    this.torso = new THREE.Group();
+    this.hips.add(this.torso);
+    const chest = new THREE.Mesh(sharedGeometry('chest', () => new THREE.CapsuleGeometry(0.19, 0.32, 5, 10)), coat);
+    chest.position.y = 0.26;
+    chest.scale.z = 0.72;
+    chest.castShadow = shadows;
+    this.torso.add(chest);
+
+    this.neck = new THREE.Group();
+    this.neck.position.y = 0.52;
+    this.torso.add(this.neck);
+    const head = new THREE.Mesh(sharedGeometry('head', () => new THREE.SphereGeometry(0.132, 14, 12)), skin);
+    head.castShadow = shadows;
+    this.neck.add(head);
+    const brim = new THREE.Mesh(sharedGeometry('brim', () => new THREE.CylinderGeometry(0.24, 0.24, 0.02, 14)), hat);
+    brim.position.y = 0.072;
+    this.neck.add(brim);
+    const crown = new THREE.Mesh(sharedGeometry('crown', () => new THREE.SphereGeometry(0.125, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2)), hat);
+    crown.position.y = 0.075;
+    this.neck.add(crown);
+
+    this.arms = {};
+    for (const side of ['L', 'R']) {
+      const sign = side === 'L' ? -1 : 1;
+      const shoulder = new THREE.Group();
+      shoulder.position.set(sign * 0.225, 0.43, 0);
+      this.torso.add(shoulder);
+      shoulder.add(capsuleLimb(coat, 0.053, 0.25));
+      const elbow = new THREE.Group();
+      elbow.position.y = -0.32;
+      shoulder.add(elbow);
+      elbow.add(capsuleLimb(skin, 0.046, 0.23));
+      this.arms[side] = { shoulder, elbow };
+    }
+
+    this.legs = {};
+    for (const side of ['L', 'R']) {
+      const sign = side === 'L' ? -1 : 1;
+      const hip = new THREE.Group();
+      hip.position.set(sign * 0.105, 0, 0);
+      this.hips.add(hip);
+      hip.add(capsuleLimb(trousers, 0.072, 0.33));
+      const knee = new THREE.Group();
+      knee.position.y = -0.41;
+      hip.add(knee);
+      knee.add(capsuleLimb(trousers, 0.06, 0.31));
+      const foot = new THREE.Mesh(sharedGeometry('foot', () => new THREE.BoxGeometry(0.105, 0.058, 0.23)), coat);
+      foot.position.set(0, -0.41, 0.05);
+      foot.castShadow = shadows;
+      knee.add(foot);
+      this.legs[side] = { hip, knee };
+    }
+
+    this._buildMarker();
+
+    // Estado de animación.
+    this.t = this.rng() * 20;
+    this.breath = 0;
+    this.weight = 0;             // -1 pierna izquierda, +1 derecha
+    this.weightTarget = 0;
+    this.weightTimer = 1 + this.rng() * 3;
+    this.lookYaw = 0;
+    this.lookPitch = 0;
+    this.glanceTimer = 2 + this.rng() * 4;
+    this.glanceYaw = 0;
+    this.attention = 0;          // 0 a lo suyo, 1 mirando al jugador
+    this.gesture = 0;            // realce del gesto al hablar
+  }
+
+  _buildMarker() {
+    this.marker = new THREE.Group();
+    this.marker.position.y = 1.86;
+    this.markerMaterial = new THREE.MeshBasicMaterial({
+      color: MARKER_COLORS.nueva, transparent: true, opacity: 0.95, depthWrite: false
+    });
+    const body = new THREE.Mesh(sharedGeometry('marker', () => new THREE.OctahedronGeometry(0.13, 0)), this.markerMaterial);
+    body.scale.y = 1.5;
+    this.marker.add(body);
+    this.marker.visible = false;
+    this.root.add(this.marker);
+  }
+
+  setMarker(kind) {
+    this.marker.visible = !!kind;
+    if (kind && MARKER_COLORS[kind]) this.markerMaterial.color.setHex(MARKER_COLORS[kind]);
+  }
+
+  /** Se llama mientras el personaje tiene la palabra: gesticula un poco más. */
+  speak() { this.gesture = 1; }
+
+  get position() { return this.root.position; }
+
+  /**
+   * `playerPosition` decide si el personaje está a lo suyo o pendiente de ti.
+   * Todo se amortigua: nadie gira la cabeza de golpe.
+   */
+  update(dt, playerPosition = null, talking = false) {
+    this.t += dt;
+
+    // Respiración: el torso sube y baja y el pecho se ensancha un poco.
+    this.breath = Math.sin(this.t * 1.05) * 0.5 + 0.5;
+    this.torso.position.y = this.breath * 0.011;
+    this.torso.scale.setScalar(1 + this.breath * 0.008);
+
+    // Cambio de peso de pierna, como quien lleva un rato de pie.
+    this.weightTimer -= dt;
+    if (this.weightTimer <= 0) {
+      this.weightTimer = 2.5 + this.rng() * 5;
+      this.weightTarget = (this.rng() - 0.5) * 1.6;
+    }
+    this.weight = damp(this.weight, this.weightTarget, 1.6, dt);
+    this.hips.position.y = 0.92 - Math.abs(this.weight) * 0.022;
+    this.hips.rotation.z = this.weight * 0.055;
+    this.hips.rotation.y = this.weight * 0.05;
+    this.legs.L.hip.rotation.x = this.weight * 0.09;
+    this.legs.R.hip.rotation.x = -this.weight * 0.09;
+    this.legs.L.knee.rotation.x = Math.max(0, this.weight) * 0.14;
+    this.legs.R.knee.rotation.x = Math.max(0, -this.weight) * 0.14;
+
+    // ¿Hay alguien cerca a quien atender?
+    let deseoYaw = 0, deseoPitch = 0, cerca = 0;
+    if (playerPosition) {
+      const dx = playerPosition.x - this.root.position.x;
+      const dz = playerPosition.z - this.root.position.z;
+      const dist = Math.hypot(dx, dz);
+      cerca = talking ? 1 : clamp((7.5 - dist) / 4.5, 0, 1);
+      if (cerca > 0.01) {
+        let delta = Math.atan2(dx, dz) - this.root.rotation.y;
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        // El cuello no gira 180°: si te pones detrás, sólo te sigue hasta donde puede.
+        deseoYaw = clamp(delta, -1.15, 1.15);
+        const dy = (playerPosition.y + 0.2) - (this.root.position.y + 1.55 * this.height);
+        deseoPitch = clamp(-Math.atan2(dy, Math.max(1, dist)), -0.35, 0.35);
+      }
+    }
+    this.attention = damp(this.attention, cerca, 3.4, dt);
+
+    // Con alguien delante no basta con girar el cuello: el cuerpo se vuelve.
+    // Sin esto, hablar con un personaje era hablarle a su espalda.
+    if (playerPosition && this.attention > 0.25) {
+      const dx = playerPosition.x - this.root.position.x;
+      const dz = playerPosition.z - this.root.position.z;
+      let delta = Math.atan2(dx, dz) - this.root.rotation.y;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      // Se gira sólo lo que el cuello no alcanza: mantiene su postura de
+      // trabajo si estás casi delante y se da la vuelta si estás detrás. En
+      // plena conversación se cuadra casi del todo, como hace cualquiera.
+      const margen = talking ? 0.16 : 0.55;
+      const resto = delta - clamp(delta, -margen, margen);
+      if (Math.abs(resto) > 0.01) {
+        this.root.rotation.y += resto * (1 - Math.exp(-3.2 * dt)) * this.attention;
+      }
+    } else if (playerPosition) {
+      // Cuando se va, vuelve poco a poco a su orientación de siempre.
+      let back = this.homeYaw - this.root.rotation.y;
+      while (back > Math.PI) back -= Math.PI * 2;
+      while (back < -Math.PI) back += Math.PI * 2;
+      this.root.rotation.y += back * (1 - Math.exp(-0.9 * dt));
+    }
+
+    // Cuando no atiende a nadie, echa vistazos alrededor.
+    this.glanceTimer -= dt;
+    if (this.glanceTimer <= 0) {
+      this.glanceTimer = 2.5 + this.rng() * 5.5;
+      this.glanceYaw = (this.rng() - 0.5) * 1.1;
+    }
+    const objetivoYaw = deseoYaw * this.attention + this.glanceYaw * (1 - this.attention);
+    const objetivoPitch = deseoPitch * this.attention + Math.sin(this.t * 0.37) * 0.05 * (1 - this.attention);
+    this.lookYaw = damp(this.lookYaw, objetivoYaw, 4.2, dt);
+    this.lookPitch = damp(this.lookPitch, objetivoPitch, 4.2, dt);
+    // El giro se reparte entre cuello y torso, como hace un cuerpo real.
+    this.neck.rotation.set(this.lookPitch, this.lookYaw * 0.62, this.lookYaw * 0.06);
+    this.torso.rotation.y = this.lookYaw * 0.34;
+
+    // Brazos: sueltos, con un balanceo mínimo. Al hablar, gesticulan.
+    this.gesture = damp(this.gesture, talking ? 1 : 0, talking ? 5 : 1.8, dt);
+    const idleSwing = Math.sin(this.t * 0.62) * 0.035;
+    const habla = Math.sin(this.t * 4.3) * 0.5 + Math.sin(this.t * 2.7 + 1.1) * 0.35;
+    this.arms.R.shoulder.rotation.set(
+      idleSwing + this.gesture * (0.28 + habla * 0.34), 0, -0.09 - this.gesture * 0.22
+    );
+    this.arms.R.elbow.rotation.x = -0.22 - this.gesture * (0.75 + habla * 0.3);
+    this.arms.L.shoulder.rotation.set(
+      -idleSwing + this.gesture * (0.14 + habla * 0.16), 0, 0.09 + this.gesture * 0.1
+    );
+    this.arms.L.elbow.rotation.x = -0.2 - this.gesture * 0.4;
+
+    // El indicador flota y gira: se ve desde lejos sin ser un cartel.
+    if (this.marker.visible) {
+      this.marker.rotation.y += dt * 1.5;
+      this.marker.position.y = 1.86 + Math.sin(this.t * 1.9) * 0.06;
+    }
+  }
+
+  dispose() {
+    // Las geometrías son compartidas: sólo se sueltan los materiales, que sí
+    // son propios de cada personaje.
+    this._materials.forEach((m) => m.dispose());
+    this.markerMaterial.dispose();
+    this.root.parent?.remove(this.root);
+  }
+}
+
+/**
+ * Los personajes de una zona. Se reconstruye con el mundo, igual que los
+ * árboles: cada zona tiene los suyos.
+ */
+class NpcCrew {
+  constructor(scene, npcList, props, preset) {
+    this.scene = scene;
+    this.group = new THREE.Group();
+    this.group.name = 'personajes';
+    scene.add(this.group);
+    this.npcs = [];
+    // Si dos personajes comparten sitio, el segundo se aparta un paso.
+    const usados = new Map();
+    for (const data of npcList) {
+      const anchor = props.npcAnchors?.[data.anchor] ?? props.npcAnchors?.orilla;
+      if (!anchor) continue;
+      const n = usados.get(data.anchor) ?? 0;
+      usados.set(data.anchor, n + 1);
+      const spot = {
+        position: anchor.position.clone().add(
+          new THREE.Vector3(Math.cos(n * 2.1) * n * 1.6, 0, Math.sin(n * 2.1) * n * 1.6)
+        ),
+        yaw: anchor.yaw + (n ? 0.4 : 0)
+      };
+      spot.position.y = props.terrain.heightAt(spot.position.x, spot.position.z);
+      const npc = new Npc(data, spot, preset, { shadows: preset.shadows });
+      this.group.add(npc.root);
+      this.npcs.push(npc);
+    }
+  }
+
+  byId(id) { return this.npcs.find((n) => n.id === id) ?? null; }
+
+  update(dt, playerPosition, talkingId = null) {
+    for (const npc of this.npcs) npc.update(dt, playerPosition, npc.id === talkingId);
+  }
+
+  dispose() {
+    this.npcs.forEach((n) => n.dispose());
+    this.npcs.length = 0;
+    this.scene.remove(this.group);
   }
 }
 
@@ -2388,27 +2941,125 @@ class Props {
     const wood = textures.material('madera', { repeat: 2 });
     const plank = textures.material('madera', { repeat: 1 });
 
-    this.dock = this._buildDock(Math.PI * 0.18, wood, plank, preset);
+    // El sitio del muelle no es un ángulo fijo: se busca una orilla con buen
+    // calado delante. Un ángulo fijo funcionaba en un lago redondo y ponía el
+    // muelle contra la pared en un cañón o cruzado en mitad del río.
+    const dockAngle = this._bestShoreAngle({ idealDepth: 2.6, reach: 13 });
+    this.dock = this._buildDock(dockAngle, wood, plank, preset);
     // La barca navegable la crea Game (necesita interactuar con el jugador);
     //     aquí sólo se decide dónde está fondeada.
-    this.boatAnchor = this.shorePoint(Math.PI * 0.62, -0.9);
+    this.boatAnchor = this.shorePoint(
+      this._bestShoreAngle({ idealDepth: 1.6, reach: 8, avoid: [dockAngle] }), -0.9
+    );
     this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
-    this._buildCamp(Math.PI * -0.35, wood, textures, preset);
+    this._buildCamp(this._bestShoreAngle({ idealDepth: 1.2, reach: 7, avoid: [dockAngle] }),
+      wood, textures, preset);
     this._buildSign(wood, preset);
     this._buildBucket(preset);
+    this._placeNpcAnchors();
   }
 
-  /** Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`). */
+  /**
+   * Sitios donde puede plantarse un personaje: en tierra firme, mirando al
+   * agua y sin pisar la construcción a la que pertenecen. Se calculan sobre el
+   * relieve real, así que valen igual en un lago, un río o un cañón.
+   */
+  _placeNpcAnchors() {
+    const yaw = (p) => Math.atan2(p.x, p.z) + Math.PI;   // mirando al agua
+    const seco = (p, empuje) => {
+      // Se aparta hacia tierra hasta pisar seco: nadie atiende con los pies
+      // dentro del agua.
+      const dir = new THREE.Vector2(p.x, p.z).normalize();
+      let best = p.clone();
+      for (let d = 0; d <= 9; d += 0.75) {
+        const x = p.x + dir.x * (empuje + d);
+        const z = p.z + dir.y * (empuje + d);
+        const h = this.terrain.heightAt(x, z);
+        best = new THREE.Vector3(x, h, z);
+        if (h > 0.45) break;
+      }
+      return best;
+    };
+
+    const junto = (obj, dx, dz) => {
+      const w = obj.localToWorld(new THREE.Vector3(dx, 0, dz));
+      return seco(new THREE.Vector3(w.x, 0, w.z), 0);
+    };
+
+    // Se apartan de la construcción a la que pertenecen: plantados encima, el
+    // personaje tapaba el objeto y robaba la mirada al apuntar con la vista.
+    const alLado = (p, dx, dz) => seco(new THREE.Vector3(p.x + dx, 0, p.z + dz), 0);
+    this.npcAnchors = {
+      muelle: { position: junto(this.dockObject, 2.6, 1.2), yaw: null },
+      campamento: { position: alLado(seco(this.camp.position.clone(), 2.4), 2.6, -2.2), yaw: null },
+      cartel: { position: alLado(seco(this.sign.position.clone(), 1.6), -2.4, 1.9), yaw: null },
+      orilla: { position: seco(this.shorePoint(Math.PI * 0.9, 0.6), 1.6), yaw: null }
+    };
+    for (const a of Object.values(this.npcAnchors)) {
+      a.position.y = this.terrain.heightAt(a.position.x, a.position.z);
+      a.yaw = yaw(a.position);
+    }
+  }
+
+  /**
+   * Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`).
+   *
+   * Marcha hacia fuera y se queda en el primer cruce en vez de bisecar: la
+   * bisección da por hecho que el agua está dentro y la tierra fuera, y eso
+   * sólo vale para un lago redondo. Un río serpenteante, una marisma con
+   * islotes o un cañón cruzan esa frontera varias veces.
+   */
   shorePoint(angle, targetHeight = 0.35) {
     const dir = new THREE.Vector2(Math.cos(angle), Math.sin(angle));
-    let lo = 0, hi = this.terrain.field.half - 10;
-    for (let i = 0; i < 40; i++) {
-      const mid = (lo + hi) / 2;
-      const h = this.terrain.heightAt(dir.x * mid, dir.y * mid);
-      if (h < targetHeight) lo = mid; else hi = mid;
+    const limit = this.terrain.field.half - 10;
+    const at = (r) => this.terrain.heightAt(dir.x * r, dir.y * r);
+    const step = 1.5;
+    let prevR = 0, prevH = at(0);
+    let fallback = null;
+    for (let r = step; r <= limit; r += step) {
+      const h = at(r);
+      if (prevH < targetHeight && h >= targetHeight) {
+        // Afinar el cruce entre los dos últimos pasos.
+        let lo = prevR, hi = r;
+        for (let i = 0; i < 24; i++) {
+          const mid = (lo + hi) / 2;
+          if (at(mid) < targetHeight) lo = mid; else hi = mid;
+        }
+        const found = (lo + hi) / 2;
+        return new THREE.Vector3(dir.x * found, at(found), dir.y * found);
+      }
+      if (fallback === null && Math.abs(h - targetHeight) < 0.6) fallback = r;
+      prevR = r; prevH = h;
     }
-    const r = (lo + hi) / 2;
-    return new THREE.Vector3(dir.x * r, this.terrain.heightAt(dir.x * r, dir.y * r), dir.y * r);
+    const r = fallback ?? limit * 0.5;
+    return new THREE.Vector3(dir.x * r, at(r), dir.y * r);
+  }
+
+  /**
+   * Mejor ángulo de orilla para una construcción: se recorre el contorno y se
+   * puntúa cada punto por el calado que hay `reach` metros mar adentro. Lo
+   * ideal es una orilla con `idealDepth` delante, ni un bajío ni un tajo.
+   */
+  _bestShoreAngle({ idealDepth = 2.5, reach = 12, avoid = [], samples = 48 } = {}) {
+    let best = 0, bestScore = -Infinity;
+    for (let i = 0; i < samples; i++) {
+      const angle = (i / samples) * Math.PI * 2;
+      const shore = this.shorePoint(angle, 0.55);
+      if (shore.y < 0.2) continue;                      // no encontró tierra
+      const inward = { x: -Math.cos(angle), z: -Math.sin(angle) };
+      const depth = this.terrain.depthAt(shore.x + inward.x * reach, shore.z + inward.z * reach);
+      if (depth < 0.4) continue;                        // delante no hay agua
+      // Pendiente suave detrás: no se construye contra una pared.
+      const back = this.terrain.heightAt(shore.x - inward.x * 6, shore.z - inward.z * 6);
+      let score = -Math.abs(depth - idealDepth) - Math.max(0, back - shore.y - 4) * 0.6;
+      for (const other of avoid) {
+        let d = Math.abs(angle - other);
+        if (d > Math.PI) d = Math.PI * 2 - d;
+        score -= Math.max(0, 1.2 - d) * 4;              // separados entre sí
+      }
+      if (score > bestScore) { bestScore = score; best = angle; }
+    }
+    return best;
   }
 
   _buildDock(angle, wood, plankMat, preset) {
@@ -2418,7 +3069,14 @@ class Props {
     dock.position.copy(shore);
     dock.lookAt(shore.clone().add(inward));
 
-    const length = 15;
+    // El muelle llega hasta donde el fondo aún es alcanzable con pilotes: en
+    // un lago son quince metros de tablero; sobre una hoya, mucho menos.
+    let length = 15;
+    for (let l = 15; l >= 4; l -= 1) {
+      const tip = dock.localToWorld(new THREE.Vector3(0, 0, l - 1.5));
+      if (this.terrain.depthAt(tip.x, tip.z) <= 12) { length = l; break; }
+      length = 4;
+    }
     const width = 2.6;
     const deckY = 1.15;
 
@@ -2447,8 +3105,9 @@ class Props {
 
     // Pilotes hasta el fondo
     const pileGeo = new THREE.CylinderGeometry(0.14, 0.16, 1, 7);
-    for (let i = 0; i < 5; i++) {
-      const t = 0.7 + i * 3.4;
+    const piles = Math.max(2, Math.round(length / 3.4));
+    for (let i = 0; i < piles; i++) {
+      const t = 0.7 + i * (length - 1.4) / Math.max(1, piles - 1);
       [-width / 2 + 0.2, width / 2 - 0.2].forEach((x) => {
         const world = dock.localToWorld(new THREE.Vector3(x, 0, t));
         const bed = this.terrain.heightAt(world.x, world.z);
@@ -2544,8 +3203,11 @@ class Props {
   _buildBucket(preset) {
     const metal = new THREE.MeshStandardMaterial({ color: 0x7d838a, roughness: 0.5, metalness: 0.6 });
     const bucket = new THREE.Group();
+    // Apartado del fuego: pegados, la mirada no podía distinguir uno de otro y
+    // el aviso siempre era el del fuego.
     const spot = this.camp.position;
-    bucket.position.set(spot.x + 1.1, this.terrain.heightAt(spot.x + 1.1, spot.z - 0.7) + 0.16, spot.z - 0.7);
+    const bx = spot.x - 2.4, bz = spot.z + 1.5;
+    bucket.position.set(bx, this.terrain.heightAt(bx, bz) + 0.16, bz);
 
     const body = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.13, 0.3, 12, 1, true), metal);
     body.castShadow = preset.shadows;
@@ -2651,8 +3313,16 @@ class Boat {
   }
 
   /** ¿Está el jugador lo bastante cerca para subirse? */
+  /**
+   * Distancia en planta, no en el espacio: el jugador vadeando está medio metro
+   * por encima del casco flotando, y contar ese desnivel dejaba el fondeadero
+   * sin punto de embarque en algunas orillas.
+   */
   canBoard(playerPosition) {
-    return !this.occupied && playerPosition.distanceTo(this.group.position) < 3.4;
+    if (this.occupied) return false;
+    const dx = playerPosition.x - this.group.position.x;
+    const dz = playerPosition.z - this.group.position.z;
+    return Math.hypot(dx, dz) < 4.2;
   }
 
   board() { this.occupied = true; }
@@ -2732,9 +3402,14 @@ const PALETTE = [
 ];
 
 class TimeOfDay {
-  constructor({ hour = 7.5, speed = 1 / 90 } = {}) {
+  constructor({ hour = 7.5, speed = 1 / 1200 } = {}) {
     this.hour = hour;
-    this.speed = speed;              // horas por segundo real (1/90 ≈ 36 min/día)
+    // `speed` son días por segundo real: 1/1200 deja el día completo en veinte
+    // minutos, es decir una hora de juego cada cincuenta segundos. Antes valía
+    // 1/90 —un día entero en minuto y medio—, y con eso una pelea de treinta
+    // segundos se comía ocho horas: era imposible pescar «al amanecer» o
+    // cumplir un encargo que pidiera capturas de noche.
+    this.speed = speed;
     this.paused = false;
 
     this.sunDirection = new THREE.Vector3();
@@ -3095,6 +3770,142 @@ const SPECIES = [
     price: 11
   },
   {
+    id: 'barbo',
+    name: 'Barbo de río',
+    latin: 'Barbus barbus',
+    rarity: 'comun',
+    lengthRange: [28, 84],
+    weightPerLength: 0.0000165,
+    depth: [1.0, 4.0],
+    prefersCover: false,
+    prefersCurrent: true,
+    activity: { madrugada: 1.1, manana: 1.2, tarde: 1.2, noche: 0.6 },
+    lures: { ninfa: 1.5, boilie: 1.4, vinilo: 0.9, cucharilla: 0.7, cucharilla_pesada: 0.8, popper: 0.3 },
+    color: 0x9a8552,
+    belly: 0.9,
+    speed: 3.6,
+    stamina: 1.6,
+    strength: 1.4,
+    fight: { runs: 5, jumpChance: 0.04, headshake: 0.7 },
+    price: 20
+  },
+  {
+    id: 'salmon',
+    name: 'Salmón atlántico',
+    latin: 'Salmo salar',
+    rarity: 'raro',
+    lengthRange: [55, 132],
+    weightPerLength: 0.0000112,
+    depth: [1.5, 6.5],
+    prefersCover: false,
+    prefersCurrent: true,
+    activity: { madrugada: 1.5, manana: 1.2, tarde: 0.8, noche: 0.5 },
+    lures: { cucharilla: 1.7, ninfa: 1.5, vinilo: 1.2, cucharilla_pesada: 1.1, popper: 0.5, boilie: 0.2 },
+    color: 0x94a2ac,
+    belly: 0.97,
+    speed: 6.2,
+    stamina: 1.9,
+    strength: 1.9,
+    fight: { runs: 6, jumpChance: 0.75, headshake: 1.2 },
+    price: 62
+  },
+  {
+    id: 'anguila',
+    name: 'Anguila',
+    latin: 'Anguilla anguilla',
+    rarity: 'comun',
+    lengthRange: [35, 118],
+    weightPerLength: 0.0000021,
+    depth: [0.4, 3.0],
+    prefersCover: true,
+    activity: { madrugada: 1.2, manana: 0.4, tarde: 0.5, noche: 2.1 },
+    lures: { boilie: 1.7, vinilo: 1.3, ninfa: 1.1, cucharilla: 0.4, cucharilla_pesada: 0.5, popper: 0.15 },
+    color: 0x35392c,
+    belly: 0.72,
+    speed: 2.8,
+    stamina: 2.0,
+    strength: 1.25,
+    fight: { runs: 4, jumpChance: 0.0, headshake: 2.4 },
+    price: 30
+  },
+  {
+    id: 'carpa_espejo',
+    name: 'Carpa espejo',
+    latin: 'Cyprinus carpio var.',
+    rarity: 'raro',
+    lengthRange: [48, 104],
+    weightPerLength: 0.0000305,
+    depth: [1.2, 4.5],
+    prefersCover: true,
+    activity: { madrugada: 1.25, manana: 0.95, tarde: 1.1, noche: 1.0 },
+    lures: { boilie: 2.1, ninfa: 1.15, vinilo: 0.5, cucharilla: 0.3, popper: 0.2, cucharilla_pesada: 0.4 },
+    color: 0xa8894a,
+    belly: 0.93,
+    speed: 2.9,
+    stamina: 2.1,
+    strength: 1.75,
+    fight: { runs: 6, jumpChance: 0.04, headshake: 0.45 },
+    price: 55
+  },
+  {
+    id: 'trucha_lacustre',
+    name: 'Trucha lacustre',
+    latin: 'Salvelinus namaycush',
+    rarity: 'raro',
+    lengthRange: [45, 108],
+    weightPerLength: 0.0000131,
+    depth: [8, 20],
+    prefersCover: false,
+    activity: { madrugada: 1.4, manana: 1.0, tarde: 0.9, noche: 1.1 },
+    lures: { cucharilla_pesada: 1.9, vinilo: 1.4, cucharilla: 1.0, ninfa: 0.6, boilie: 0.3, popper: 0.15 },
+    color: 0x5d6b62,
+    belly: 0.9,
+    speed: 4.8,
+    stamina: 1.8,
+    strength: 1.8,
+    fight: { runs: 5, jumpChance: 0.25, headshake: 1.1 },
+    price: 70
+  },
+  {
+    id: 'esturion',
+    name: 'Esturión del cañón',
+    latin: 'Acipenser sturio',
+    rarity: 'legendario',
+    lengthRange: [110, 260],
+    weightPerLength: 0.0000062,
+    depth: [12, 24],
+    prefersCover: false,
+    activity: { madrugada: 1.4, manana: 0.6, tarde: 0.7, noche: 1.7 },
+    lures: { boilie: 1.8, vinilo: 1.3, cucharilla_pesada: 1.2, cucharilla: 0.3, ninfa: 0.4, popper: 0.1 },
+    color: 0x4c5148,
+    belly: 0.8,
+    speed: 3.4,
+    stamina: 3.0,
+    strength: 3.2,
+    fight: { runs: 7, jumpChance: 0.02, headshake: 0.6 },
+    price: 90
+  },
+  {
+    id: 'sombra_valdes',
+    gated: true,               // no existe hasta que la historia la nombra
+    name: 'Sombra de Valdés',
+    latin: 'Silurus umbra (sin describir)',
+    rarity: 'legendario',
+    lengthRange: [190, 268],
+    weightPerLength: 0.0000079,
+    depth: [14, 24],
+    prefersCover: false,
+    activity: { madrugada: 1.2, manana: 0.2, tarde: 0.3, noche: 2.4 },
+    lures: { vinilo: 1.6, boilie: 1.5, cucharilla_pesada: 1.4, cucharilla: 0.3, ninfa: 0.2, popper: 0.1 },
+    color: 0x24261f,
+    belly: 0.7,
+    speed: 4.2,
+    stamina: 2.9,
+    strength: 3.9,
+    fight: { runs: 8, jumpChance: 0.08, headshake: 1.4 },
+    price: 150
+  },
+  {
     id: 'trucha_comun',
     name: 'Trucha común',
     latin: 'Salmo trutta',
@@ -3149,9 +3960,25 @@ function weightFor(species, lengthCm) {
   return species.weightPerLength * Math.pow(lengthCm, 3);
 }
 
+/**
+ * Lo que paga un ejemplar.
+ *
+ * Sublineal en el peso, como el precio real del pescado: un ejemplar del doble
+ * de kilos no vale el doble. Con la relación lineal anterior, un pez de ciento
+ * cuarenta kilos pagaba noventa mil monedas —veinte veces el equipo más caro
+ * del juego— y la economía se venía abajo con una sola captura.
+ */
 function valueFor(species, weightKg) {
-  return Math.max(1, Math.round(species.price * weightKg * 1.6));
+  return Math.max(1, Math.round(species.price * Math.pow(Math.max(0.05, weightKg), 0.72) * 1.9));
 }
+
+/** Cuántos puntos de experiencia da cobrar un ejemplar. */
+const XP_BY_RARITY = { comun: 8, raro: 22, legendario: 90 };
+function xpFor(species, trophy = 0) {
+  return Math.round((XP_BY_RARITY[species.rarity] ?? 8) * (1 + trophy * 1.1));
+}
+
+const RARITY_LABEL = { comun: 'Común', raro: 'Raro', legendario: 'Legendario' };
 
 /* ===== src/fish/Fish.js ===== */
 /**
@@ -3415,6 +4242,26 @@ class Fish {
     }
 
     if (!this.isBusy) {
+      // Corriente: el agua empuja al pez y él nada contra ella para aguantar
+      // el puesto. El resultado es que en el río los peces se colocan mirando
+      // aguas arriba, que es exactamente lo que hacen los de verdad.
+      const flow = context.flowAt?.(this.position.x, this.position.z, this._flow ??= {});
+      if (flow && (flow.x || flow.z)) {
+        const fuerza = Math.hypot(flow.x, flow.z);
+        // Los peces de corriente la remontan casi entera; los demás se dejan
+        // llevar más y acaban buscando los remansos.
+        const aguante = clamp(
+          (this.species.prefersCurrent ? 1.05 : 0.7) * (this.species.speed / 4), 0.25, 1.05
+        );
+        this.position.x += flow.x * (1 - aguante) * dt;
+        this.position.z += flow.z * (1 - aguante) * dt;
+        // Encara aguas arriba: se suma una velocidad contra la corriente.
+        this.velocity.x -= flow.x * aguante * 0.9;
+        this.velocity.z -= flow.z * aguante * 0.9;
+        this.inCurrent = fuerza;
+      } else {
+        this.inCurrent = 0;
+      }
       this.position.addScaledVector(this.velocity, dt);
       this._clampToWater(context.terrain);
     }
@@ -3433,7 +4280,11 @@ class Fish {
       let delta = desired - this.heading2D;
       while (delta > Math.PI) delta -= Math.PI * 2;
       while (delta < -Math.PI) delta += Math.PI * 2;
-      const turn = delta * (1 - Math.exp(-4.5 * dt));
+      // Amortiguado y además con tope de velocidad angular: un pez gira
+      // rápido, pero no instantáneamente. Sin el tope, un cambio brusco de
+      // velocidad —tocar fondo, huir del jugador— se veía como un corte.
+      const maxTurn = 5.0 * dt;                       // ~285°/s
+      const turn = clamp(delta * (1 - Math.exp(-4.5 * dt)), -maxTurn, maxTurn);
       this.heading2D += turn;
       this.turnRate = damp(this.turnRate, turn / Math.max(dt, 1e-3), 6, dt);
 
@@ -3462,7 +4313,10 @@ class Fish {
     const maxY = terrain.waterLevel - 0.15;
     if (minY >= maxY) {
       // Ha llegado a un bajío sin calado: da media vuelta hacia el centro.
-      this.velocity.set(-this.position.x, 0, -this.position.z).normalize().multiplyScalar(this.species.speed * 0.4);
+      // Se encara al agua honda mezclando, no de un tirón.
+      const hacia = new THREE.Vector3(-this.position.x, 0, -this.position.z)
+        .normalize().multiplyScalar(this.species.speed * 0.4);
+      this.velocity.lerp(hacia, 0.25);
       this.position.y = Math.min(maxY, minY);
       return;
     }
@@ -3569,29 +4423,103 @@ class Fish {
 // así que compensa dibujarlos más lejos.
 const MAX_VISIBLE_DISTANCE = 85;
 
+/**
+ * Peso de cada especie en el reparto de la población. Lo raro es raro de
+ * verdad, pero nunca ausente: dejar la mezcla al azar puro hacía que una
+ * especie con misión asociada pudiera no existir en el lago.
+ */
+const RARITY_WEIGHT = { comun: 1, raro: 0.34, legendario: 0.07 };
+const MIN_PER_SPECIES = { comun: 5, raro: 3, legendario: 1 };
+
 class FishManager {
-  constructor(scene, terrain, { population = 72, seed = 71, species = null } = {}) {
+  constructor(scene, terrain, {
+    population = 72, seed = 71, species = null, allowGated = () => true
+  } = {}) {
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
     this.fishes = [];
-    this.speciesPool = species ? SPECIES.filter((s) => species.includes(s.id)) : SPECIES;
+    this.speciesPool = (species ? SPECIES.filter((s) => species.includes(s.id)) : SPECIES)
+      .filter((s) => !s.gated || allowGated(s.id));
     this.group = new THREE.Group();
     this.group.name = 'peces';
     scene.add(this.group);
 
-    for (let i = 0; i < population; i++) this._spawn();
+    this._populate(population);
+  }
+
+  /**
+   * Reparto de la población: primero un mínimo garantizado de cada especie
+   * presente en la zona, y el resto por sorteo ponderado. Así una especie de
+   * misión siempre está, y aun así lo legendario sigue siendo excepcional.
+   */
+  _populate(population) {
+    const cola = [];
+    for (const s of this.speciesPool) {
+      const minimo = Math.min(MIN_PER_SPECIES[s.rarity] ?? 4,
+        Math.max(1, Math.floor(population / (this.speciesPool.length * 2))));
+      for (let i = 0; i < minimo; i++) cola.push(s);
+    }
+    const total = this.speciesPool.reduce((n, s) => n + (RARITY_WEIGHT[s.rarity] ?? 1), 0);
+    while (cola.length < population) {
+      let r = this.rng() * total;
+      let elegida = this.speciesPool[0];
+      for (const s of this.speciesPool) {
+        r -= RARITY_WEIGHT[s.rarity] ?? 1;
+        if (r <= 0) { elegida = s; break; }
+      }
+      cola.push(elegida);
+    }
+    // Se baraja para que el orden de creación no agrupe especies.
+    for (let i = cola.length - 1; i > 0; i--) {
+      const j = Math.floor(this.rng() * (i + 1));
+      [cola[i], cola[j]] = [cola[j], cola[i]];
+    }
+    for (let i = 0; i < population; i++) this._spawn(cola[i]);
+  }
+
+  /**
+   * Muestreo del agua de la zona, hecho una sola vez.
+   *
+   * Sortear puntos dentro de un radio y descartar los secos funciona en un
+   * lago, donde casi todo es agua, pero en un cañón de veinte metros de ancho
+   * la mayoría de los intentos caen en la pared y la población salía coja.
+   * Con la lámina tabulada, cada especie encuentra su sitio a la primera.
+   */
+  _waterTable() {
+    if (this._water) return this._water;
+    const F = this.terrain.field;
+    const R = F.lakeRadius * 1.08;
+    const points = [];
+    const stride = Math.max(2.5, R / 46);
+    for (let x = -R; x <= R; x += stride) {
+      for (let z = -R; z <= R; z += stride) {
+        const depth = F.depthAt(x, z);
+        if (depth > 0.35) points.push({ x, z, depth });
+      }
+    }
+    this._water = points;
+    return points;
   }
 
   _randomSpotFor(species) {
     // Busca un punto con la profundidad que esa especie prefiere.
+    const table = this._waterTable();
+    if (!table.length) return null;
     for (let attempt = 0; attempt < 60; attempt++) {
-      const angle = this.rng() * Math.PI * 2;
-      const radius = this.rng() * this.terrain.field.lakeRadius * 1.05;
-      const x = Math.cos(angle) * radius;
-      const z = Math.sin(angle) * radius;
+      const p = table[Math.floor(this.rng() * table.length)];
+      // Un poco de dispersión para que no se coloquen en la rejilla.
+      const x = p.x + (this.rng() - 0.5) * 3;
+      const z = p.z + (this.rng() - 0.5) * 3;
       const depth = this.terrain.depthAt(x, z);
       if (depth < species.depth[0] * 0.7 || depth > species.depth[1] * 1.6) continue;
+      // En aguas con corriente cada especie tiene su sitio: el barbo y el
+      // salmón en la tabla, la anguila y la tenca en los remansos.
+      if (this.terrain.field.hasCurrent && attempt < 45) {
+        const f = this.terrain.field.flowAt(x, z, this._flow ??= {});
+        const fuerza = Math.hypot(f.x, f.z);
+        if (species.prefersCurrent ? fuerza < 0.35 : fuerza > 0.75) continue;
+      }
       const y = this.terrain.waterLevel - clamp(
         species.depth[0] + this.rng() * (species.depth[1] - species.depth[0]),
         0.4, depth - 0.25
@@ -3601,10 +4529,9 @@ class FishManager {
     return null;
   }
 
-  _spawn() {
-    // Las especies raras aparecen menos.
-    const pool = this.speciesPool.filter((s) => s.rarity !== 'raro' || this.rng() < 0.35);
-    const species = pool[Math.floor(this.rng() * pool.length)] || this.speciesPool[0];
+  _spawn(forced = null) {
+    const species = forced ?? this.speciesPool[Math.floor(this.rng() * this.speciesPool.length)];
+    if (!species) return null;
     const position = this._randomSpotFor(species);
     if (!position) return null;
 
@@ -3624,7 +4551,7 @@ class FishManager {
    * `lureAction` (0..1) es cuánto se está moviendo el señuelo al recoger.
    */
   evaluate(context) {
-    const { lurePosition, lure, hour, weatherModifier, lureAction, feeding } = context;
+    const { lurePosition, lure, hour, weatherModifier, lureAction, feeding, worldEvent } = context;
     if (!lurePosition || !lure) {
       this.fishes.forEach((f) => {
         if (f.state === FishState.SEARCHING || f.state === FishState.INVESTIGATING) {
@@ -3646,7 +4573,16 @@ class FishManager {
         continue;
       }
 
-      const appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
+      let appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
+      if (worldEvent) appetite *= worldEvent.appetiteFor(fish.species, lure, depth);
+      // Un pez colocado donde le gusta el agua come mejor.
+      if (this.terrain.field.hasCurrent) {
+        const f = this.terrain.field.flowAt(lurePosition.x, lurePosition.z, this._flow ??= {});
+        const fuerza = Math.hypot(f.x, f.z);
+        appetite *= fish.species.prefersCurrent
+          ? clamp(0.55 + fuerza * 0.9, 0.55, 1.5)
+          : clamp(1.25 - fuerza * 0.7, 0.5, 1.25);
+      }
       // Se enfría con la distancia, pero no linealmente: un pez sólo pierde
       // el interés cerca del límite de detección, no a medio camino.
       fish.interest = clamp(appetite * (1 - Math.pow(distance / detection, 1.7)), 0, 2);
@@ -3894,15 +4830,64 @@ class Equipment {
  * El registro guarda récords por especie: es a la vez "pantalla de peces
  * capturados" y base de la progresión futura (logros, licencias, zonas).
  */
+/**
+ * Experiencia necesaria para cada nivel. Crece deprisa al principio —para que
+ * los primeros peces se noten— y se estira después, cuando cada captura vale
+ * mucho más.
+ */
+const XP_LEVELS = [0, 60, 170, 360, 660, 1100, 1750, 2700, 4000, 5800, 8200, 11500];
+
+function levelFor(xp) {
+  let level = 1;
+  for (let i = 1; i < XP_LEVELS.length; i++) if (xp >= XP_LEVELS[i]) level = i + 1;
+  return level;
+}
+
+const TITLES = [
+  'Novato', 'Aficionado', 'Pescador', 'Pescador con oficio', 'Buen conocedor',
+  'Veterano', 'Maestro de orilla', 'Lector de aguas', 'Experto de la cuenca',
+  'Autoridad', 'Leyenda local', 'Heredero de Valdés'
+];
+
 class Economy {
   constructor(data = null) {
     this.money = data?.money ?? 60;
+    this.xp = data?.xp ?? 0;
+    this.earned = data?.earned ?? 0;
+    this.zonesVisited = new Set(data?.zonesVisited ?? ['lago_niebla']);
     this.records = data?.records ?? {};      // id → { count, bestLength, bestWeight }
-    this.stats = data?.stats ?? {
-      casts: 0, hooked: 0, landed: 0, lost: 0, lineBreaks: 0, totalWeight: 0, biggest: 0
+    this.stats = {
+      casts: 0, hooked: 0, landed: 0, lost: 0, lineBreaks: 0, totalWeight: 0,
+      biggest: 0, biggestSpecies: null, questsDone: 0, longest: 0,
+      ...(data?.stats ?? {})
     };
     this.unlockedZones = data?.unlockedZones ?? ['lago_niebla'];
     this.currentZone = data?.currentZone ?? 'lago_niebla';
+  }
+
+  get level() { return levelFor(this.xp); }
+  get title() { return TITLES[Math.min(this.level - 1, TITLES.length - 1)]; }
+  /** Experiencia dentro del nivel actual: [conseguida, necesaria]. */
+  get levelProgress() {
+    const i = this.level - 1;
+    const base = XP_LEVELS[i] ?? 0;
+    const next = XP_LEVELS[i + 1];
+    if (next === undefined) return [1, 1];
+    return [this.xp - base, next - base];
+  }
+
+  /** Suma experiencia y avisa si se ha subido de nivel. */
+  addXp(amount) {
+    const before = this.level;
+    this.xp += Math.max(0, Math.round(amount));
+    return this.level > before ? this.level : 0;
+  }
+
+  visit(zoneId) {
+    const nuevo = !this.zonesVisited.has(zoneId);
+    this.zonesVisited.add(zoneId);
+    this.currentZone = zoneId;
+    return nuevo;
   }
 
   /** Registra una captura y devuelve lo que vale. */
@@ -3919,12 +4904,17 @@ class Economy {
     this.stats.totalWeight += fish.weight;
     this.stats.biggest = Math.max(this.stats.biggest, fish.weight);
 
+    if (fish.weight > this.stats.biggest - 1e-9) this.stats.biggestSpecies = fish.species.name;
+    this.stats.longest = Math.max(this.stats.longest, fish.length);
+
     const value = valueFor(fish.species, fish.weight);
-    return { value, isRecord, isNew: record.count === 1 };
+    const xp = xpFor(fish.species, fish.trophy ?? 0) * (record.count === 1 ? 2.5 : 1);
+    return { value, xp: Math.round(xp), isRecord, isNew: record.count === 1 };
   }
 
   sell(amount) {
     this.money += amount;
+    this.earned += amount;
     return this.money;
   }
 
@@ -3946,6 +4936,9 @@ class Economy {
   toJSON() {
     return {
       money: this.money,
+      xp: this.xp,
+      earned: this.earned,
+      zonesVisited: [...this.zonesVisited],
       records: this.records,
       stats: this.stats,
       unlockedZones: this.unlockedZones,
@@ -3953,6 +4946,853 @@ class Economy {
     };
   }
 }
+
+/* ===== src/story/StoryData.js ===== */
+/**
+ * Campaña «El cuaderno de aguas».
+ *
+ * Todo el contenido narrativo vive aquí como datos puros: personajes, misiones,
+ * objetivos, recompensas y diálogos. `QuestSystem` no sabe nada de esta
+ * historia concreta — sólo interpreta estas estructuras—, así que ampliar la
+ * campaña es escribir datos, no tocar código.
+ *
+ * Tipos de objetivo que entiende el sistema:
+ *   catch      capturar una especie (species, minLength, minWeight, count, zone, night)
+ *   catchAny   capturar peces cualesquiera (count, zone)
+ *   discover   descubrir N especies distintas (count)
+ *   visit      llegar a una zona (zone)
+ *   talk       hablar con un personaje (npc)
+ *   own        tener un objeto de equipo (category, item)
+ *   level      alcanzar un nivel (value)
+ *   money      llegar a una cantidad de dinero (value)
+ *   deliver    entregar las páginas del cuaderno (count)
+ */
+
+const NPCS = {
+  tome: {
+    id: 'tome',
+    name: 'Tomé Roca',
+    role: 'Embarcadero y tienda',
+    zone: 'lago_niebla',
+    anchor: 'muelle',
+    palette: { coat: 0x6a4a30, trousers: 0x35322c, hat: 0x8f7a3f, skin: 0xc79b74 },
+    shop: true,
+    buysFish: true,
+    greet: [
+      'Tomé se limpia las manos en el mandil.',
+      '—Así que tú eres quien ha heredado la cabaña de Remedios. Traes su misma cara de no saber por dónde empezar.',
+      '—Yo compro lo que saques y vendo lo que necesites. Con eso ya tienes medio oficio.'
+    ],
+    idle: [
+      '—Si el agua está plana, prueba a primera hora. Nunca falla.',
+      '—Tu abuela vendía menos pescado que nadie y sabía más que todos. Piénsalo.',
+      '—Los aparejos buenos no pescan solos, pero los malos sí que fallan solos.'
+    ]
+  },
+  sabela: {
+    id: 'sabela',
+    name: 'Sabela Ferrer',
+    role: 'Bióloga de la cuenca',
+    zone: 'lago_niebla',
+    anchor: 'campamento',
+    palette: { coat: 0x2f5b63, trousers: 0x2b3138, hat: 0x9aa7ad, skin: 0xd9b48e },
+    greet: [
+      'Tiene la mesa llena de frascos y una libreta sujeta con una piedra.',
+      '—Llevo dos años midiendo esta cuenca. Los peces se han movido y nadie me sabe decir por qué.',
+      '—Si sacas algo, enséñamelo antes de venderlo. Un pez cuenta más de lo que parece.'
+    ],
+    idle: [
+      '—El agua baja tres centímetros por semana. Eso no es sequía, eso es alguien abriendo una compuerta.',
+      '—Cada especie tiene su franja de profundidad. Aprendértelas vale más que una caña cara.'
+    ]
+  },
+  nuno: {
+    id: 'nuno',
+    name: 'Nuno Aldaz',
+    role: 'Guarda de la cuenca',
+    zone: 'lago_niebla',
+    anchor: 'cartel',
+    palette: { coat: 0x3c4a2c, trousers: 0x2f3529, hat: 0x4a5535, skin: 0xb98b63 },
+    sellsPermits: true,
+    greet: [
+      'Te mira el aparejo antes que la cara.',
+      '—Guarda de la cuenca. Aquí se pesca con permiso, y el permiso lo doy yo.',
+      '—El del lago lo tienes por ser de la familia. Los demás se pagan.'
+    ],
+    idle: [
+      '—Yo no cierro tramos por gusto. Me los mandan cerrar.',
+      '—Si ves la garganta desde el mirador, no vayas. No hay camino. Todavía.'
+    ]
+  },
+  iria: {
+    id: 'iria',
+    name: 'Iria',
+    role: 'Del pueblo de abajo',
+    zone: 'rio_trenzado',
+    anchor: 'campamento',
+    palette: { coat: 0x8a4a52, trousers: 0x33384a, hat: 0xd9c07a, skin: 0xe0bb92 },
+    greet: [
+      'Está sentada en la grava con los pies en el agua.',
+      '—¿Tú también buscas el pez ese que dicen? Mi abuelo dice que se lo inventó una señora.',
+      '—Esa señora era tu abuela, ¿no? Pues yo sí me lo creo.'
+    ],
+    idle: [
+      '—Si pisas fuerte se van todos. Lo sé porque a mí me pasa siempre.',
+      '—Cuando llueve pican más. Eso lo sabe hasta mi gato.'
+    ]
+  },
+  ovidio: {
+    id: 'ovidio',
+    name: 'Ovidio Sanz',
+    role: 'Vive en la marisma',
+    zone: 'marisma_argan',
+    anchor: 'campamento',
+    palette: { coat: 0x4a4436, trousers: 0x3a3730, hat: 0x6d6047, skin: 0xb08758 },
+    greet: [
+      'No levanta la vista del sedal.',
+      '—Cuarenta años aquí y sigo sin saber cuántos canales tiene esta marisma.',
+      '—Tu abuela venía de noche. Nunca a pescar. Venía a mirar.'
+    ],
+    idle: [
+      '—De noche la marisma es otra cosa. Y otra cosa es lo que pica.',
+      '—Lo que buscas no está en la marisma. Pero la marisma te dirá por dónde.'
+    ]
+  },
+  marga: {
+    id: 'marga',
+    name: 'Marga Elizalde',
+    role: 'Patrona del embalse',
+    zone: 'embalse_alto',
+    anchor: 'muelle',
+    palette: { coat: 0x2c3f5e, trousers: 0x2a2f36, hat: 0xb8a06a, skin: 0xcf9f77 },
+    greet: [
+      'Ata un cabo sin mirarlo, de memoria.',
+      '—Este embalse tiene diecisiete metros en el centro y una corriente de fondo que no sale en ningún mapa.',
+      '—Si vas a pescar hondo, avísame antes. Prefiero saber dónde estás.'
+    ],
+    idle: [
+      '—Bajo los diez metros el agua está a seis grados todo el año. Ahí abajo vive otra cosa.',
+      '—La compuerta vieja da a la garganta. Hace años que nadie la abre.'
+    ]
+  }
+};
+
+const NPC_LIST = Object.values(NPCS);
+
+/** Capítulos: sólo agrupan misiones para el diario. */
+const CHAPTERS = [
+  { id: 1, title: 'La cabaña', subtitle: 'Lago de la Niebla' },
+  { id: 2, title: 'Aguas que corren', subtitle: 'Río Trenzado' },
+  { id: 3, title: 'Lo que la niebla tapa', subtitle: 'Marisma de Argán' },
+  { id: 4, title: 'El agua fría', subtitle: 'Embalse Alto' },
+  { id: 5, title: 'La Garganta', subtitle: 'El final del cuaderno' }
+];
+
+const QUESTS = [
+  // ---------------------------------------------------------- capítulo 1
+  {
+    id: 'cap1_llegada',
+    chapter: 1, type: 'historia',
+    npc: 'tome', turnIn: 'tome',
+    title: 'Preséntate en el embarcadero',
+    summary: 'Tomé lleva el embarcadero y la tienda. Habla con él antes de nada.',
+    objectives: [{ kind: 'talk', npc: 'tome', label: 'Hablar con Tomé Roca' }],
+    reward: { money: 40, xp: 10 },
+    complete: [
+      '—Bien. Ya nos conocemos.',
+      '—Con lo que llevas puedes sacar percas y poco más. Cuando quieras algo mejor, ya sabes dónde estoy.'
+    ]
+  },
+  {
+    id: 'cap1_primera',
+    chapter: 1, type: 'historia',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap1_llegada'],
+    title: 'Tres para empezar',
+    summary: 'Saca tres peces del lago. Cualesquiera: lo que importa es coger el gesto.',
+    objectives: [{ kind: 'catchAny', count: 3, zone: 'lago_niebla', label: 'Peces cobrados en el lago' }],
+    reward: { money: 120, xp: 30, item: { category: 'lures', id: 'vinilo' } },
+    complete: [
+      '—Tres. No está mal para el primer día.',
+      'Te tiende un vinilo con cabeza plomada, todavía en su bolsa.',
+      '—Toma. Trabaja a media agua. Vas a necesitarlo antes de lo que crees.'
+    ]
+  },
+  {
+    id: 'cap1_cuaderno',
+    chapter: 1, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap1_primera'],
+    title: 'Una muestra para Sabela',
+    summary: 'Sabela necesita una perca negra de al menos 40 cm para medirla.',
+    objectives: [{ kind: 'catch', species: 'perca_negra', minLength: 40, count: 1, label: 'Perca negra de 40 cm o más' }],
+    reward: { money: 160, xp: 45, page: 1 },
+    complete: [
+      'Mide el pez, apunta, y se queda mirando la libreta más tiempo del necesario.',
+      '—Esta letra. Esta letra la conozco.',
+      'Saca una hoja suelta, arrugada, de dentro de su cuaderno de campo.',
+      '—Estaba entre mis papeles y nunca supe de quién era. Ahora sí: es de Remedios Valdés. Y le falta el resto.',
+      '«Página 1 · La cuenca no es cinco aguas distintas. Es una sola que respira por cinco sitios.»'
+    ]
+  },
+  {
+    id: 'cap1_permiso',
+    chapter: 1, type: 'historia',
+    npc: 'nuno', turnIn: 'nuno',
+    requires: ['cap1_cuaderno'],
+    title: 'El permiso del río',
+    summary: 'Nuno vende los permisos. Para el río pide nivel 2 y 450 monedas.',
+    objectives: [{ kind: 'visit', zone: 'rio_trenzado', label: 'Llegar al Río Trenzado' }],
+    reward: { xp: 40 },
+    hint: 'Compra el permiso del río en el mapa (tecla Z) y viaja hasta allí.',
+    complete: [
+      '—Ya estás dentro. Por mí bien.',
+      '—Pero te lo digo una vez: si el agua del río baja como está bajando, no es cosa del cielo.'
+    ]
+  },
+  {
+    id: 'sec_coleccion1',
+    chapter: 1, type: 'coleccion',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap1_cuaderno'],
+    title: 'Censo de la cuenca',
+    summary: 'Sabela quiere seis especies distintas anotadas en el registro.',
+    objectives: [{ kind: 'discover', count: 6, label: 'Especies distintas descubiertas' }],
+    reward: { money: 240, xp: 60 },
+    complete: ['—Seis. Con esto ya puedo comparar con lo que había hace diez años. Gracias.']
+  },
+
+  // ---------------------------------------------------------- capítulo 2
+  {
+    id: 'cap2_barbo',
+    chapter: 2, type: 'historia',
+    npc: 'iria', turnIn: 'iria',
+    requires: ['cap1_permiso'],
+    title: 'Donde el agua se para',
+    summary: 'Iria dice que los barbos están donde la corriente se remansa. Saca dos.',
+    objectives: [{ kind: 'catch', species: 'barbo', count: 2, zone: 'rio_trenzado', label: 'Barbos de río cobrados' }],
+    reward: { money: 180, xp: 55 },
+    hint: 'En el río el señuelo se va con la corriente: lanza aguas arriba y déjalo bajar.',
+    complete: [
+      '—¡Te lo dije! En la curva de fuera hay más hondo.',
+      '—Mi abuelo dice que eso lo sabía todo el mundo. Pero mi abuelo tampoco pesca nada.'
+    ]
+  },
+  {
+    id: 'cap2_salmon',
+    chapter: 2, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap2_barbo'],
+    title: 'El que sube',
+    summary: 'Un salmón de 90 cm probaría que todavía remontan. Sabela lo necesita.',
+    objectives: [{ kind: 'catch', species: 'salmon', minLength: 90, count: 1, label: 'Salmón de 90 cm o más' }],
+    reward: { money: 420, xp: 110, page: 2 },
+    complete: [
+      '—Sube. Todavía sube. —Se sienta en la grava sin soltar el pez.',
+      'Te da la segunda hoja, esta doblada en cuatro dentro de un sobre.',
+      '«Página 2 · Donde el río se estrecha, el agua corre. Donde se ensancha, el agua piensa. Los peces grandes están siempre en la segunda.»'
+    ]
+  },
+  {
+    id: 'sec_gato',
+    chapter: 2, type: 'secundaria',
+    npc: 'iria', turnIn: 'iria',
+    requires: ['cap2_barbo'],
+    title: 'La cena del gato',
+    summary: 'Iria quiere una trucha para su gato. Dice que es urgente.',
+    objectives: [{ kind: 'catch', species: 'trucha_comun', count: 1, label: 'Una trucha común' }],
+    reward: { money: 90, xp: 25 },
+    complete: ['—Perfecta. Se va a poner insoportable una semana. Gracias.']
+  },
+  {
+    id: 'sec_equipo1',
+    chapter: 2, type: 'equipo',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap1_permiso'],
+    title: 'Aparejo de verdad',
+    summary: 'Tomé no te deja seguir con la caña de iniciación. Consigue una mejor.',
+    objectives: [{ kind: 'own', category: 'rods', item: 'cana_ligera', label: 'Tener la caña ligera de lago' }],
+    reward: { money: 150, xp: 40, item: { category: 'lines', id: 'nylon_028' } },
+    complete: ['—Ya era hora. Toma hilo del 28, que con el del 22 me ibas a dar un disgusto.']
+  },
+
+  // ---------------------------------------------------------- capítulo 3
+  {
+    id: 'cap3_anguilas',
+    chapter: 3, type: 'historia',
+    npc: 'ovidio', turnIn: 'ovidio',
+    requires: ['cap2_salmon'],
+    title: 'Lo que sale de noche',
+    summary: 'Ovidio pide tres anguilas, y sólo cuentan las de noche.',
+    objectives: [{ kind: 'catch', species: 'anguila', count: 3, night: true, label: 'Anguilas cobradas de noche' }],
+    reward: { money: 300, xp: 90 },
+    hint: 'Descansa junto al fuego para saltar a la noche. Las anguilas quieren boilie o vinilo cerca del fondo.',
+    complete: [
+      '—Tres. De noche. Ya sabes lo que hay que saber de esta marisma.',
+      '—Ahora escucha, que esto no lo repito: tu abuela no buscaba un pez. Buscaba por dónde se iba el agua.'
+    ]
+  },
+  {
+    id: 'cap3_espejo',
+    chapter: 3, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap3_anguilas'],
+    title: 'La carpa del canal',
+    summary: 'Una carpa espejo confirmaría que el canal viejo sigue comunicado.',
+    objectives: [{ kind: 'catch', species: 'carpa_espejo', count: 1, label: 'Una carpa espejo' }],
+    reward: { money: 520, xp: 130, page: 3 },
+    complete: [
+      '—Escamas de espejo. Esta no ha nacido aquí: ha entrado desde arriba.',
+      '«Página 3 · Si la marisma recibe peces del embalse, hay paso. Y si hay paso para ellos, lo hay para el agua.»'
+    ]
+  },
+  {
+    id: 'sec_coleccion2',
+    chapter: 3, type: 'coleccion',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['sec_coleccion1'],
+    title: 'Censo ampliado',
+    summary: 'Diez especies distintas en el registro. Sabela paga bien por ellas.',
+    objectives: [{ kind: 'discover', count: 10, label: 'Especies distintas descubiertas' }],
+    reward: { money: 700, xp: 150 },
+    complete: ['—Diez. Esto ya no es una libreta, es un censo. Te lo pago como tal.']
+  },
+
+  // ---------------------------------------------------------- capítulo 4
+  {
+    id: 'cap4_lacustre',
+    chapter: 4, type: 'historia',
+    npc: 'marga', turnIn: 'marga',
+    requires: ['cap3_espejo'],
+    title: 'Fondo del embalse',
+    summary: 'Marga quiere ver una trucha lacustre. Viven por debajo de los ocho metros.',
+    objectives: [{ kind: 'catch', species: 'trucha_lacustre', count: 1, label: 'Una trucha lacustre' }],
+    reward: { money: 600, xp: 140 },
+    hint: 'Sube a la barca, boga al centro y usa cucharilla pesada. Necesitas hilo que aguante.',
+    complete: [
+      '—Del fondo del todo. Sabía que seguían ahí.',
+      '—Te llevo yo la próxima vez. Hay un sitio que quiero que veas.'
+    ]
+  },
+  {
+    id: 'cap4_marga',
+    chapter: 4, type: 'historia',
+    npc: 'marga', turnIn: 'marga',
+    requires: ['cap4_lacustre'],
+    title: 'La compuerta vieja',
+    summary: 'Cinco peces del embalse a cambio de que Marga te enseñe la compuerta.',
+    objectives: [{ kind: 'catchAny', count: 5, zone: 'embalse_alto', label: 'Peces cobrados en el embalse' }],
+    reward: { money: 450, xp: 120, page: 4 },
+    complete: [
+      'Te lleva en la barca hasta un muro de hormigón comido de musgo, con una compuerta cerrada.',
+      '—Da a la garganta. Lleva veinte años cerrada y el agua sigue bajando igual.',
+      'Entre las juntas hay una hoja de papel metida en una bolsa de plástico. La letra es la misma.',
+      '«Página 4 · No la cierran para guardar agua. La cierran para que nadie baje a ver qué hay debajo.»'
+    ]
+  },
+
+  // ---------------------------------------------------------- capítulo 5
+  {
+    id: 'cap5_garganta',
+    chapter: 5, type: 'historia',
+    npc: 'nuno', turnIn: 'nuno',
+    requires: ['cap4_marga'],
+    title: 'Las cuatro páginas',
+    summary: 'Llévale a Nuno las cuatro páginas del cuaderno de Remedios.',
+    objectives: [{ kind: 'deliver', count: 4, label: 'Páginas del cuaderno reunidas' }],
+    reward: { xp: 200, unlockZone: 'garganta' },
+    complete: [
+      'Lee las cuatro sin decir nada. Cuando termina, se quita la gorra.',
+      '—Yo firmé el cierre. Me dijeron que era por seguridad y firmé.',
+      '—Hay una escala de servicio en la pared norte. Te abro la reja. Lo que veas ahí abajo, me lo cuentas a mí primero.'
+    ]
+  },
+  {
+    id: 'cap5_esturion',
+    chapter: 5, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap5_garganta'],
+    title: 'El que no debería estar',
+    summary: 'En la garganta hay esturión. Llevaba décadas dado por desaparecido.',
+    objectives: [{ kind: 'catch', species: 'esturion', count: 1, label: 'Un esturión del cañón' }],
+    reward: { money: 1400, xp: 300 },
+    complete: [
+      '—Esto no es un pez. Esto es una prueba. —Le tiembla un poco la voz.',
+      '—Con esto se para cualquier obra en la cuenca. Cualquiera.'
+    ]
+  },
+  {
+    id: 'cap5_sombra',
+    chapter: 5, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap5_esturion'],
+    title: 'La Sombra de Valdés',
+    summary: 'Lo que Remedios pasó treinta años mirando. Sólo sale de noche, en lo más hondo.',
+    objectives: [{ kind: 'catch', species: 'sombra_valdes', count: 1, label: 'La Sombra de Valdés' }],
+    reward: { money: 5000, xp: 800, item: { category: 'rods', id: 'cana_pesada' } },
+    hint: 'De noche cerrada, en el fondo de la garganta. Anzuelo grande —boilie o vinilo—, el aparejo más fuerte que tengas y el freno bien apretado.',
+    complete: [
+      'No cabe en la mesa. Sabela no la mide: la mira.',
+      '—No estaba loca. Estaba sola, que no es lo mismo.',
+      'En la última página, la que faltaba, hay una sola línea con la letra de Remedios:',
+      '«Página 5 · No la pesques para enseñarla. Pésca la para saber que sigue ahí. Luego devuélvela.»'
+    ]
+  },
+  {
+    id: 'sec_explorador',
+    chapter: 5, type: 'exploracion',
+    npc: 'nuno', turnIn: 'nuno',
+    requires: ['cap1_permiso'],
+    title: 'Toda la cuenca',
+    summary: 'Pisa las cinco aguas de la cuenca de Valdés.',
+    objectives: [
+      { kind: 'visit', zone: 'rio_trenzado', label: 'Río Trenzado' },
+      { kind: 'visit', zone: 'marisma_argan', label: 'Marisma de Argán' },
+      { kind: 'visit', zone: 'embalse_alto', label: 'Embalse Alto' },
+      { kind: 'visit', zone: 'garganta', label: 'La Garganta' }
+    ],
+    reward: { money: 900, xp: 220 },
+    complete: ['—Las cinco. Ya conoces la cuenca mejor que la mitad de mis compañeros.']
+  }
+];
+
+const QUESTS_BY_ID = Object.fromEntries(QUESTS.map((q) => [q.id, q]));
+
+const QUEST_TYPE_LABEL = {
+  historia: 'Historia',
+  secundaria: 'Secundaria',
+  pesca: 'Pesca',
+  exploracion: 'Exploración',
+  coleccion: 'Colección',
+  equipo: 'Equipo'
+};
+
+/** Texto del prólogo, al empezar partida nueva. */
+const PROLOGUE = [
+  'Remedios Valdés pescó en esta cuenca durante cuarenta y un años.',
+  'No dejó dinero. Dejó una cabaña con goteras, una caña de fibra y un cuaderno al que le faltan páginas.',
+  'En la primera hoja que sí está, escribió: «El agua se va por algún sitio. Averígualo».'
+];
+
+/**
+ * Todo el contenido narrativo en un solo objeto.
+ *
+ * El empaquetador aplana los módulos en un único ámbito, así que
+ * `import * as Story` no sobrevive: este objeto hace el mismo papel y funciona
+ * igual con módulos ES y con el paquete de un solo fichero.
+ */
+const STORY = {
+  NPCS, NPC_LIST, CHAPTERS, QUESTS, QUESTS_BY_ID, QUEST_TYPE_LABEL, PROLOGUE
+};
+
+/* ===== src/story/QuestSystem.js ===== */
+/**
+ * Diario de misiones.
+ *
+ * Es un intérprete de los datos de `StoryData`: no conoce ninguna misión
+ * concreta. El juego le manda hechos («he cobrado una perca de 43 cm en el
+ * lago», «he llegado al río», «he hablado con Tomé») y él decide qué objetivo
+ * avanza, qué misión se completa y qué se desbloquea.
+ *
+ * Estados de una misión:
+ *   bloqueada    le faltan requisitos
+ *   disponible   se puede aceptar (hablando con su personaje)
+ *   activa       aceptada, con objetivos en curso
+ *   porEntregar  objetivos cumplidos, falta volver con el personaje
+ *   completada   cobrada
+ */
+
+const QuestState = {
+  LOCKED: 'bloqueada',
+  AVAILABLE: 'disponible',
+  ACTIVE: 'activa',
+  READY: 'porEntregar',
+  DONE: 'completada'
+};
+
+class QuestSystem {
+  constructor(data = null, events = {}) {
+    this.events = events;
+    this.accepted = new Set(data?.accepted ?? []);
+    this.completed = new Set(data?.completed ?? []);
+    this.progress = data?.progress ?? {};     // questId → [contador por objetivo]
+    this.pages = data?.pages ?? [];           // páginas del cuaderno reunidas
+    this.tracked = data?.tracked ?? null;
+    this.metNpcs = new Set(data?.metNpcs ?? []);
+    this.unlockedByQuest = new Set(data?.unlockedByQuest ?? []);
+    this.seenPrologue = data?.seenPrologue ?? false;
+  }
+
+  // ------------------------------------------------------------- consultas
+  stateOf(id) {
+    if (this.completed.has(id)) return QuestState.DONE;
+    const quest = QUESTS_BY_ID[id];
+    if (!quest) return QuestState.LOCKED;
+    if (!this.accepted.has(id)) {
+      const ready = (quest.requires ?? []).every((r) => this.completed.has(r));
+      return ready ? QuestState.AVAILABLE : QuestState.LOCKED;
+    }
+    return this._objectivesMet(quest) ? QuestState.READY : QuestState.ACTIVE;
+  }
+
+  counters(id) {
+    const quest = QUESTS_BY_ID[id];
+    if (!quest) return [];
+    if (!this.progress[id]) this.progress[id] = quest.objectives.map(() => 0);
+    return this.progress[id];
+  }
+
+  /** Progreso 0..1 de un objetivo concreto. */
+  objectiveProgress(id, index) {
+    const quest = QUESTS_BY_ID[id];
+    const target = quest.objectives[index].count ?? 1;
+    return Math.min(1, this.counters(id)[index] / target);
+  }
+
+  _objectivesMet(quest) {
+    const c = this.counters(quest.id);
+    return quest.objectives.every((o, i) => c[i] >= (o.count ?? 1));
+  }
+
+  get active() {
+    return QUESTS.filter((q) => this.accepted.has(q.id) && !this.completed.has(q.id));
+  }
+
+  get availableQuests() {
+    return QUESTS.filter((q) => this.stateOf(q.id) === QuestState.AVAILABLE);
+  }
+
+  /** Misiones que este personaje puede ofrecer o recoger ahora mismo. */
+  forNpc(npcId) {
+    const offer = [], turnIn = [], inProgress = [];
+    for (const q of QUESTS) {
+      const state = this.stateOf(q.id);
+      if (q.npc === npcId && state === QuestState.AVAILABLE) offer.push(q);
+      else if (q.turnIn === npcId && state === QuestState.READY) turnIn.push(q);
+      else if (q.turnIn === npcId && state === QuestState.ACTIVE) inProgress.push(q);
+    }
+    return { offer, turnIn, inProgress };
+  }
+
+  /** ¿Hay algo que hacer con este personaje? Para el icono sobre su cabeza. */
+  npcMarker(npcId) {
+    const { offer, turnIn } = this.forNpc(npcId);
+    if (turnIn.length) return 'entregar';
+    if (offer.length) return 'nueva';
+    if (!this.metNpcs.has(npcId)) return 'nueva';
+    return null;
+  }
+
+  isUnlocked(questId) { return this.completed.has(questId) || this.unlockedByQuest.has(questId); }
+
+  /** La misión que sigue el HUD: la marcada, o la primera de historia activa. */
+  get trackedQuest() {
+    if (this.tracked && this.accepted.has(this.tracked) && !this.completed.has(this.tracked)) {
+      return QUESTS_BY_ID[this.tracked];
+    }
+    const activas = this.active;
+    return activas.find((q) => q.type === 'historia') ?? activas[0] ?? null;
+  }
+
+  track(id) { this.tracked = id; }
+
+  // -------------------------------------------------------------- acciones
+  /**
+   * Acepta una misión.
+   *
+   * `snapshot` describe lo que el jugador ya ha conseguido (récords por
+   * especie, especies descubiertas, nivel, dinero, equipo, zonas visitadas).
+   * Con él se rellenan de entrada los objetivos que ya estaban cumplidos antes
+   * de que nadie los pidiera: si ya sacaste el salmón de metro y medio, no
+   * tiene ningún sentido obligarte a sacar otro sólo porque el encargo llegó
+   * después.
+   */
+  accept(id, snapshot = null) {
+    if (this.stateOf(id) !== QuestState.AVAILABLE) return false;
+    this.accepted.add(id);
+    const c = this.counters(id);
+    const quest = QUESTS_BY_ID[id];
+    if (snapshot) {
+      quest.objectives.forEach((o, i) => {
+        const ya = creditFor(o, snapshot);
+        if (ya > 0) c[i] = Math.min(ya, o.count ?? 1);
+      });
+    }
+    if (quest.type === 'historia') this.tracked = id;
+    this.events.onAccept?.(quest);
+    if (this._objectivesMet(quest)) this.events.onReady?.(quest);
+    return true;
+  }
+
+  /** Cobra una misión lista. Devuelve la recompensa aplicada o null. */
+  turnIn(id) {
+    if (this.stateOf(id) !== QuestState.READY) return null;
+    const quest = QUESTS_BY_ID[id];
+    this.completed.add(id);
+    if (this.tracked === id) this.tracked = null;
+    const reward = { ...(quest.reward ?? {}) };
+    if (reward.page && !this.pages.includes(reward.page)) this.pages.push(reward.page);
+    if (reward.unlockZone) this.unlockedByQuest.add(quest.id);
+    this.events.onComplete?.(quest, reward);
+    return reward;
+  }
+
+  meet(npcId) {
+    const nuevo = !this.metNpcs.has(npcId);
+    this.metNpcs.add(npcId);
+    this.notify('talk', { npc: npcId });
+    return nuevo;
+  }
+
+  // -------------------------------------------------------------- eventos
+  /**
+   * Hecho del juego. `kind` es el tipo de objetivo que puede avanzar y
+   * `payload` lo describe. Sólo avanzan objetivos de misiones aceptadas.
+   */
+  notify(kind, payload = {}) {
+    let cambio = false;
+    for (const quest of this.active) {
+      const c = this.counters(quest.id);
+      quest.objectives.forEach((o, i) => {
+        if (o.kind !== kind) return;
+        if (c[i] >= (o.count ?? 1)) return;
+        if (!this._matches(o, payload)) return;
+        // Los objetivos de umbral (nivel, dinero, descubrimientos) guardan el
+        // valor alcanzado; los de recuento suman uno.
+        c[i] = ABSOLUTE.has(kind) ? Math.max(c[i], payload.value ?? 0) : c[i] + 1;
+        cambio = true;
+        this.events.onProgress?.(quest, i, c[i]);
+      });
+      if (cambio && this._objectivesMet(quest)) this.events.onReady?.(quest);
+    }
+    return cambio;
+  }
+
+  _matches(objective, p) {
+    switch (objective.kind) {
+      case 'catch':
+        if (objective.species && p.species !== objective.species) return false;
+        if (objective.minLength && (p.length ?? 0) < objective.minLength) return false;
+        if (objective.minWeight && (p.weight ?? 0) < objective.minWeight) return false;
+        if (objective.zone && p.zone !== objective.zone) return false;
+        if (objective.night && !p.night) return false;
+        return true;
+      case 'catchAny':
+        return !objective.zone || p.zone === objective.zone;
+      case 'visit':
+        return p.zone === objective.zone;
+      case 'talk':
+        return p.npc === objective.npc;
+      case 'own':
+        return p.category === objective.category && p.item === objective.item;
+      case 'discover':
+      case 'level':
+      case 'money':
+      case 'deliver':
+        return (p.value ?? 0) > 0;
+      default:
+        return false;
+    }
+  }
+
+  toJSON() {
+    return {
+      accepted: [...this.accepted],
+      completed: [...this.completed],
+      progress: this.progress,
+      pages: this.pages,
+      tracked: this.tracked,
+      metNpcs: [...this.metNpcs],
+      unlockedByQuest: [...this.unlockedByQuest],
+      seenPrologue: this.seenPrologue
+    };
+  }
+}
+
+/**
+ * Qué parte de un objetivo ya está cumplida según el historial del jugador.
+ *
+ * Sólo cuenta lo que se puede afirmar sin ambigüedad. Un «captura tres peces
+ * cualesquiera» no se da por hecho con el historial: eso es trabajo por hacer,
+ * no un logro anterior.
+ */
+function creditFor(objective, snap) {
+  switch (objective.kind) {
+    case 'catch': {
+      if (!objective.species) return 0;
+      const rec = snap.records?.[objective.species];
+      if (!rec?.count) return 0;
+      // Sólo se acredita un ejemplar, y sólo si el récord cumple la talla.
+      if (objective.minLength && rec.bestLength < objective.minLength) return 0;
+      if (objective.minWeight && rec.bestWeight < objective.minWeight) return 0;
+      // Una talla o una zona concretas no se pueden comprobar hacia atrás con
+      // seguridad, así que sólo se acredita cuando no hay condición de zona.
+      if (objective.zone || objective.night) return 0;
+      return 1;
+    }
+    case 'discover': return snap.discovered ?? 0;
+    case 'level': return snap.level ?? 0;
+    case 'money': return snap.money ?? 0;
+    case 'deliver': return snap.pages ?? 0;
+    case 'own': return snap.owns?.(objective.category, objective.item) ? 1 : 0;
+    case 'visit': return snap.visited?.has?.(objective.zone) ? 1 : 0;
+    case 'talk': return snap.met?.has?.(objective.npc) ? 1 : 0;
+    default: return 0;
+  }
+}
+
+/** Objetivos cuyo contador es un valor alcanzado, no un recuento de sucesos. */
+const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver']);
+
+/** Nombre legible de un personaje, para la interfaz. */
+function npcName(id) { return NPCS[id]?.name ?? id; }
+
+/* ===== src/story/Events.js ===== */
+/**
+ * Sucesos del mundo.
+ *
+ * No son adornos: cada uno cambia durante un rato cómo se pesca. Una tirada de
+ * peces obliga a moverse a donde están; una picada floja invita a cambiar de
+ * hora o de sitio; un pez raro merodeando premia al que esté atento.
+ *
+ * Todo pasa por `modifiers`, que el resto del juego consulta: no hay ningún
+ * sistema tocado por dentro por los eventos.
+ */
+
+const CANDIDATES = [
+  {
+    id: 'levantada',
+    title: 'Levantada de peces',
+    text: 'El agua hierve delante de ti: un banco está cazando en superficie.',
+    duration: 95,
+    weight: 1.0,
+    when: ({ hour }) => (hour > 5.5 && hour < 10) || (hour > 18 && hour < 21.5),
+    modifiers: { bite: 1.9, surface: true }
+  },
+  {
+    id: 'agua_turbia',
+    title: 'El agua se ha enturbiado',
+    text: 'La lluvia arrastra tierra: los peces ven menos y se fían más del olfato.',
+    duration: 140,
+    weight: 0.8,
+    when: ({ rain }) => rain > 0.25,
+    modifiers: { bite: 1.25, favourRig: 'flotador' }
+  },
+  {
+    id: 'presion',
+    title: 'Baja la presión',
+    text: 'Cambia el tiempo. Antes de una tormenta los peces comen como si no hubiera mañana.',
+    duration: 120,
+    weight: 0.9,
+    when: ({ cloudiness }) => cloudiness > 0.5,
+    modifiers: { bite: 1.6 }
+  },
+  {
+    id: 'sol_alto',
+    title: 'Sol de plomo',
+    text: 'Con el sol vertical el pez se hunde. Habrá que bajar el señuelo.',
+    duration: 150,
+    weight: 0.7,
+    when: ({ hour, cloudiness }) => hour > 12 && hour < 16.5 && cloudiness < 0.35,
+    modifiers: { bite: 0.6, deepOnly: true }
+  },
+  {
+    id: 'ronda_noche',
+    title: 'Ronda de noche',
+    text: 'Lo grande sale a comer cuando no hay luz.',
+    duration: 180,
+    weight: 1.0,
+    when: ({ night }) => night > 0.7,
+    modifiers: { bite: 1.35, trophy: 1.35 }
+  },
+  {
+    id: 'visitante',
+    title: 'Merodea algo grande',
+    text: 'Una sombra larga ha cruzado por delante del señuelo.',
+    duration: 110,
+    weight: 0.55,
+    when: ({ level }) => level >= 3,
+    modifiers: { bite: 0.85, trophy: 1.8, rare: true }
+  }
+];
+
+/** Un evento dura lo suyo y luego hay un descanso antes del siguiente. */
+const COOLDOWN = [90, 220];
+
+class EventSystem {
+  constructor(events = {}) {
+    this.events = events;
+    this.current = null;
+    this.timeLeft = 0;
+    this.cooldown = 45;
+    this.history = [];
+  }
+
+  /** Multiplicadores activos. El resto del juego sólo consulta esto. */
+  get modifiers() { return this.current?.modifiers ?? {}; }
+  get biteMultiplier() { return this.modifiers.bite ?? 1; }
+  get trophyMultiplier() { return this.modifiers.trophy ?? 1; }
+
+  update(dt, context) {
+    if (this.current) {
+      this.timeLeft -= dt;
+      if (this.timeLeft <= 0) {
+        const ended = this.current;
+        this.current = null;
+        this.cooldown = COOLDOWN[0] + Math.random() * (COOLDOWN[1] - COOLDOWN[0]);
+        this.events.onEnd?.(ended);
+      }
+      return;
+    }
+    this.cooldown -= dt;
+    if (this.cooldown > 0) return;
+    this._start(context);
+  }
+
+  _start(context) {
+    const posibles = CANDIDATES.filter((c) => {
+      if (!c.when(context)) return false;
+      // No se repite el mismo dos veces seguidas: cansa.
+      return this.history[this.history.length - 1] !== c.id;
+    });
+    if (!posibles.length) { this.cooldown = 25; return; }
+    const total = posibles.reduce((n, c) => n + c.weight, 0);
+    let r = Math.random() * total;
+    let elegido = posibles[0];
+    for (const c of posibles) { r -= c.weight; if (r <= 0) { elegido = c; break; } }
+
+    this.current = elegido;
+    this.timeLeft = elegido.duration;
+    this.history.push(elegido.id);
+    if (this.history.length > 6) this.history.shift();
+    this.events.onStart?.(elegido);
+  }
+
+  /** Texto para el HUD mientras dura. */
+  get label() {
+    if (!this.current) return '';
+    return `${this.current.title} · ${Math.ceil(this.timeLeft)} s`;
+  }
+
+  /**
+   * Ajuste del apetito de un pez concreto según el evento en curso. Devuelve
+   * un multiplicador, nunca decide por sí mismo si pica.
+   */
+  appetiteFor(species, lure, depth) {
+    const m = this.modifiers;
+    let k = m.bite ?? 1;
+    if (m.surface && depth > 2.5) k *= 0.45;         // la fiesta es arriba
+    if (m.deepOnly && depth < 3) k *= 0.4;
+    if (m.favourRig && lure?.rig === m.favourRig) k *= 1.35;
+    if (m.rare) k *= species.rarity === 'comun' ? 0.7 : 1.9;
+    return k;
+  }
+
+  /** Sesgo del tamaño del ejemplar: los eventos de trofeo suben la talla. */
+  get trophyBias() { return clamp(this.trophyMultiplier, 0.6, 2.2); }
+}
+
+const EVENT_IDS = CANDIDATES.map((c) => c.id);
 
 /* ===== src/fishing/Line.js ===== */
 /**
@@ -4191,7 +6031,7 @@ class Lure {
    * @param retrieve  0..1 cuánto está recogiendo el jugador
    * @returns evento de entrada en el agua, para salpicadura y sonido
    */
-  update(dt, { terrain, waterLevel, retrieve = 0, rodTip, retrieveSpeed = 1.5, wind }) {
+  update(dt, { terrain, waterLevel, retrieve = 0, rodTip, retrieveSpeed = 1.5, wind, flow = null }) {
     let event = null;
 
     if (this.state === LureState.FLYING) {
@@ -4234,9 +6074,26 @@ class Lure {
         }
       }
 
+      // La corriente se lleva el señuelo aguas abajo. Un cebo bajo flotador se
+      // va casi entero con el agua; uno plomado, mucho menos. Es lo que obliga
+      // a lanzar aguas arriba y dejarlo bajar en vez de plantarlo en un punto.
+      if (flow && (flow.x || flow.z)) {
+        const arrastre = (this.rig === 'flotador' ? 1.0 : 0.62)
+          / (1 + this.depthTarget * 0.09);
+        this.position.x += flow.x * arrastre * dt;
+        this.position.z += flow.z * arrastre * dt;
+        this.drift = Math.hypot(flow.x, flow.z) * arrastre;
+      } else {
+        this.drift = 0;
+      }
+
       // Un señuelo se trabaja recogiendo; un cebo bajo flotador atrae quieto,
       // así que conserva una acción de fondo en vez de apagarse del todo.
-      const actionTarget = this.rig === 'flotador' ? Math.max(0.4, retrieve) : retrieve;
+      // La propia corriente hace trabajar al señuelo aunque no se recoja.
+      const actionTarget = Math.max(
+        this.rig === 'flotador' ? Math.max(0.4, retrieve) : retrieve,
+        Math.min(0.5, (this.drift ?? 0) * 0.55)
+      );
       this.action = damp(this.action, actionTarget, 6, dt);
       this.object.rotation.z += this.action * dt * 6;
     }
@@ -4766,6 +6623,9 @@ class FishingSystem {
       waterLevel: this.terrain.waterLevel,
       retrieve: this.state === FishingState.FIGHTING ? 0 : this.retrieveInput,
       rodTip: this._rodTip,
+      flow: this.terrain.field.hasCurrent
+        ? this.terrain.field.flowAt(this.lure.position.x, this.lure.position.z, this._flow ??= {})
+        : null,
       retrieveSpeed: stats.retrieveSpeed,
       wind: context.wind
     });
@@ -5030,7 +6890,13 @@ class FishingSystem {
     // siluro de récord no rompe el hilo — se suelta — y eso es exactamente la
     // razón para ir a comprar una caña mejor.
     const overmatch = clamp(power / Math.max(0.6, this.dragForce), 0, 4);
-    f.hookHold = clamp(f.hookHold - dt * 0.012 * overmatch * (0.4 + this.tensionRatio), 0, 1);
+    // El tamaño del anzuelo cuenta: una cucharilla de ocho gramos lleva un
+    // anzuelo pequeño que se abre antes que el de un boilie de dieciocho. Es
+    // lo que hace que montar grande no sea sólo cuestión de llegar más lejos.
+    const anzuelo = clamp(0.7 + (this.equipment.lure?.weightG ?? 10) / 22, 0.7, 1.9);
+    f.hookHold = clamp(
+      f.hookHold - dt * 0.012 * overmatch * (0.4 + this.tensionRatio) / anzuelo, 0, 1
+    );
     if (!f.warned && f.hookHold < 0.35) {
       f.warned = true;
       this._say('El anzuelo empieza a ceder: cóbralo ya', 'bad');
@@ -5092,7 +6958,7 @@ class FishingSystem {
   _loseFish(fish, reason) {
     this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
-    this.events?.onFishLost?.(fish);
+    this.events?.onFishLost?.(fish, reason);
     this.fishManager.release(fish);
     this.hooked = null;
     this.fight = null;
@@ -5242,13 +7108,6 @@ const COAT = 0x2c4a5e;
 const TROUSERS = 0x3a4048;
 const HAT = 0x7a6a3c;
 
-function limb(material, radius, length) {
-  const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(radius, length, 4, 8), material);
-  mesh.position.y = -length / 2 - radius * 0.5;   // cuelga de la articulación
-  mesh.castShadow = true;
-  return mesh;
-}
-
 class PlayerBody {
   constructor() {
     this.root = new THREE.Group();
@@ -5294,12 +7153,12 @@ class PlayerBody {
       const shoulder = new THREE.Group();
       shoulder.position.set(sign * 0.23, 0.44, 0);
       this.torso.add(shoulder);
-      shoulder.add(limb(coat, 0.055, 0.26));
+      shoulder.add(capsuleLimb(coat, 0.055, 0.26));
 
       const elbow = new THREE.Group();
       elbow.position.y = -0.33;
       shoulder.add(elbow);
-      elbow.add(limb(skin, 0.048, 0.24));
+      elbow.add(capsuleLimb(skin, 0.048, 0.24));
 
       this.arms[side] = { shoulder, elbow };
     }
@@ -5338,12 +7197,12 @@ class PlayerBody {
       const hip = new THREE.Group();
       hip.position.set(sign * 0.11, 0, 0);
       this.hips.add(hip);
-      hip.add(limb(trousers, 0.075, 0.34));
+      hip.add(capsuleLimb(trousers, 0.075, 0.34));
 
       const knee = new THREE.Group();
       knee.position.y = -0.42;
       hip.add(knee);
-      knee.add(limb(trousers, 0.062, 0.32));
+      knee.add(capsuleLimb(trousers, 0.062, 0.32));
 
       const foot = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.06, 0.24), coat);
       foot.position.set(0, -0.42, 0.05);
@@ -5787,8 +7646,38 @@ const TIPS = [
   },
   {
     id: 'zonas',
-    when: (s) => s.money >= 2500,
-    text: 'Ya te llega para otra zona de pesca: pulsa Z.'
+    when: (s) => s.money >= 600 && s.level >= 2,
+    text: 'Con Z abres el mapa de la cuenca: allí se compran los permisos de las otras aguas.'
+  },
+  {
+    id: 'personajes',
+    when: (s) => s.nearNpc,
+    text: 'Hay alguien delante. Pulsa E para hablar: la gente da encargos, compra pescado y cuenta cosas.'
+  },
+  {
+    id: 'diario',
+    when: (s) => s.questsActive >= 1,
+    text: 'Con J abres el diario: qué llevas entre manos, qué falta y quién te lo pidió.'
+  },
+  {
+    id: 'enciclopedia',
+    when: (s) => s.discovered >= 3,
+    text: 'Con C abres la enciclopedia. Cada especie que cobras abre su ficha: dónde vive, a qué hora y con qué señuelo.'
+  },
+  {
+    id: 'corriente',
+    when: (s) => s.hasCurrent && s.fishingState === 'fishing',
+    text: 'Aquí hay corriente: el señuelo baja solo. Lanza aguas arriba y déjalo trabajar hacia ti.'
+  },
+  {
+    id: 'anzuelo',
+    when: (s) => s.lastEvent === 'hookPull',
+    text: 'El anzuelo se ha abierto: ese pez es demasiado para tu aparejo. Caña más fuerte, freno mayor y un señuelo más grande.'
+  },
+  {
+    id: 'suceso',
+    when: (s) => s.worldEvent,
+    text: 'Algo está pasando en el agua. Estos ratos duran poco y cambian mucho lo que pica: aprovéchalos.'
   },
   {
     id: 'flotador',
@@ -5966,6 +7855,99 @@ const CSS = `
 .sw-hint { font-size: 12px; color: var(--dim); line-height: 1.6; }
 .sw-keys { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 12.5px; margin-top: 6px; }
 .sw-keys b { color: var(--accent); font-weight: 600; }
+
+/* ---- diálogo ---- */
+.sw-dialogue { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%);
+  width: min(720px, 92vw); background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 12px; padding: 16px 20px 14px; pointer-events: auto;
+  backdrop-filter: blur(10px); box-shadow: 0 24px 60px -22px #000; }
+.sw-dialogue .who { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--accent); }
+.sw-dialogue .who span { color: var(--dim); text-transform: none; letter-spacing: .02em; margin-left: 8px; font-size: 11.5px; }
+.sw-dialogue .line { font-size: 15px; line-height: 1.62; margin-top: 8px; min-height: 52px; }
+.sw-dialogue .line em { color: var(--accent); font-style: normal; }
+.sw-dialogue .foot { display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; margin-top: 12px; }
+.sw-dialogue .adv { font-size: 11.5px; color: var(--dim); }
+.sw-choices { display: flex; flex-wrap: wrap; gap: 7px; }
+.sw-choices button { background: rgba(255,255,255,.05); border: 1px solid var(--edge);
+  border-radius: 8px; padding: 8px 14px; font-size: 12.5px; font-weight: 550; }
+.sw-choices button.primary { background: var(--accent); border-color: var(--accent); color: #06231f; }
+
+/* ---- seguimiento de misión en el HUD ---- */
+.sw-track { position: absolute; right: 18px; top: 56px; width: 232px; background: var(--panel);
+  border: 1px solid var(--edge); border-left: 3px solid var(--warn); border-radius: 10px;
+  padding: 10px 13px; backdrop-filter: blur(8px); }
+.sw-track .k { font-size: 9.5px; text-transform: uppercase; letter-spacing: .14em; color: var(--warn); }
+.sw-track .t { font-size: 13px; font-weight: 620; margin-top: 3px; line-height: 1.35; }
+.sw-track .o { font-size: 11.5px; color: var(--dim); margin-top: 6px; display: flex;
+  justify-content: space-between; gap: 8px; line-height: 1.4; }
+.sw-track .o.done { color: var(--good); text-decoration: line-through; }
+.sw-track .o b { font-variant-numeric: tabular-nums; color: #eef4f6; flex-shrink: 0; }
+.sw-track .where { font-size: 11px; color: var(--accent); margin-top: 7px; }
+
+/* ---- nivel ---- */
+.sw-level { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
+.sw-event { position: absolute; left: 50%; top: 56px; transform: translateX(-50%);
+  background: var(--panel); border: 1px solid var(--warn); border-radius: 99px;
+  padding: 5px 15px; font-size: 12px; letter-spacing: .01em; backdrop-filter: blur(8px);
+  color: #ffe6ab; }
+.sw-level .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.sw-xpbar { height: 4px; border-radius: 99px; background: rgba(255,255,255,.13); overflow: hidden; }
+.sw-xpbar i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+
+/* ---- avisos de progreso ---- */
+.sw-notes { position: absolute; left: 50%; top: 128px; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 6px; width: 460px; }
+.sw-note { background: var(--panel); border: 1px solid var(--edge); border-left: 3px solid var(--accent);
+  border-radius: 8px; padding: 8px 14px; font-size: 12.5px; backdrop-filter: blur(8px);
+  animation: swin .35s ease both; max-width: 100%; text-align: center; }
+.sw-note.gold { border-left-color: var(--warn); }
+.sw-note.good { border-left-color: var(--good); }
+@keyframes swin { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+/* ---- diario y enciclopedia ---- */
+.sw-quest { border: 1px solid var(--edge); border-radius: 10px; padding: 12px 14px;
+  margin-bottom: 8px; background: rgba(255,255,255,.03); }
+.sw-quest.tracked { border-color: rgba(242,193,78,.6); }
+.sw-quest.done { opacity: .5; }
+.sw-quest .head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.sw-quest .t { font-size: 14px; font-weight: 620; }
+.sw-quest .meta { font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin-top: 3px; }
+.sw-quest .d { font-size: 12px; color: var(--dim); margin-top: 6px; line-height: 1.5; }
+.sw-quest .obj { font-size: 12px; margin-top: 7px; display: flex; justify-content: space-between; gap: 10px; }
+.sw-quest .obj.ok { color: var(--good); }
+.sw-quest .obj b { font-variant-numeric: tabular-nums; }
+.sw-quest .rw { font-size: 11.5px; color: var(--warn); margin-top: 8px; }
+.sw-quest .hint { font-size: 11.5px; color: var(--accent); margin-top: 6px; font-style: italic; }
+.sw-chaptitle { font-size: 11px; text-transform: uppercase; letter-spacing: .14em;
+  color: var(--accent); margin: 16px 0 8px; }
+.sw-chaptitle:first-child { margin-top: 0; }
+
+.sw-fish { border: 1px solid var(--edge); border-radius: 10px; padding: 12px 13px;
+  background: rgba(255,255,255,.03); }
+.sw-fish.unknown { opacity: .42; }
+.sw-fish .t { font-size: 13.5px; font-weight: 620; display: flex; align-items: baseline; gap: 7px; }
+.sw-fish .lat { font-style: italic; color: var(--dim); font-size: 11px; margin-top: 2px; }
+.sw-fish .r { font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; padding: 2px 7px;
+  border-radius: 99px; border: 1px solid currentColor; flex-shrink: 0; }
+.sw-fish .r.comun { color: var(--dim); }
+.sw-fish .r.raro { color: var(--accent); }
+.sw-fish .r.legendario { color: var(--warn); }
+.sw-fish .g { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11.5px;
+  margin-top: 8px; color: var(--dim); }
+.sw-fish .g b { color: #eef4f6; font-weight: 550; font-variant-numeric: tabular-nums; }
+.sw-swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; vertical-align: -1px; }
+
+/* ---- menú principal ---- */
+.sw-menu { position: absolute; inset: 0; pointer-events: auto; display: flex;
+  flex-direction: column; align-items: center; justify-content: center; gap: 26px;
+  background: radial-gradient(ellipse at 50% 40%, rgba(10,18,24,.72), rgba(4,7,10,.96)); }
+.sw-menu h1 { font-size: 46px; font-weight: 300; letter-spacing: .16em; text-transform: uppercase; }
+.sw-menu .sub { font-size: 13px; color: var(--dim); letter-spacing: .06em; margin-top: -18px; }
+.sw-menu .acts { display: flex; flex-direction: column; gap: 9px; width: 268px; }
+.sw-menu .acts button { padding: 12px; border-radius: 9px; font-size: 14px; }
+.sw-menu .save { font-size: 11.5px; color: var(--dim); text-align: center; line-height: 1.6; }
+.sw-prologue { max-width: 560px; text-align: center; font-size: 15px; line-height: 1.75; color: #cfdde5; }
 `;
 
 const el = (tag, className, html) => {
@@ -5996,7 +7978,8 @@ class UI {
     this.chips = {
       time: this._chip('Hora', '07:30'),
       weather: this._chip('Tiempo', 'Despejado'),
-      money: this._chip('Monedas', '60')
+      money: this._chip('Monedas', '60'),
+      level: this._levelChip()
     };
     this.chips.money.classList.add('sw-money');
     Object.values(this.chips).forEach((c) => this.topbar.appendChild(c));
@@ -6004,6 +7987,17 @@ class UI {
 
     this.gearBox = el('div', 'sw-gear');
     this.root.appendChild(this.gearBox);
+
+    this.trackBox = el('div', 'sw-track');
+    this.trackBox.style.display = 'none';
+    this.root.appendChild(this.trackBox);
+
+    this.notes = el('div', 'sw-notes');
+    this.root.appendChild(this.notes);
+
+    this.eventBox = el('div', 'sw-event');
+    this.eventBox.style.display = 'none';
+    this.root.appendChild(this.eventBox);
 
     this.tensionBox = el('div', 'sw-tension');
     this.tensionBox.innerHTML = `
@@ -6048,6 +8042,24 @@ class UI {
     this.root.appendChild(this.toast);
   }
 
+  /** Chip de nivel con su barra de experiencia. */
+  _levelChip() {
+    const chip = el('div', 'sw-chip');
+    chip.innerHTML = `<div class="sw-level">
+      <div class="top"><span class="k">Nivel <b class="lv">1</b></span><b class="ti" style="font-size:10.5px;color:var(--dim);font-weight:500;white-space:nowrap">Novato</b></div>
+      <div class="sw-xpbar"><i></i></div></div>`;
+    return chip;
+  }
+
+  setLevel(level, title, [have, need]) {
+    const lv = this.chips.level.querySelector('.lv');
+    if (lv.textContent !== String(level)) lv.textContent = level;
+    const ti = this.chips.level.querySelector('.ti');
+    if (ti.textContent !== title) ti.textContent = title;
+    this.chips.level.querySelector('.sw-xpbar i').style.width =
+      `${clamp(have / Math.max(1, need), 0, 1) * 100}%`;
+  }
+
   _chip(key, value) {
     const chip = el('div', 'sw-chip');
     chip.innerHTML = `<span class="k">${key}</span><b>${value}</b>`;
@@ -6078,7 +8090,7 @@ class UI {
     const hud = fishing;
     // El panel de tensión sólo importa con el aparejo fuera. En reposo estorba.
     const relevante = hud.state !== FishingState.IDLE && hud.state !== FishingState.AIMING;
-    const quiere = relevante ? 'block' : 'none';
+    const quiere = relevante && !this._hudHidden ? 'block' : 'none';
     if (this.tensionBox.style.display !== quiere) this.tensionBox.style.display = quiere;
     if (!relevante) { this._updatePrompt(hud); this._updateToast(hud.message); return; }
 
@@ -6182,18 +8194,22 @@ class UI {
   showWelcome(onStart) {
     const body = el('div', 'help');
     body.innerHTML = `
-      <p>Estás en el muelle del <b>Lago de la Niebla</b>. Tres cosas y ya puedes pescar:</p>
+      <p>Estás en el muelle del <b>Lago de la Niebla</b>, delante de la cabaña de tu abuela.
+      Con esto ya puedes pescar:</p>
       <div class="sw-keys" style="margin:12px 0 14px">
         <b>Clic izq. mantenido</b><span>Carga el lanzamiento; al soltar, lanza. Cuanto más cargues, más lejos.</span>
         <b>Clic izq.</b><span>Clavar cuando pique. La ventana es corta.</span>
         <b>Clic der. mantenido</b><span>Recoger. Vigila la tensión: si se dispara, suelta.</span>
+        <b>E</b><span>Hablar con la gente y usar lo que tengas delante.</span>
+        <b>J</b><span>Diario: qué misión llevas y qué falta.</span>
       </div>
-      <p class="sw-hint">El resto se explica solo sobre la marcha. <b>Esc</b> muestra todos los controles.</p>`;
+      <p class="sw-hint">Hay tres personas en la orilla esperando a que te presentes.
+      <b>Esc</b> muestra todos los controles.</p>`;
     const go = el('button', 'sw-btn sw-cta', 'Empezar a pescar');
     go.style.marginTop = '16px';
     go.addEventListener('click', () => { this.closePanel(); onStart?.(); });
     body.appendChild(go);
-    this._overlay('Still Waters', body, { onClose: onStart });
+    this._overlay('Aguas de Valdés', body, { onClose: onStart });
   }
 
   /** Funde a negro, ejecuta `during` y vuelve. Para saltos de tiempo. */
@@ -6240,6 +8256,13 @@ class UI {
   }
 
   get isPanelOpen() { return !!this.openPanel; }
+
+  /** Cierra todo lo que puede estar tapando el juego. */
+  closeAll() {
+    this.closeDialogue();
+    this.closePanel();
+    this._closeMenu();
+  }
 
   showCatch(fish, result, { onKeep, onRelease }) {
     const body = el('div', 'sw-catch');
@@ -6394,21 +8417,33 @@ class UI {
     this._overlay('Estadísticas', body);
   }
 
-  showZones(zones, economy, currentId) {
+  /**
+   * Mapa de la cuenca. Cada zona dice qué la abre: dinero y nivel, o la propia
+   * historia. Una zona cerrada por historia no se compra: se cuenta qué falta.
+   */
+  showZones(zones, economy, currentId, extras = {}) {
+    const { quests = null, lockReason = () => null, speciesKnown = () => 0 } = extras;
     const body = el('div');
     const render = () => {
       body.innerHTML = '';
-      const money = el('div', 'sw-hint', `Monedas disponibles: <b style="color:var(--warn)">${economy.money}</b>`);
+      const money = el('div', 'sw-hint',
+        `Monedas: <b style="color:var(--warn)">${economy.money}</b> · Nivel <b>${economy.level}</b> (${economy.title})`);
       money.style.marginBottom = '12px';
       body.appendChild(money);
 
       zones.forEach((zone) => {
         const unlocked = economy.unlockedZones.includes(zone.id);
         const here = zone.id === currentId;
+        const visited = economy.zonesVisited.has(zone.id);
+        const motivo = lockReason(zone, economy, quests);
         const row = el('div', `sw-item${here ? ' equipped' : ''}`);
+        const conocidas = speciesKnown(zone);
+        const detalle = visited
+          ? `${conocidas}/${zone.species.length} especies registradas · hasta ${zone.terrain.maxDepth} m`
+          : `${zone.species.length} especies · hasta ${zone.terrain.maxDepth} m de calado`;
         row.innerHTML = `<div><div class="t">${zone.name}</div>
           <div class="d">${zone.description}</div>
-          <div class="stats">${zone.species.length} especies · hasta ${zone.terrain.maxDepth} m de calado</div></div>`;
+          <div class="stats">${detalle}</div></div>`;
         const act = el('div', 'act');
         if (here) {
           act.appendChild(el('span', 'sw-tag', 'Estás aquí'));
@@ -6416,8 +8451,14 @@ class UI {
           const go = el('button', 'sw-btn', 'Viajar');
           go.addEventListener('click', () => this.cb.onTravel?.(zone.id));
           act.appendChild(go);
+        } else if (motivo) {
+          const tag = el('span', 'sw-tag', motivo);
+          tag.style.color = 'var(--dim)';
+          tag.style.maxWidth = '150px';
+          tag.style.textAlign = 'right';
+          act.appendChild(tag);
         } else {
-          const buy = el('button', 'sw-btn', `${zone.price}`);
+          const buy = el('button', 'sw-btn', `Permiso · ${zone.price}`);
           buy.disabled = !economy.canAfford(zone.price);
           buy.addEventListener('click', () => {
             if (this.cb.onUnlockZone?.(zone.id)) render();
@@ -6429,7 +8470,318 @@ class UI {
       });
     };
     render();
-    this._overlay('Zonas de pesca', body);
+    this._overlay('Cuenca de Valdés', body);
+  }
+
+  // ------------------------------------------------------------- narrativa
+  /**
+   * Caja de diálogo. Pasa las líneas una a una con clic o espacio, y al final
+   * muestra las opciones (aceptar misión, entregar, tienda, despedirse).
+   *
+   * No es un panel modal como los demás: el mundo se sigue viendo detrás,
+   * porque el personaje está delante del jugador y hay que verlo gesticular.
+   */
+  showDialogue({ name, role, lines, options = [], onAdvance = null, onClose = null }) {
+    this.closeDialogue();
+    const box = el('div', 'sw-dialogue');
+    box.innerHTML = `<div class="who">${name}${role ? `<span>${role}</span>` : ''}</div>
+      <div class="line"></div>
+      <div class="foot"><div class="sw-choices"></div><div class="adv"></div></div>`;
+    const lineNode = box.querySelector('.line');
+    const choices = box.querySelector('.sw-choices');
+    const adv = box.querySelector('.adv');
+    this.root.appendChild(box);
+    this._setHudVisible(false);
+
+    let index = 0;
+    const paint = () => {
+      lineNode.innerHTML = lines[index] ?? '';
+      const last = index >= lines.length - 1;
+      adv.textContent = last ? '' : `Clic o espacio · ${index + 1}/${lines.length}`;
+      choices.innerHTML = '';
+      if (!last) return;
+      options.forEach((opt, i) => {
+        const b = el('button', i === 0 ? 'primary' : null, opt.label);
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (opt.keepOpen) { opt.action?.(); return; }
+          this.closeDialogue();
+          opt.action?.();
+        });
+        choices.appendChild(b);
+      });
+      if (!options.length) {
+        const b = el('button', 'primary', 'Cerrar');
+        b.addEventListener('click', () => this.closeDialogue());
+        choices.appendChild(b);
+      }
+    };
+    this.dialogue = {
+      box, onClose,
+      advance: () => {
+        if (index < lines.length - 1) { index++; paint(); onAdvance?.(index); return true; }
+        return false;
+      }
+    };
+    box.addEventListener('click', () => this.dialogue?.advance());
+    paint();
+    this.cb.onDialogueOpen?.();
+    return this.dialogue;
+  }
+
+  advanceDialogue() { return this.dialogue?.advance() ?? false; }
+
+  /**
+   * Durante una conversación el HUD estorba: tapa al personaje y compite con
+   * el texto. Se apaga todo menos la barra superior, que da contexto.
+   */
+  _setHudVisible(on, { topbar = true } = {}) {
+    const v = on ? '' : 'none';
+    if (!topbar || on) this.topbar.style.display = on ? '' : 'none';
+    this.gearBox.style.display = v;
+    this.hint.style.display = v;
+    this.prompt.style.display = v;
+    this.crosshair.style.display = v;
+    this._hudHidden = !on;
+    if (!on) {
+      this.tensionBox.style.display = 'none';
+      this.trackBox.style.display = 'none';
+      this.eventBox.style.display = 'none';
+    }
+  }
+
+  get isDialogueOpen() { return !!this.dialogue; }
+
+  closeDialogue() {
+    if (!this.dialogue) return;
+    const cb = this.dialogue.onClose;
+    this.root.removeChild(this.dialogue.box);
+    this.dialogue = null;
+    this._setHudVisible(true);
+    cb?.();
+    this.cb.onDialogueClose?.();
+  }
+
+  /** Aviso efímero en el centro: objetivo cumplido, nivel, página encontrada. */
+  note(text, kind = '') {
+    const node = el('div', `sw-note${kind ? ' ' + kind : ''}`, text);
+    this.notes.appendChild(node);
+    setTimeout(() => {
+      node.style.transition = 'opacity .5s ease';
+      node.style.opacity = '0';
+      setTimeout(() => node.remove(), 520);
+    }, 3400);
+    while (this.notes.children.length > 4) this.notes.firstChild.remove();
+  }
+
+  /** Recuadro de seguimiento de la misión en curso. */
+  /** Aviso del suceso en curso. Vacío lo esconde. */
+  setWorldEvent(text) {
+    const quiere = text && !this._hudHidden ? 'block' : 'none';
+    if (this.eventBox.style.display !== quiere) this.eventBox.style.display = quiere;
+    if (text && this.eventBox.textContent !== text) this.eventBox.textContent = text;
+  }
+
+  setTrackedQuest(quest, quests, zoneName) {
+    if (!quest || this._hudHidden) {
+      if (this.trackBox.style.display !== 'none') this.trackBox.style.display = 'none';
+      return;
+    }
+    const counters = quests.counters(quest.id);
+    const objetivos = quest.objectives.map((o, i) => {
+      const need = o.count ?? 1;
+      const have = Math.min(counters[i], need);
+      const done = have >= need;
+      const cifra = need > 1 ? `<b>${have}/${need}</b>` : (done ? '<b>✓</b>' : '');
+      return `<div class="o${done ? ' done' : ''}"><span>${o.label}</span>${cifra}</div>`;
+    }).join('');
+    const html = `<div class="k">Misión en curso</div>
+      <div class="t">${quest.title}</div>${objetivos}
+      ${quest.hint ? `<div class="where">${quest.hint}</div>` : ''}`;
+    if (this.trackBox.innerHTML !== html) this.trackBox.innerHTML = html;
+    if (this.trackBox.style.display !== 'block') this.trackBox.style.display = 'block';
+  }
+
+  /** Diario de misiones, agrupado por capítulo. */
+  showQuests(quests, storyData) {
+    const { QUESTS, CHAPTERS, QUEST_TYPE_LABEL, NPCS } = storyData;
+    const body = el('div');
+    const render = () => {
+      body.innerHTML = '';
+      const resumen = el('div', 'sw-hint');
+      const hechas = QUESTS.filter((q) => quests.completed.has(q.id)).length;
+      resumen.innerHTML = `<b>${hechas}/${QUESTS.length}</b> misiones completadas ·
+        <b>${quests.pages.length}/5</b> páginas del cuaderno de Remedios`;
+      resumen.style.marginBottom = '14px';
+      body.appendChild(resumen);
+
+      let algo = false;
+      for (const chapter of CHAPTERS) {
+        const visibles = QUESTS.filter((q) => q.chapter === chapter.id &&
+          quests.stateOf(q.id) !== 'bloqueada');
+        if (!visibles.length) continue;
+        algo = true;
+        body.appendChild(el('div', 'sw-chaptitle',
+          `Capítulo ${chapter.id} · ${chapter.title} — ${chapter.subtitle}`));
+        for (const q of visibles) {
+          const state = quests.stateOf(q.id);
+          const done = state === 'completada';
+          const card = el('div', `sw-quest${done ? ' done' : ''}${quests.tracked === q.id ? ' tracked' : ''}`);
+          const counters = quests.counters(q.id);
+          const objetivos = done ? '' : q.objectives.map((o, i) => {
+            const need = o.count ?? 1;
+            const have = Math.min(counters[i], need);
+            return `<div class="obj${have >= need ? ' ok' : ''}"><span>${o.label}</span><b>${have}/${need}</b></div>`;
+          }).join('');
+          const rw = q.reward ?? {};
+          const premios = [
+            rw.money ? `${rw.money} monedas` : null,
+            rw.xp ? `${rw.xp} XP` : null,
+            rw.item ? 'objeto' : null,
+            rw.page ? `página ${rw.page}` : null,
+            rw.unlockZone ? 'zona nueva' : null
+          ].filter(Boolean).join(' · ');
+          const estado = done ? 'Completada'
+            : state === 'porEntregar' ? `Vuelve con ${NPCS[q.turnIn]?.name ?? '—'}`
+            : state === 'disponible' ? `Habla con ${NPCS[q.npc]?.name ?? '—'}` : 'En curso';
+          card.innerHTML = `<div class="head"><div>
+              <div class="t">${q.title}</div>
+              <div class="meta">${QUEST_TYPE_LABEL[q.type] ?? q.type} · ${estado}</div>
+            </div></div>
+            <div class="d">${q.summary}</div>${objetivos}
+            ${!done && q.hint ? `<div class="hint">${q.hint}</div>` : ''}
+            ${premios && !done ? `<div class="rw">Recompensa: ${premios}</div>` : ''}`;
+          if (state === 'activa' || state === 'porEntregar') {
+            const b = el('button', 'sw-btn ghost', quests.tracked === q.id ? 'Siguiendo' : 'Seguir');
+            b.style.marginTop = '9px';
+            b.addEventListener('click', () => {
+              quests.track(quests.tracked === q.id ? null : q.id);
+              render();
+            });
+            card.appendChild(b);
+          }
+          body.appendChild(card);
+        }
+      }
+      if (!algo) body.appendChild(el('div', 'sw-hint', 'Todavía no has hablado con nadie. Busca a alguien en el embarcadero.'));
+    };
+    render();
+    this._overlay('Diario', body);
+  }
+
+  /**
+   * Enciclopedia de peces. Lo que no se ha capturado sale en gris y sin datos:
+   * la ficha es la recompensa de haberlo pescado.
+   */
+  showJournal(economy, species, extras = {}) {
+    const { RARITY_LABEL = {}, zonesOf = () => [], lureName = (x) => x } = extras;
+    const body = el('div');
+    const total = species.length;
+    const vistas = species.filter((s) => economy.records[s.id]?.count).length;
+
+    const resumen = el('div', 'sw-hint');
+    resumen.innerHTML = `<b>${vistas}/${total}</b> especies registradas. Cada ficha se completa al cobrar el primer ejemplar.`;
+    resumen.style.marginBottom = '14px';
+    body.appendChild(resumen);
+
+    const grid = el('div', 'sw-grid');
+    grid.style.gridTemplateColumns = 'repeat(auto-fill,minmax(232px,1fr))';
+    species.forEach((sp) => {
+      const rec = economy.records[sp.id];
+      const known = !!rec?.count;
+      const card = el('div', `sw-fish${known ? '' : ' unknown'}`);
+      if (!known) {
+        card.innerHTML = `<div class="t"><span class="sw-swatch" style="background:#3a4148"></span>
+          <span>Sin descubrir</span><span class="r ${sp.rarity}">${RARITY_LABEL[sp.rarity] ?? sp.rarity}</span></div>
+          <div class="lat">Cóbrala una vez para abrir su ficha</div>`;
+        grid.appendChild(card);
+        return;
+      }
+      const zonas = zonesOf(sp.id);
+      const mejores = Object.entries(sp.lures).sort((a, b) => b[1] - a[1]).slice(0, 2)
+        .map(([id]) => lureName(id)).join(', ');
+      const horas = Object.entries(sp.activity).sort((a, b) => b[1] - a[1])[0][0];
+      const horaLabel = { madrugada: 'Madrugada', manana: 'Mañana', tarde: 'Tarde', noche: 'Noche' }[horas];
+      card.innerHTML = `<div class="t">
+          <span class="sw-swatch" style="background:#${sp.color.toString(16).padStart(6, '0')}"></span>
+          <span>${sp.name}</span><span class="r ${sp.rarity}">${RARITY_LABEL[sp.rarity] ?? sp.rarity}</span></div>
+        <div class="lat">${sp.latin}</div>
+        <div class="g">
+          <span>Talla</span><b>${sp.lengthRange[0]}–${sp.lengthRange[1]} cm</b>
+          <span>Calado</span><b>${sp.depth[0]}–${sp.depth[1]} m</b>
+          <span>Actividad</span><b>${horaLabel}</b>
+          <span>Señuelos</span><b>${mejores}</b>
+          <span>Dónde</span><b>${zonas.join(', ') || '—'}</b>
+          <span>Capturas</span><b>${rec.count}</b>
+          <span>Tu récord</span><b>${rec.bestLength.toFixed(1)} cm · ${rec.bestWeight.toFixed(2)} kg</b>
+        </div>`;
+      grid.appendChild(card);
+    });
+    body.appendChild(grid);
+    this._overlay('Enciclopedia de peces', body);
+  }
+
+  /** Menú principal. `save` es null en partida nueva. */
+  showMainMenu({ save, onContinue, onNew, onSettings }) {
+    this.closePanel();
+    const menu = el('div', 'sw-menu');
+    menu.innerHTML = `<h1>Aguas de Valdés</h1><div class="sub">El cuaderno de Remedios</div>`;
+    const acts = el('div', 'acts');
+    if (save) {
+      const cont = el('button', 'sw-btn', 'Continuar');
+      cont.addEventListener('click', () => { this._closeMenu(); onContinue(); });
+      acts.appendChild(cont);
+    }
+    const nuevo = el('button', `sw-btn${save ? ' ghost' : ''}`, save ? 'Partida nueva' : 'Empezar');
+    nuevo.addEventListener('click', () => {
+      if (save && !nuevo.dataset.confirm) {
+        nuevo.dataset.confirm = '1';
+        nuevo.textContent = '¿Seguro? Se borra la partida';
+        return;
+      }
+      this._closeMenu(); onNew();
+    });
+    acts.appendChild(nuevo);
+    const cfg = el('button', 'sw-btn ghost', 'Ajustes');
+    cfg.addEventListener('click', () => onSettings());
+    acts.appendChild(cfg);
+    menu.appendChild(acts);
+
+    if (save) {
+      const info = el('div', 'save');
+      info.innerHTML = `Nivel ${save.level} · ${save.money} monedas · ${save.species} especies<br>${save.zone}`;
+      menu.appendChild(info);
+    }
+    this.root.appendChild(menu);
+    this.menu = menu;
+    this._setHudVisible(false, { topbar: false });
+    this.setCrosshairVisible(false);
+  }
+
+  _closeMenu() {
+    if (!this.menu) return;
+    this.root.removeChild(this.menu);
+    this.menu = null;
+    this._setHudVisible(true);
+    this.setCrosshairVisible(true);
+  }
+
+  get isMenuOpen() { return !!this.menu; }
+
+  /** Prólogo: se lee una vez, al empezar de cero. */
+  showPrologue(lines, onDone) {
+    this.closePanel();
+    const menu = el('div', 'sw-menu');
+    const text = el('div', 'sw-prologue', lines.map((l) => `<p style="margin-bottom:14px">${l}</p>`).join(''));
+    menu.appendChild(text);
+    const b = el('button', 'sw-btn', 'Empezar');
+    b.style.padding = '12px 34px';
+    b.addEventListener('click', () => { this._closeMenu(); onDone(); });
+    menu.appendChild(b);
+    this.root.appendChild(menu);
+    this.menu = menu;
+    this._setHudVisible(false, { topbar: false });
+    this.setCrosshairVisible(false);
   }
 
   showSettings(settings) {
@@ -6497,7 +8849,7 @@ class UI {
     this._overlay('Configuración', body);
   }
 
-  showPause({ onResume, onSave, onSettings, onReset }) {
+  showPause({ onResume, onSave, onSettings, onMenu, onReset }) {
     const body = el('div');
     const keys = el('div', 'sw-keys');
     keys.innerHTML = `
@@ -6510,16 +8862,18 @@ class UI {
       <b>R</b><span>Recoger el sedal</span>
       <b>Tab</b><span>Equipo</span>
       <b>B</b><span>Tienda</span>
-      <b>C</b><span>Capturas</span>
-      <b>Z</b><span>Zonas de pesca</span>
-      <b>E</b><span>Subir o bajar de la barca</span>
+      <b>C</b><span>Enciclopedia de peces</span>
+      <b>J</b><span>Diario de misiones</span>
+      <b>Z</b><span>Mapa de la cuenca</span>
+      <b>E</b><span>Hablar, interactuar, barca</span>
+      <b>Q</b><span>Guardar o sacar la caña</span>
       <b>G</b><span>Estadísticas</span>
       <b>F</b><span>Cambiar cámara</span>
       <b>Esc</b><span>Pausa</span>`;
     body.appendChild(keys);
 
     const actions = el('div', 'sw-actions');
-    actions.style.marginTop = '18px';
+    actions.style.cssText = 'margin-top:18px;flex-wrap:wrap';
     const mk = (label, cls, fn) => {
       const b = el('button', `sw-btn${cls}`, label);
       b.addEventListener('click', fn);
@@ -6528,6 +8882,7 @@ class UI {
     actions.appendChild(mk('Continuar', '', () => { this.closePanel(); onResume(); }));
     actions.appendChild(mk('Guardar', ' ghost', onSave));
     actions.appendChild(mk('Configuración', ' ghost', () => { this.closePanel(); onSettings(); }));
+    actions.appendChild(mk('Menú principal', ' ghost', () => { this.closePanel(); onMenu?.(); }));
     actions.appendChild(mk('Empezar de cero', ' ghost', onReset));
     body.appendChild(actions);
 
@@ -6651,6 +9006,24 @@ class AudioSystem {
   lineBreak() { this._burst(0.3, { gain: 0.3, from: 4000, to: 700, type: 'highpass' }); this._tone(180, 0.4, { type: 'sawtooth', gain: 0.16, slideTo: 60 }); }
   landed() { [523, 659, 784, 1046].forEach((f, i) => this._tone(f, 0.18, { type: 'triangle', gain: 0.13, delay: i * 0.09 })); }
   coin() { this._tone(880, 0.07, { type: 'square', gain: 0.1 }); this._tone(1320, 0.09, { type: 'square', gain: 0.09, delay: 0.06 }); }
+
+  // --- narrativa -----------------------------------------------------------
+  /** Cada línea de diálogo: un golpecito seco, no una nota musical. */
+  dialogueBeat() { this._tone(320 + Math.random() * 90, 0.035, { type: 'triangle', gain: 0.045 }); }
+  /** Se abre una conversación. */
+  greet() { this._tone(392, 0.12, { type: 'triangle', gain: 0.09 }); this._tone(523, 0.14, { type: 'triangle', gain: 0.08, delay: 0.09 }); }
+  /** Misión aceptada: dos notas que suben. */
+  questAccept() { [440, 587].forEach((f, i) => this._tone(f, 0.16, { type: 'triangle', gain: 0.1, delay: i * 0.1 })); }
+  /** Misión cobrada: acorde corto y satisfecho. */
+  questDone() { [523, 659, 880].forEach((f, i) => this._tone(f, 0.26, { type: 'triangle', gain: 0.11, delay: i * 0.07 })); }
+  /** Subida de nivel: fanfarria breve. */
+  levelUp() { [523, 659, 784, 1046, 1318].forEach((f, i) => this._tone(f, 0.3, { type: 'triangle', gain: 0.12, delay: i * 0.08 })); }
+  /** Objetivo cumplido: un tic claro. */
+  objective() { this._tone(1046, 0.1, { type: 'sine', gain: 0.1 }); this._tone(1568, 0.12, { type: 'sine', gain: 0.08, delay: 0.07 }); }
+  /** Empieza un suceso en el agua: nota grave que llama la atención. */
+  worldEvent() { this._tone(196, 0.5, { type: 'sine', gain: 0.13, slideTo: 262 }); this._tone(392, 0.4, { type: 'triangle', gain: 0.07, delay: 0.14 }); }
+  /** Página del cuaderno encontrada. */
+  page() { [659, 880, 1175].forEach((f, i) => this._tone(f, 0.34, { type: 'sine', gain: 0.1, delay: i * 0.11 })); }
   /** Chapoteo lejano: se atenúa y se apaga de agudos con la distancia. */
   distantSplash(closeness = 1) {
     const c = clamp(closeness, 0.05, 1);
@@ -6731,6 +9104,12 @@ class AudioSystem {
 
 /* ===== src/core/Game.js ===== */
 /**
+ * Exposición base del render. Las zonas la modulan: la garganta necesita más
+ * porque sus paredes tapan el cielo.
+ */
+const BASE_EXPOSURE = 0.85;
+
+/**
  * Orquestador.
  *
  * Construye los sistemas, los conecta y ejecuta el bucle. Ningún sistema
@@ -6767,7 +9146,47 @@ class Game {
     this._initPerformance();
     this._bindInput();
     this._loadProgress();
-    if (!this.save.load()) this.ui.showWelcome(() => this.input.requestLock());
+    this._openMainMenu();
+  }
+
+  /**
+   * Menú de entrada. Es lo primero que se ve: dice si hay partida guardada, en
+   * qué punto quedó, y separa «continuar» de «empezar de cero» sin que el
+   * jugador tenga que borrar nada a mano.
+   */
+  _openMainMenu() {
+    const data = this.save.load();
+    const resumen = data ? {
+      level: this.economy.level,
+      money: this.economy.money,
+      species: this.economy.discovered,
+      zone: zoneOf(data.world?.zone ?? 'lago_niebla').name
+    } : null;
+    this.ui.showMainMenu({
+      save: resumen,
+      onContinue: () => this._beginPlay(),
+      onNew: () => {
+        // Sin partida previa no hay nada que borrar ni que recargar: se juega.
+        if (!data) { this._beginPlay(); return; }
+        this.save.clear();
+        window.location.reload();
+      },
+      onSettings: () => this.ui.showSettings(this.settings)
+    });
+  }
+
+  /** Del menú al juego: prólogo la primera vez, y a pescar. */
+  _beginPlay() {
+    this.audio.init();
+    if (!this.quests.seenPrologue) {
+      this.quests.seenPrologue = true;
+      this.ui.showPrologue(STORY.PROLOGUE, () => {
+        this.ui.showWelcome(() => this.input.requestLock());
+        this._persist();
+      });
+      return;
+    }
+    this.input.requestLock();
   }
 
   // --------------------------------------------------------------- montaje
@@ -6784,7 +9203,7 @@ class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     // El cielo de Preetham emite valores muy altos: con exposición 1 se
     // satura a blanco y el lago lo refleja como una lámina de leche.
-    this.renderer.toneMappingExposure = 0.85;
+    this.renderer.toneMappingExposure = BASE_EXPOSURE;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(
@@ -6800,6 +9219,7 @@ class Game {
     this.sky = new SkyDome(this.scene, this.textures, this.preset);
     this.weather = new Weather(this.scene, this.textures, this.preset);
     this._buildZone(zoneOf('lago_niebla'));
+    this.sky.setZoneLighting(this.zone.lighting);
   }
 
   /**
@@ -6811,6 +9231,11 @@ class Game {
   _buildZone(zone) {
     this.zone = zone;
     this._disposeZone();
+    // Cada agua tiene su color: el verde del río no es el azul del embalse.
+    this._zoneWater = new THREE.Color(zone.palette?.water ?? 0x0d2630);
+    this._waterColor ??= new THREE.Color();
+    this.sky?.setZoneLighting(zone.lighting);
+    this.renderer.toneMappingExposure = BASE_EXPOSURE * (zone.lighting?.exposure ?? 1);
 
     this.terrain = new Terrain(this.textures, { resolution: 300, ...zone.terrain });
     this.scene.add(this.terrain.mesh);
@@ -6837,8 +9262,18 @@ class Game {
       position: this.props.boatAnchor, heading: Math.PI * 0.62
     });
     this.fishManager = new FishManager(this.scene, this.terrain, {
-      seed: zone.terrain.seed + 3, species: zone.species
+      seed: zone.terrain.seed + 3,
+      species: zone.species,
+      // La Sombra no está en el agua hasta que la historia la pone ahí: si el
+      // jugador la pescase de casualidad, el final perdería todo su sentido.
+      allowGated: (id) => id !== 'sombra_valdes' || !!this.quests?.accepted?.has('cap5_sombra')
     });
+    this.crew = new NpcCrew(
+      this.scene,
+      STORY.NPC_LIST.filter((n) => n.zone === zone.id),
+      this.props,
+      this.preset
+    );
     if (this.interaction) this._registerInteractables();
     this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
       seed: zone.terrain.seed + 7, audio: this.audio
@@ -6848,6 +9283,7 @@ class Game {
   _disposeZone() {
     if (!this.terrain) return;
     this.fishManager?.dispose();
+    this.crew?.dispose();
     this.ambient?.dispose();
     this.boat?.dispose();
     this.props?.dispose();
@@ -6884,12 +9320,38 @@ class Game {
     this.scene.updateMatrixWorld(true);
     const spot = this.props.fishingSpots[0];
     this.player.teleport(spot.position.clone());
-    this.player.yaw = Math.atan2(spot.position.x, spot.position.z);
+    this.player.yaw = this._bestViewFrom(spot.position);
     this.time.setHour(zone.startHour);
     this.weather.setWeather(zone.weather);
-    this.economy.currentZone = zone.id;
+    const primeraVez = this.economy.visit(zone.id);
+    this.quests.notify('visit', { zone: zone.id });
     this._persist();
     this.fishing._say(`Has llegado a ${zone.name}`);
+    if (primeraVez) {
+      this.ui?.note(`${zone.name} — ${zone.ambientNote ?? ''}`, 'gold');
+      this.economy.addXp(45);
+    }
+  }
+
+  /**
+   * Hacia dónde mirar desde un puesto: el rumbo con más agua pescable delante.
+   * Apuntar siempre al centro del mapa dejaba al jugador mirando una pared en
+   * el cañón y la orilla de enfrente en el río.
+   */
+  _bestViewFrom(position) {
+    let best = 0, bestScore = -Infinity;
+    for (let i = 0; i < 32; i++) {
+      const yaw = (i / 32) * Math.PI * 2;
+      const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+      let score = 0;
+      for (const d of [6, 12, 20, 30, 44]) {
+        const depth = this.terrain.depthAt(position.x + fx * d, position.z + fz * d);
+        // Se premia el agua pescable; lo demasiado somero y la tierra restan.
+        score += depth > 0.5 ? Math.min(depth, 6) : -2;
+      }
+      if (score > bestScore) { bestScore = score; best = yaw; }
+    }
+    return best;
   }
 
   _initPlayer() {
@@ -6900,14 +9362,81 @@ class Game {
       walkables: [this.props.group]
     });
     this.scene.add(this.player.rig);
-    // Mirando al centro del lago.
-    this.player.yaw = Math.atan2(-spawn.x, -spawn.z) + Math.PI;
+    this.player.yaw = this._bestViewFrom(spawn);
   }
 
   _initProgress() {
     this.inventory = new Inventory();
     this.equipment = new Equipment(this.inventory);
     this.economy = new Economy();
+    this.quests = new QuestSystem(null, this._questEvents());
+    this.worldEvents = new EventSystem({
+      onStart: (e) => {
+        this.ui?.note(`${e.title} — ${e.text}`, 'gold');
+        this.audio?.worldEvent();
+      },
+      onEnd: () => this.ui?.note('El agua vuelve a su ritmo de siempre')
+    });
+  }
+
+  /**
+   * El diario avisa; el juego traduce esos avisos en dinero, experiencia,
+   * objetos y mensajes. Así el sistema de misiones no sabe nada de economía.
+   */
+  _questEvents() {
+    return {
+      onAccept: (quest) => {
+        this.ui?.note(`Nueva misión: ${quest.title}`, 'gold');
+        this.audio?.questAccept();
+      },
+      onProgress: (quest, i, value) => {
+        const o = quest.objectives[i];
+        const need = o.count ?? 1;
+        if (value >= need) {
+          this.ui?.note(`Objetivo cumplido: ${o.label}`, 'good');
+          this.audio?.objective();
+        }
+      },
+      onReady: (quest) => {
+        const npc = STORY.NPCS[quest.turnIn];
+        this.ui?.note(`«${quest.title}» lista. Vuelve con ${npc?.name ?? 'quien te la dio'}.`, 'good');
+        this.audio?.objective();
+      },
+      onComplete: (quest, reward) => this._grantReward(quest, reward)
+    };
+  }
+
+  /** Aplica la recompensa de una misión y lo cuenta por pantalla. */
+  _grantReward(quest, reward) {
+    const partes = [];
+    if (reward.money) { this.economy.sell(reward.money); partes.push(`${reward.money} monedas`); }
+    if (reward.xp) {
+      const subida = this.economy.addXp(reward.xp);
+      partes.push(`${reward.xp} XP`);
+      if (subida) this._onLevelUp(subida);
+    }
+    if (reward.item) {
+      this.inventory.add(reward.item.category, reward.item.id);
+      const item = findItem(reward.item.category, reward.item.id);
+      if (item) partes.push(item.name);
+      this.quests.notify('own', { category: reward.item.category, item: reward.item.id });
+    }
+    if (reward.unlockZone && !this.economy.unlockedZones.includes(reward.unlockZone)) {
+      this.economy.unlockedZones.push(reward.unlockZone);
+      partes.push(`acceso a ${zoneOf(reward.unlockZone).name}`);
+    }
+    if (reward.page) partes.push(`página ${reward.page} del cuaderno`);
+    this.economy.stats.questsDone = (this.economy.stats.questsDone ?? 0) + 1;
+    if (reward.page) this.audio?.page(); else this.audio?.questDone();
+    this.ui?.note(`Misión completada: ${quest.title}${partes.length ? ' · ' + partes.join(' · ') : ''}`, 'gold');
+    this.quests.notify('deliver', { value: this.quests.pages.length });
+    this._persist();
+  }
+
+  _onLevelUp(level) {
+    this.ui?.note(`¡Nivel ${level}! Ahora eres ${this.economy.title}`, 'gold');
+    this.audio?.levelUp();
+    this.quests.notify('level', { value: level });
   }
 
   _initFishing() {
@@ -6945,7 +9474,18 @@ class Game {
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
           this.cameraFx.addShake(0.9);
         },
-        onFishLost: () => { this.economy.stats.lost++; this.lastEvent = 'fishLost'; },
+        onFishLost: (fish, reason) => {
+          this.economy.stats.lost++;
+          this.lastEvent = 'fishLost';
+          // Perder por el anzuelo es siempre lo mismo: el pez es más grande de
+          // lo que aguanta el aparejo. Merece decirse con todas las letras.
+          if (/anzuelo/.test(reason ?? '')) this.lastEvent = 'hookPull';
+          if (/anzuelo/.test(reason ?? '') && fish) {
+            this.ui?.note(
+              `${fish.displayName} de ${fish.weight.toFixed(1)} kg con este aparejo es demasiado. ` +
+              'Una caña más fuerte y un freno mayor lo cambian todo.', 'gold');
+          }
+        },
         onLanded: (fish) => {
           this.lastEvent = 'landed';
           this.cameraFx.addShake(0.2);
@@ -6987,6 +9527,7 @@ class Game {
         if (this.economy.buy(category, id)) {
           this.inventory.add(category, id);
           this.audio.coin();
+          this.quests.notify('own', { category, item: id });
           this._persist();
         }
       },
@@ -6994,6 +9535,8 @@ class Game {
       onUnlockZone: (zoneId) => {
         const zone = zoneOf(zoneId);
         if (this.economy.unlockedZones.includes(zoneId)) return true;
+        const motivo = lockReason(zone, this.economy, this.quests);
+        if (motivo) { this.fishing._say(motivo, 'bad'); return false; }
         if (!this.economy.canAfford(zone.price)) return false;
         this.economy.money -= zone.price;
         this.economy.unlockedZones.push(zoneId);
@@ -7018,7 +9561,7 @@ class Game {
     });
 
     this.input.on('pointerdown', (e) => {
-      if (this.ui.isPanelOpen || !this.input.locked) return;
+      if (this.ui.isPanelOpen || this.ui.isDialogueOpen || !this.input.locked) return;
       if (e.button === 0) {
         if (this.fishing.state === FishingState.BITE) this.fishing.strike();
         else this.fishing.beginCast();
@@ -7030,11 +9573,17 @@ class Game {
 
     this.input.on('keydown', (e) => {
       if (e.repeat) return;
+      if (this.ui.isDialogueOpen) {
+        if (e.code === 'Space' || e.code === 'Enter') { this.ui.advanceDialogue(); return; }
+        if (e.code === 'Escape') { this.ui.closeDialogue(); return; }
+        if (e.code !== 'KeyJ' && e.code !== 'Tab') return;
+      }
       switch (e.code) {
         case 'Escape': this._togglePause(); break;
         case 'Tab': this._panel(() => this.ui.showGear(this.inventory, this.equipment)); break;
         case 'KeyB': this._panel(() => this.ui.showShop(this.inventory, this.economy)); break;
-        case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
+        case 'KeyC': this._panel(() => this._openJournal()); break;
+        case 'KeyJ': this._panel(() => this._openQuests()); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
@@ -7043,7 +9592,7 @@ class Game {
         case 'KeyQ':
           if (!this.ui.isPanelOpen) this.fishing.toggleRod();
           break;
-        case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
+        case 'KeyZ': this._panel(() => this._openMap()); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
           break;
@@ -7091,7 +9640,7 @@ class Game {
    */
   _findShoreNear(position, maxRadius = 13) {
     let best = null;
-    for (let radius = 2.5; radius <= maxRadius; radius += 1.25) {
+    for (let radius = 2.2; radius <= maxRadius; radius += 1) {
       for (let i = 0; i < 20; i++) {
         const angle = (i / 20) * Math.PI * 2;
         const x = position.x + Math.cos(angle) * radius;
@@ -7116,6 +9665,7 @@ class Game {
       onResume: () => {},
       onSave: () => { this._persist(); this.fishing._say('Partida guardada'); },
       onSettings: () => this.ui.showSettings(this.settings),
+      onMenu: () => { this._persist(); this._openMainMenu(); },
       onReset: () => {
         this.save.clear();
         window.location.reload();
@@ -7126,11 +9676,34 @@ class Game {
   // -------------------------------------------------------------- eventos
   _onLanded(fish) {
     this.audio.landed();
+    const nuevaEspecie = !this.economy.records[fish.species.id]?.count;
     const result = this.economy.registerCatch(fish);
+
+    // La experiencia se cobra al sacarlo, no al venderlo: devolver un pez al
+    // agua no debe castigar al jugador que quiere completar la enciclopedia.
+    const subida = this.economy.addXp(result.xp);
+    if (subida) this._onLevelUp(subida);
+
+    // El diario se entera de todo lo que puede hacer avanzar una misión.
+    const hecho = {
+      species: fish.species.id,
+      length: fish.length,
+      weight: fish.weight,
+      zone: this.zone.id,
+      night: this.time.nightFactor > 0.55
+    };
+    this.quests.notify('catch', hecho);
+    this.quests.notify('catchAny', hecho);
+    if (nuevaEspecie) {
+      this.quests.notify('discover', { value: this.economy.discovered });
+      this.ui.note(`Especie nueva en la enciclopedia: ${fish.species.name}`, 'good');
+    }
+
     this.ui.showCatch(fish, result, {
       onKeep: () => {
         this.economy.sell(result.value);
         this.audio.coin();
+        this.quests.notify('money', { value: this.economy.money });
         this.fishing.finishCatch(true);
         this._persist();
       },
@@ -7162,6 +9735,7 @@ class Game {
       equipment: this.equipment.toJSON(),
       economy: this.economy.toJSON(),
       world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
+      quests: this.quests?.toJSON() ?? null,
       coach: this.coach?.toJSON() ?? []
     });
   }
@@ -7172,6 +9746,7 @@ class Game {
     this.inventory = Inventory.fromJSON(data.inventory);
     this.equipment = Equipment.fromJSON(this.inventory, data.equipment);
     this.economy = new Economy(data.economy);
+    this.quests = new QuestSystem(data.quests, this._questEvents());
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
@@ -7210,8 +9785,9 @@ class Game {
    * abierta a un paso fijo si en el futuro hace falta determinismo.
    */
   simulate(dt, { headless = false } = {}) {
-    const panelOpen = this.ui.isPanelOpen;
-    const controllable = headless || (!panelOpen && this.input.locked);
+    const panelOpen = this.ui.isPanelOpen || this.ui.isMenuOpen;
+    const talking = this.ui.isDialogueOpen;
+    const controllable = headless || (!panelOpen && !talking && this.input.locked);
 
     if (controllable && !headless) {
       const mouse = this.input.consumeMouseDelta();
@@ -7229,7 +9805,7 @@ class Game {
       ? this.player.update(dt, this.input)
       : { speed: 0, surface: this.player.surface, depth: 0 };
 
-    this.time.update(panelOpen ? 0 : dt);
+    this.time.update(panelOpen || talking ? 0 : dt);
     this.weather.update(dt, this.player.position, this.time.fogColor);
     this.sky.update(this.time, this.weather, dt, this.player.position);
 
@@ -7243,7 +9819,7 @@ class Game {
     this.water.update(dt, {
       sunDirection: this.time.sunDirection,
       sunColor: this.time.sunColor,
-      waterColor: new THREE.Color(0x0d2630).lerp(this.time.skyColor, 0.16),
+      waterColor: this._waterColor.copy(this._zoneWater).lerp(this.time.skyColor, 0.16),
       choppiness: this.weather.choppiness
     });
     this.vegetation.update(dt, wind, this.player.position);
@@ -7266,6 +9842,8 @@ class Game {
       time: this.clock.elapsedTime,
       weatherModifier: this.weather.biteModifier,
       feeding: this.time.feedingFactor,
+      // Lo que esté pasando en el agua ahora mismo pesa tanto como la hora.
+      worldEvent: this.worldEvents,
       wind,
       lookDelta: this.player.lookDelta,
       cameraPosition: this.player.position,
@@ -7274,17 +9852,37 @@ class Game {
       playerNoise: clamp((moving.speed / 5.6) * (moving.surface === 'agua' ? 1.4 : 0.35), 0, 1.4),
       lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
       lureAction: this.fishing.lure.action,
+      // Función, no vector: cada pez consulta la corriente de su propio sitio.
+      flowAt: this.terrain.field.hasCurrent
+        ? (x, z, out) => this.terrain.field.flowAt(x, z, out)
+        : null,
       onBite: () => {},
       onSpit: () => {}
     };
 
+    if (!panelOpen && !talking) {
+      this.worldEvents.update(dt, {
+        hour: this.time.hour,
+        rain: this.weather.rainAmount,
+        cloudiness: this.weather.cloudiness,
+        night: this.time.nightFactor,
+        level: this.economy.level
+      });
+    }
     if (!panelOpen) {
       this.fishing.update(dt, context);
       this.fishManager.update(dt, context);
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    if (this.crew) {
+      // Los personajes siguen vivos con un panel abierto: al cerrarlo no se
+      // ven dar un salto para recolocarse.
+      this.crew.update(dt, this.player.position, this.talkingTo);
+      for (const npc of this.crew.npcs) npc.setMarker(this.quests.npcMarker(npc.id));
+    }
     if (!panelOpen) this.interaction.update(this.player.position);
+    if (talking && this.talkFocus) this._aimAtFocus(dt);
     this.player.holdingRod = this.fishing.rodStowed ? 0 : 1;
     this.cameraFx.update(dt);
 
@@ -7298,6 +9896,12 @@ class Game {
         casts: this.economy.stats.casts,
         landed: this.economy.stats.landed,
         money: this.economy.money,
+        level: this.economy.level,
+        discovered: this.economy.discovered,
+        questsActive: this.quests.active.length,
+        nearNpc: this.crew.npcs.some((n) => n.attention > 0.5),
+        hasCurrent: !!this.terrain.field.hasCurrent,
+        worldEvent: !!this.worldEvents.current,
         nearBoat: this.boat.canBoard(this.player.position),
         rig: this.fishing.lure.rig
       }, dt);
@@ -7305,6 +9909,9 @@ class Game {
       else if (!this.coach.text) this.ui.showCoach(null);
       this.lastEvent = null;
 
+      this.ui.setLevel(this.economy.level, this.economy.title, this.economy.levelProgress);
+      this.ui.setWorldEvent(this.worldEvents.label);
+      this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name);
       this.ui.update({
         fishing: this.fishing.hud,
         time: this.time,
@@ -7327,6 +9934,7 @@ class Game {
 
     I.register({
       object: this.boat.group,
+      anchorHeight: 0.55,
       range: 4.5,
       label: () => (this.player.platform ? 'E · desembarcar' : 'E · subir a la barca'),
       enabled: () => this.player.platform === this.boat || this.boat.canBoard(this.player.position),
@@ -7334,6 +9942,7 @@ class Game {
     });
     I.register({
       object: this.props.camp,
+      anchorHeight: 0.5,
       range: 4,
       label: () => `E · descansar hasta las ${String(Math.floor(this._nextFeedingHour())).padStart(2, '0')}:00`,
       enabled: () => !this.player.platform,
@@ -7341,6 +9950,7 @@ class Game {
     });
     I.register({
       object: this.props.sign,
+      anchorHeight: 1.1,
       range: 4,
       label: () => `E · ${this.zone.name}: leer el cartel`,
       enabled: () => !this.player.platform,
@@ -7348,10 +9958,195 @@ class Game {
     });
     I.register({
       object: this.props.bucket,
-      range: 3,
+      anchorHeight: 0.2,
+      range: 2.8,
       label: 'E · mirar el cubo de cebo',
       enabled: () => !this.player.platform,
       action: () => this._inspectBait()
+    });
+
+    for (const npc of this.crew.npcs) {
+      I.register({
+        object: npc.root,
+        anchorHeight: 1.35,          // el pecho, no los pies
+        range: 3.6,
+        label: () => {
+          const marca = this.quests.npcMarker(npc.id);
+          const cola = marca === 'entregar' ? ' · tiene algo que decirte'
+            : marca === 'nueva' ? ' · quiere hablar contigo' : '';
+          return `E · hablar con ${npc.name}${cola}`;
+        },
+        enabled: () => !this.player.platform && this.fishing.state !== 'fighting',
+        action: () => this.talkTo(npc.id)
+      });
+    }
+  }
+
+  // -------------------------------------------------------------- diálogo
+  /**
+   * Conversación con un personaje.
+   *
+   * Una sola pantalla encadena todo lo que puede pasar con él: entregar lo que
+   * ya está hecho, ofrecer lo siguiente, abrir la tienda o los permisos, y
+   * despedirse. El orden importa: primero se cobra, luego se acepta.
+   */
+  talkTo(npcId) {
+    const npc = STORY.NPCS[npcId];
+    const actor = this.crew.byId(npcId);
+    // Sólo se habla con quien está delante. Sin esto se podía entregar una
+    // misión a alguien que estaba a tres zonas de distancia.
+    if (!npc || !actor) return false;
+    this.talkingTo = npcId;
+    // La vista se lleva sola hacia la cara del personaje: hablar mirando al
+    // suelo o de perfil rompía por completo la escena.
+    this.talkFocus = actor
+      ? actor.root.position.clone().setY(actor.root.position.y + 1.5 * actor.height)
+      : null;
+    actor?.speak();
+    this.audio?.greet();
+    this.input.releaseLock();
+
+    const primera = !this.quests.metNpcs.has(npcId);
+    this.quests.meet(npcId);
+    const { offer, turnIn, inProgress } = this.quests.forNpc(npcId);
+
+    // Lo primero, cobrar lo que ya está hecho.
+    if (turnIn.length) { this._dialogueTurnIn(npc, turnIn[0]); return; }
+    if (offer.length) { this._dialogueOffer(npc, offer[0], primera); return; }
+
+    const lines = primera ? [...npc.greet] : [this._pick(npc.idle)];
+    if (inProgress.length) {
+      const q = inProgress[0];
+      lines.push(`—Sigue con lo tuyo: <em>${q.title}</em>. Aquí estaré.`);
+    }
+    this._openDialogue(npc, lines, this._npcOptions(npc));
+    return true;
+  }
+
+  _pick(list) { return list[Math.floor(Math.random() * list.length)]; }
+
+  /** Lo que el jugador ya lleva hecho, para no pedirle dos veces lo mismo. */
+  _questSnapshot() {
+    return {
+      records: this.economy.records,
+      discovered: this.economy.discovered,
+      level: this.economy.level,
+      money: this.economy.money,
+      pages: this.quests.pages.length,
+      visited: this.economy.zonesVisited,
+      met: this.quests.metNpcs,
+      owns: (category, id) => this.inventory.has(category, id)
+    };
+  }
+
+  /** Encara suavemente la vista con quien está hablando. */
+  _aimAtFocus(dt) {
+    const eye = this.camera.getWorldPosition(new THREE.Vector3());
+    const dx = this.talkFocus.x - eye.x;
+    const dz = this.talkFocus.z - eye.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.2) return;
+    const wantYaw = Math.atan2(-dx, -dz);
+    const wantPitch = Math.atan2(this.talkFocus.y - eye.y, dist);
+    let d = wantYaw - this.player.yaw;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const k = 1 - Math.exp(-5 * dt);
+    this.player.yaw += d * k;
+    this.player.pitch += (wantPitch - this.player.pitch) * k;
+  }
+
+  /** Opciones fijas de un personaje: su tienda, sus permisos, despedirse. */
+  _npcOptions(npc) {
+    const options = [];
+    if (npc.shop) {
+      options.push({
+        label: 'Ver la tienda',
+        action: () => this._panelFromDialogue(() => this.ui.showShop(this.inventory, this.economy))
+      });
+    }
+    if (npc.sellsPermits) {
+      options.push({
+        label: 'Permisos y mapa',
+        action: () => this._panelFromDialogue(() => this._openMap())
+      });
+    }
+    options.push({ label: 'Despedirse', action: () => {} });
+    return options;
+  }
+
+  _openDialogue(npc, lines, options) {
+    const actor = this.crew.byId(npc.id);
+    this.ui.showDialogue({
+      name: npc.name,
+      role: npc.role,
+      lines,
+      options,
+      onAdvance: () => { actor?.speak(); this.audio?.dialogueBeat(); },
+      onClose: () => {
+        this.talkingTo = null;
+        this.talkFocus = null;
+        if (!this.ui.isPanelOpen) this.input.requestLock();
+      }
+    });
+  }
+
+  _panelFromDialogue(open) {
+    this.ui.closeDialogue();
+    open();
+  }
+
+  _dialogueOffer(npc, quest, primera) {
+    const lines = primera ? [...npc.greet] : [];
+    lines.push(`—<em>${quest.title}</em>`, quest.summary);
+    if (quest.hint) lines.push(`—${quest.hint}`);
+    this._openDialogue(npc, lines, [
+      {
+        label: 'Aceptar',
+        action: () => {
+          this.quests.accept(quest.id, this._questSnapshot());
+          this._persist();
+          // Encadena: si tiene más que ofrecer, sigue la conversación.
+          const mas = this.quests.forNpc(npc.id);
+          if (mas.offer.length) setTimeout(() => this._dialogueOffer(npc, mas.offer[0], false), 120);
+        }
+      },
+      { label: 'Ahora no', action: () => {} },
+      ...this._npcOptions(npc).filter((o) => o.label !== 'Despedirse')
+    ]);
+  }
+
+  _dialogueTurnIn(npc, quest) {
+    const lines = [...(quest.complete ?? ['—Buen trabajo.'])];
+    this._openDialogue(npc, lines, [
+      {
+        label: 'Cobrar la misión',
+        action: () => {
+          this.quests.turnIn(quest.id);
+          const siguiente = this.quests.forNpc(npc.id);
+          if (siguiente.turnIn.length) setTimeout(() => this._dialogueTurnIn(npc, siguiente.turnIn[0]), 140);
+          else if (siguiente.offer.length) setTimeout(() => this._dialogueOffer(npc, siguiente.offer[0], false), 140);
+        }
+      }
+    ]);
+  }
+
+  _openQuests() { this.ui.showQuests(this.quests, STORY); }
+
+  _openJournal() {
+    this.ui.showJournal(this.economy, SPECIES, {
+      RARITY_LABEL,
+      zonesOf: (id) => ZONES.filter((z) => z.species.includes(id) &&
+        this.economy.zonesVisited.has(z.id)).map((z) => z.short),
+      lureName: (id) => findItem('lures', id)?.name ?? id
+    });
+  }
+
+  _openMap() {
+    this.ui.showZones(ZONES, this.economy, this.zone.id, {
+      quests: this.quests,
+      lockReason,
+      speciesKnown: (zone) => zone.species.filter((id) => this.economy.records[id]?.count).length
     });
   }
 

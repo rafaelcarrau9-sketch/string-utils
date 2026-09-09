@@ -68,3 +68,26 @@ export function crossPlanes(width, height, upBias = 0) {
   }
   return merged;
 }
+
+/**
+ * Geometrías cacheadas por clave. Los cuerpos —jugador y personajes— se montan
+ * todos con las mismas cápsulas y esferas: crear una malla nueva por persona
+ * era gastar memoria y llamadas de dibujo para nada.
+ */
+const SHARED = new Map();
+export function sharedGeometry(key, build) {
+  let g = SHARED.get(key);
+  if (!g) { g = build(); SHARED.set(key, g); }
+  return g;
+}
+
+/** Segmento de extremidad que cuelga de su articulación. */
+export function capsuleLimb(material, radius, length, { shadows = true } = {}) {
+  const mesh = new THREE.Mesh(
+    sharedGeometry(`limb:${radius}:${length}`, () => new THREE.CapsuleGeometry(radius, length, 4, 8)),
+    material
+  );
+  mesh.position.y = -length / 2 - radius * 0.5;
+  mesh.castShadow = shadows;
+  return mesh;
+}

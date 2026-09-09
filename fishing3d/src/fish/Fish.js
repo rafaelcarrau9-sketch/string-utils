@@ -264,6 +264,26 @@ export class Fish {
     }
 
     if (!this.isBusy) {
+      // Corriente: el agua empuja al pez y él nada contra ella para aguantar
+      // el puesto. El resultado es que en el río los peces se colocan mirando
+      // aguas arriba, que es exactamente lo que hacen los de verdad.
+      const flow = context.flowAt?.(this.position.x, this.position.z, this._flow ??= {});
+      if (flow && (flow.x || flow.z)) {
+        const fuerza = Math.hypot(flow.x, flow.z);
+        // Los peces de corriente la remontan casi entera; los demás se dejan
+        // llevar más y acaban buscando los remansos.
+        const aguante = clamp(
+          (this.species.prefersCurrent ? 1.05 : 0.7) * (this.species.speed / 4), 0.25, 1.05
+        );
+        this.position.x += flow.x * (1 - aguante) * dt;
+        this.position.z += flow.z * (1 - aguante) * dt;
+        // Encara aguas arriba: se suma una velocidad contra la corriente.
+        this.velocity.x -= flow.x * aguante * 0.9;
+        this.velocity.z -= flow.z * aguante * 0.9;
+        this.inCurrent = fuerza;
+      } else {
+        this.inCurrent = 0;
+      }
       this.position.addScaledVector(this.velocity, dt);
       this._clampToWater(context.terrain);
     }
@@ -282,7 +302,11 @@ export class Fish {
       let delta = desired - this.heading2D;
       while (delta > Math.PI) delta -= Math.PI * 2;
       while (delta < -Math.PI) delta += Math.PI * 2;
-      const turn = delta * (1 - Math.exp(-4.5 * dt));
+      // Amortiguado y además con tope de velocidad angular: un pez gira
+      // rápido, pero no instantáneamente. Sin el tope, un cambio brusco de
+      // velocidad —tocar fondo, huir del jugador— se veía como un corte.
+      const maxTurn = 5.0 * dt;                       // ~285°/s
+      const turn = clamp(delta * (1 - Math.exp(-4.5 * dt)), -maxTurn, maxTurn);
       this.heading2D += turn;
       this.turnRate = damp(this.turnRate, turn / Math.max(dt, 1e-3), 6, dt);
 
@@ -311,7 +335,10 @@ export class Fish {
     const maxY = terrain.waterLevel - 0.15;
     if (minY >= maxY) {
       // Ha llegado a un bajío sin calado: da media vuelta hacia el centro.
-      this.velocity.set(-this.position.x, 0, -this.position.z).normalize().multiplyScalar(this.species.speed * 0.4);
+      // Se encara al agua honda mezclando, no de un tirón.
+      const hacia = new THREE.Vector3(-this.position.x, 0, -this.position.z)
+        .normalize().multiplyScalar(this.species.speed * 0.4);
+      this.velocity.lerp(hacia, 0.25);
       this.position.y = Math.min(maxY, minY);
       return;
     }

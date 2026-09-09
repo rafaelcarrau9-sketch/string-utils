@@ -115,6 +115,24 @@ export class AudioSystem {
   lineBreak() { this._burst(0.3, { gain: 0.3, from: 4000, to: 700, type: 'highpass' }); this._tone(180, 0.4, { type: 'sawtooth', gain: 0.16, slideTo: 60 }); }
   landed() { [523, 659, 784, 1046].forEach((f, i) => this._tone(f, 0.18, { type: 'triangle', gain: 0.13, delay: i * 0.09 })); }
   coin() { this._tone(880, 0.07, { type: 'square', gain: 0.1 }); this._tone(1320, 0.09, { type: 'square', gain: 0.09, delay: 0.06 }); }
+
+  // --- narrativa -----------------------------------------------------------
+  /** Cada línea de diálogo: un golpecito seco, no una nota musical. */
+  dialogueBeat() { this._tone(320 + Math.random() * 90, 0.035, { type: 'triangle', gain: 0.045 }); }
+  /** Se abre una conversación. */
+  greet() { this._tone(392, 0.12, { type: 'triangle', gain: 0.09 }); this._tone(523, 0.14, { type: 'triangle', gain: 0.08, delay: 0.09 }); }
+  /** Misión aceptada: dos notas que suben. */
+  questAccept() { [440, 587].forEach((f, i) => this._tone(f, 0.16, { type: 'triangle', gain: 0.1, delay: i * 0.1 })); }
+  /** Misión cobrada: acorde corto y satisfecho. */
+  questDone() { [523, 659, 880].forEach((f, i) => this._tone(f, 0.26, { type: 'triangle', gain: 0.11, delay: i * 0.07 })); }
+  /** Subida de nivel: fanfarria breve. */
+  levelUp() { [523, 659, 784, 1046, 1318].forEach((f, i) => this._tone(f, 0.3, { type: 'triangle', gain: 0.12, delay: i * 0.08 })); }
+  /** Objetivo cumplido: un tic claro. */
+  objective() { this._tone(1046, 0.1, { type: 'sine', gain: 0.1 }); this._tone(1568, 0.12, { type: 'sine', gain: 0.08, delay: 0.07 }); }
+  /** Empieza un suceso en el agua: nota grave que llama la atención. */
+  worldEvent() { this._tone(196, 0.5, { type: 'sine', gain: 0.13, slideTo: 262 }); this._tone(392, 0.4, { type: 'triangle', gain: 0.07, delay: 0.14 }); }
+  /** Página del cuaderno encontrada. */
+  page() { [659, 880, 1175].forEach((f, i) => this._tone(f, 0.34, { type: 'sine', gain: 0.1, delay: i * 0.11 })); }
   /** Chapoteo lejano: se atenúa y se apaga de agudos con la distancia. */
   distantSplash(closeness = 1) {
     const c = clamp(closeness, 0.05, 1);

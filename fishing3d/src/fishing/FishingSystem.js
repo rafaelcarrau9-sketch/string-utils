@@ -219,6 +219,9 @@ export class FishingSystem {
       waterLevel: this.terrain.waterLevel,
       retrieve: this.state === FishingState.FIGHTING ? 0 : this.retrieveInput,
       rodTip: this._rodTip,
+      flow: this.terrain.field.hasCurrent
+        ? this.terrain.field.flowAt(this.lure.position.x, this.lure.position.z, this._flow ??= {})
+        : null,
       retrieveSpeed: stats.retrieveSpeed,
       wind: context.wind
     });
@@ -483,7 +486,13 @@ export class FishingSystem {
     // siluro de récord no rompe el hilo — se suelta — y eso es exactamente la
     // razón para ir a comprar una caña mejor.
     const overmatch = clamp(power / Math.max(0.6, this.dragForce), 0, 4);
-    f.hookHold = clamp(f.hookHold - dt * 0.012 * overmatch * (0.4 + this.tensionRatio), 0, 1);
+    // El tamaño del anzuelo cuenta: una cucharilla de ocho gramos lleva un
+    // anzuelo pequeño que se abre antes que el de un boilie de dieciocho. Es
+    // lo que hace que montar grande no sea sólo cuestión de llegar más lejos.
+    const anzuelo = clamp(0.7 + (this.equipment.lure?.weightG ?? 10) / 22, 0.7, 1.9);
+    f.hookHold = clamp(
+      f.hookHold - dt * 0.012 * overmatch * (0.4 + this.tensionRatio) / anzuelo, 0, 1
+    );
     if (!f.warned && f.hookHold < 0.35) {
       f.warned = true;
       this._say('El anzuelo empieza a ceder: cóbralo ya', 'bad');
@@ -545,7 +554,7 @@ export class FishingSystem {
   _loseFish(fish, reason) {
     this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
-    this.events?.onFishLost?.(fish);
+    this.events?.onFishLost?.(fish, reason);
     this.fishManager.release(fish);
     this.hooked = null;
     this.fight = null;

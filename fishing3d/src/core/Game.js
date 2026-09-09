@@ -16,7 +16,8 @@ import { AmbientLife } from '../world/AmbientLife.js';
 import { CameraFx } from '../player/CameraFx.js';
 import { InteractionSystem } from '../world/InteractionSystem.js';
 import { Boat } from '../world/Boat.js';
-import { ZONES, zoneOf } from '../world/Zones.js';
+import { ZONES, zoneOf, lockReason } from '../world/Zones.js';
+import { NpcCrew } from '../world/Npc.js';
 import { Props } from '../world/Props.js';
 
 import { TimeOfDay } from '../weather/TimeOfDay.js';
@@ -30,10 +31,21 @@ import { Inventory } from '../gear/Inventory.js';
 import { Equipment } from '../gear/Equipment.js';
 import { Economy } from '../economy/Economy.js';
 
+import { QuestSystem } from '../story/QuestSystem.js';
+import { EventSystem } from '../story/Events.js';
+import { STORY } from '../story/StoryData.js';
+import { SPECIES, SPECIES_BY_ID, RARITY_LABEL } from '../fish/FishData.js';
+import { findItem } from '../gear/GearData.js';
 import { UI } from '../ui/UI.js';
 import { Coach } from '../ui/Coach.js';
 import { Performance } from './Performance.js';
 import { AudioSystem } from '../audio/AudioSystem.js';
+
+/**
+ * Exposición base del render. Las zonas la modulan: la garganta necesita más
+ * porque sus paredes tapan el cielo.
+ */
+const BASE_EXPOSURE = 0.85;
 
 /**
  * Orquestador.
@@ -72,7 +84,47 @@ export class Game {
     this._initPerformance();
     this._bindInput();
     this._loadProgress();
-    if (!this.save.load()) this.ui.showWelcome(() => this.input.requestLock());
+    this._openMainMenu();
+  }
+
+  /**
+   * Menú de entrada. Es lo primero que se ve: dice si hay partida guardada, en
+   * qué punto quedó, y separa «continuar» de «empezar de cero» sin que el
+   * jugador tenga que borrar nada a mano.
+   */
+  _openMainMenu() {
+    const data = this.save.load();
+    const resumen = data ? {
+      level: this.economy.level,
+      money: this.economy.money,
+      species: this.economy.discovered,
+      zone: zoneOf(data.world?.zone ?? 'lago_niebla').name
+    } : null;
+    this.ui.showMainMenu({
+      save: resumen,
+      onContinue: () => this._beginPlay(),
+      onNew: () => {
+        // Sin partida previa no hay nada que borrar ni que recargar: se juega.
+        if (!data) { this._beginPlay(); return; }
+        this.save.clear();
+        window.location.reload();
+      },
+      onSettings: () => this.ui.showSettings(this.settings)
+    });
+  }
+
+  /** Del menú al juego: prólogo la primera vez, y a pescar. */
+  _beginPlay() {
+    this.audio.init();
+    if (!this.quests.seenPrologue) {
+      this.quests.seenPrologue = true;
+      this.ui.showPrologue(STORY.PROLOGUE, () => {
+        this.ui.showWelcome(() => this.input.requestLock());
+        this._persist();
+      });
+      return;
+    }
+    this.input.requestLock();
   }
 
   // --------------------------------------------------------------- montaje
@@ -89,7 +141,7 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     // El cielo de Preetham emite valores muy altos: con exposición 1 se
     // satura a blanco y el lago lo refleja como una lámina de leche.
-    this.renderer.toneMappingExposure = 0.85;
+    this.renderer.toneMappingExposure = BASE_EXPOSURE;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(
@@ -105,6 +157,7 @@ export class Game {
     this.sky = new SkyDome(this.scene, this.textures, this.preset);
     this.weather = new Weather(this.scene, this.textures, this.preset);
     this._buildZone(zoneOf('lago_niebla'));
+    this.sky.setZoneLighting(this.zone.lighting);
   }
 
   /**
@@ -116,6 +169,11 @@ export class Game {
   _buildZone(zone) {
     this.zone = zone;
     this._disposeZone();
+    // Cada agua tiene su color: el verde del río no es el azul del embalse.
+    this._zoneWater = new THREE.Color(zone.palette?.water ?? 0x0d2630);
+    this._waterColor ??= new THREE.Color();
+    this.sky?.setZoneLighting(zone.lighting);
+    this.renderer.toneMappingExposure = BASE_EXPOSURE * (zone.lighting?.exposure ?? 1);
 
     this.terrain = new Terrain(this.textures, { resolution: 300, ...zone.terrain });
     this.scene.add(this.terrain.mesh);
@@ -142,8 +200,18 @@ export class Game {
       position: this.props.boatAnchor, heading: Math.PI * 0.62
     });
     this.fishManager = new FishManager(this.scene, this.terrain, {
-      seed: zone.terrain.seed + 3, species: zone.species
+      seed: zone.terrain.seed + 3,
+      species: zone.species,
+      // La Sombra no está en el agua hasta que la historia la pone ahí: si el
+      // jugador la pescase de casualidad, el final perdería todo su sentido.
+      allowGated: (id) => id !== 'sombra_valdes' || !!this.quests?.accepted?.has('cap5_sombra')
     });
+    this.crew = new NpcCrew(
+      this.scene,
+      STORY.NPC_LIST.filter((n) => n.zone === zone.id),
+      this.props,
+      this.preset
+    );
     if (this.interaction) this._registerInteractables();
     this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
       seed: zone.terrain.seed + 7, audio: this.audio
@@ -153,6 +221,7 @@ export class Game {
   _disposeZone() {
     if (!this.terrain) return;
     this.fishManager?.dispose();
+    this.crew?.dispose();
     this.ambient?.dispose();
     this.boat?.dispose();
     this.props?.dispose();
@@ -189,12 +258,38 @@ export class Game {
     this.scene.updateMatrixWorld(true);
     const spot = this.props.fishingSpots[0];
     this.player.teleport(spot.position.clone());
-    this.player.yaw = Math.atan2(spot.position.x, spot.position.z);
+    this.player.yaw = this._bestViewFrom(spot.position);
     this.time.setHour(zone.startHour);
     this.weather.setWeather(zone.weather);
-    this.economy.currentZone = zone.id;
+    const primeraVez = this.economy.visit(zone.id);
+    this.quests.notify('visit', { zone: zone.id });
     this._persist();
     this.fishing._say(`Has llegado a ${zone.name}`);
+    if (primeraVez) {
+      this.ui?.note(`${zone.name} — ${zone.ambientNote ?? ''}`, 'gold');
+      this.economy.addXp(45);
+    }
+  }
+
+  /**
+   * Hacia dónde mirar desde un puesto: el rumbo con más agua pescable delante.
+   * Apuntar siempre al centro del mapa dejaba al jugador mirando una pared en
+   * el cañón y la orilla de enfrente en el río.
+   */
+  _bestViewFrom(position) {
+    let best = 0, bestScore = -Infinity;
+    for (let i = 0; i < 32; i++) {
+      const yaw = (i / 32) * Math.PI * 2;
+      const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+      let score = 0;
+      for (const d of [6, 12, 20, 30, 44]) {
+        const depth = this.terrain.depthAt(position.x + fx * d, position.z + fz * d);
+        // Se premia el agua pescable; lo demasiado somero y la tierra restan.
+        score += depth > 0.5 ? Math.min(depth, 6) : -2;
+      }
+      if (score > bestScore) { bestScore = score; best = yaw; }
+    }
+    return best;
   }
 
   _initPlayer() {
@@ -205,14 +300,81 @@ export class Game {
       walkables: [this.props.group]
     });
     this.scene.add(this.player.rig);
-    // Mirando al centro del lago.
-    this.player.yaw = Math.atan2(-spawn.x, -spawn.z) + Math.PI;
+    this.player.yaw = this._bestViewFrom(spawn);
   }
 
   _initProgress() {
     this.inventory = new Inventory();
     this.equipment = new Equipment(this.inventory);
     this.economy = new Economy();
+    this.quests = new QuestSystem(null, this._questEvents());
+    this.worldEvents = new EventSystem({
+      onStart: (e) => {
+        this.ui?.note(`${e.title} — ${e.text}`, 'gold');
+        this.audio?.worldEvent();
+      },
+      onEnd: () => this.ui?.note('El agua vuelve a su ritmo de siempre')
+    });
+  }
+
+  /**
+   * El diario avisa; el juego traduce esos avisos en dinero, experiencia,
+   * objetos y mensajes. Así el sistema de misiones no sabe nada de economía.
+   */
+  _questEvents() {
+    return {
+      onAccept: (quest) => {
+        this.ui?.note(`Nueva misión: ${quest.title}`, 'gold');
+        this.audio?.questAccept();
+      },
+      onProgress: (quest, i, value) => {
+        const o = quest.objectives[i];
+        const need = o.count ?? 1;
+        if (value >= need) {
+          this.ui?.note(`Objetivo cumplido: ${o.label}`, 'good');
+          this.audio?.objective();
+        }
+      },
+      onReady: (quest) => {
+        const npc = STORY.NPCS[quest.turnIn];
+        this.ui?.note(`«${quest.title}» lista. Vuelve con ${npc?.name ?? 'quien te la dio'}.`, 'good');
+        this.audio?.objective();
+      },
+      onComplete: (quest, reward) => this._grantReward(quest, reward)
+    };
+  }
+
+  /** Aplica la recompensa de una misión y lo cuenta por pantalla. */
+  _grantReward(quest, reward) {
+    const partes = [];
+    if (reward.money) { this.economy.sell(reward.money); partes.push(`${reward.money} monedas`); }
+    if (reward.xp) {
+      const subida = this.economy.addXp(reward.xp);
+      partes.push(`${reward.xp} XP`);
+      if (subida) this._onLevelUp(subida);
+    }
+    if (reward.item) {
+      this.inventory.add(reward.item.category, reward.item.id);
+      const item = findItem(reward.item.category, reward.item.id);
+      if (item) partes.push(item.name);
+      this.quests.notify('own', { category: reward.item.category, item: reward.item.id });
+    }
+    if (reward.unlockZone && !this.economy.unlockedZones.includes(reward.unlockZone)) {
+      this.economy.unlockedZones.push(reward.unlockZone);
+      partes.push(`acceso a ${zoneOf(reward.unlockZone).name}`);
+    }
+    if (reward.page) partes.push(`página ${reward.page} del cuaderno`);
+    this.economy.stats.questsDone = (this.economy.stats.questsDone ?? 0) + 1;
+    if (reward.page) this.audio?.page(); else this.audio?.questDone();
+    this.ui?.note(`Misión completada: ${quest.title}${partes.length ? ' · ' + partes.join(' · ') : ''}`, 'gold');
+    this.quests.notify('deliver', { value: this.quests.pages.length });
+    this._persist();
+  }
+
+  _onLevelUp(level) {
+    this.ui?.note(`¡Nivel ${level}! Ahora eres ${this.economy.title}`, 'gold');
+    this.audio?.levelUp();
+    this.quests.notify('level', { value: level });
   }
 
   _initFishing() {
@@ -250,7 +412,18 @@ export class Game {
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
           this.cameraFx.addShake(0.9);
         },
-        onFishLost: () => { this.economy.stats.lost++; this.lastEvent = 'fishLost'; },
+        onFishLost: (fish, reason) => {
+          this.economy.stats.lost++;
+          this.lastEvent = 'fishLost';
+          // Perder por el anzuelo es siempre lo mismo: el pez es más grande de
+          // lo que aguanta el aparejo. Merece decirse con todas las letras.
+          if (/anzuelo/.test(reason ?? '')) this.lastEvent = 'hookPull';
+          if (/anzuelo/.test(reason ?? '') && fish) {
+            this.ui?.note(
+              `${fish.displayName} de ${fish.weight.toFixed(1)} kg con este aparejo es demasiado. ` +
+              'Una caña más fuerte y un freno mayor lo cambian todo.', 'gold');
+          }
+        },
         onLanded: (fish) => {
           this.lastEvent = 'landed';
           this.cameraFx.addShake(0.2);
@@ -292,6 +465,7 @@ export class Game {
         if (this.economy.buy(category, id)) {
           this.inventory.add(category, id);
           this.audio.coin();
+          this.quests.notify('own', { category, item: id });
           this._persist();
         }
       },
@@ -299,6 +473,8 @@ export class Game {
       onUnlockZone: (zoneId) => {
         const zone = zoneOf(zoneId);
         if (this.economy.unlockedZones.includes(zoneId)) return true;
+        const motivo = lockReason(zone, this.economy, this.quests);
+        if (motivo) { this.fishing._say(motivo, 'bad'); return false; }
         if (!this.economy.canAfford(zone.price)) return false;
         this.economy.money -= zone.price;
         this.economy.unlockedZones.push(zoneId);
@@ -323,7 +499,7 @@ export class Game {
     });
 
     this.input.on('pointerdown', (e) => {
-      if (this.ui.isPanelOpen || !this.input.locked) return;
+      if (this.ui.isPanelOpen || this.ui.isDialogueOpen || !this.input.locked) return;
       if (e.button === 0) {
         if (this.fishing.state === FishingState.BITE) this.fishing.strike();
         else this.fishing.beginCast();
@@ -335,11 +511,17 @@ export class Game {
 
     this.input.on('keydown', (e) => {
       if (e.repeat) return;
+      if (this.ui.isDialogueOpen) {
+        if (e.code === 'Space' || e.code === 'Enter') { this.ui.advanceDialogue(); return; }
+        if (e.code === 'Escape') { this.ui.closeDialogue(); return; }
+        if (e.code !== 'KeyJ' && e.code !== 'Tab') return;
+      }
       switch (e.code) {
         case 'Escape': this._togglePause(); break;
         case 'Tab': this._panel(() => this.ui.showGear(this.inventory, this.equipment)); break;
         case 'KeyB': this._panel(() => this.ui.showShop(this.inventory, this.economy)); break;
-        case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
+        case 'KeyC': this._panel(() => this._openJournal()); break;
+        case 'KeyJ': this._panel(() => this._openQuests()); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
@@ -348,7 +530,7 @@ export class Game {
         case 'KeyQ':
           if (!this.ui.isPanelOpen) this.fishing.toggleRod();
           break;
-        case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
+        case 'KeyZ': this._panel(() => this._openMap()); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
           break;
@@ -396,7 +578,7 @@ export class Game {
    */
   _findShoreNear(position, maxRadius = 13) {
     let best = null;
-    for (let radius = 2.5; radius <= maxRadius; radius += 1.25) {
+    for (let radius = 2.2; radius <= maxRadius; radius += 1) {
       for (let i = 0; i < 20; i++) {
         const angle = (i / 20) * Math.PI * 2;
         const x = position.x + Math.cos(angle) * radius;
@@ -421,6 +603,7 @@ export class Game {
       onResume: () => {},
       onSave: () => { this._persist(); this.fishing._say('Partida guardada'); },
       onSettings: () => this.ui.showSettings(this.settings),
+      onMenu: () => { this._persist(); this._openMainMenu(); },
       onReset: () => {
         this.save.clear();
         window.location.reload();
@@ -431,11 +614,34 @@ export class Game {
   // -------------------------------------------------------------- eventos
   _onLanded(fish) {
     this.audio.landed();
+    const nuevaEspecie = !this.economy.records[fish.species.id]?.count;
     const result = this.economy.registerCatch(fish);
+
+    // La experiencia se cobra al sacarlo, no al venderlo: devolver un pez al
+    // agua no debe castigar al jugador que quiere completar la enciclopedia.
+    const subida = this.economy.addXp(result.xp);
+    if (subida) this._onLevelUp(subida);
+
+    // El diario se entera de todo lo que puede hacer avanzar una misión.
+    const hecho = {
+      species: fish.species.id,
+      length: fish.length,
+      weight: fish.weight,
+      zone: this.zone.id,
+      night: this.time.nightFactor > 0.55
+    };
+    this.quests.notify('catch', hecho);
+    this.quests.notify('catchAny', hecho);
+    if (nuevaEspecie) {
+      this.quests.notify('discover', { value: this.economy.discovered });
+      this.ui.note(`Especie nueva en la enciclopedia: ${fish.species.name}`, 'good');
+    }
+
     this.ui.showCatch(fish, result, {
       onKeep: () => {
         this.economy.sell(result.value);
         this.audio.coin();
+        this.quests.notify('money', { value: this.economy.money });
         this.fishing.finishCatch(true);
         this._persist();
       },
@@ -467,6 +673,7 @@ export class Game {
       equipment: this.equipment.toJSON(),
       economy: this.economy.toJSON(),
       world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
+      quests: this.quests?.toJSON() ?? null,
       coach: this.coach?.toJSON() ?? []
     });
   }
@@ -477,6 +684,7 @@ export class Game {
     this.inventory = Inventory.fromJSON(data.inventory);
     this.equipment = Equipment.fromJSON(this.inventory, data.equipment);
     this.economy = new Economy(data.economy);
+    this.quests = new QuestSystem(data.quests, this._questEvents());
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
@@ -515,8 +723,9 @@ export class Game {
    * abierta a un paso fijo si en el futuro hace falta determinismo.
    */
   simulate(dt, { headless = false } = {}) {
-    const panelOpen = this.ui.isPanelOpen;
-    const controllable = headless || (!panelOpen && this.input.locked);
+    const panelOpen = this.ui.isPanelOpen || this.ui.isMenuOpen;
+    const talking = this.ui.isDialogueOpen;
+    const controllable = headless || (!panelOpen && !talking && this.input.locked);
 
     if (controllable && !headless) {
       const mouse = this.input.consumeMouseDelta();
@@ -534,7 +743,7 @@ export class Game {
       ? this.player.update(dt, this.input)
       : { speed: 0, surface: this.player.surface, depth: 0 };
 
-    this.time.update(panelOpen ? 0 : dt);
+    this.time.update(panelOpen || talking ? 0 : dt);
     this.weather.update(dt, this.player.position, this.time.fogColor);
     this.sky.update(this.time, this.weather, dt, this.player.position);
 
@@ -548,7 +757,7 @@ export class Game {
     this.water.update(dt, {
       sunDirection: this.time.sunDirection,
       sunColor: this.time.sunColor,
-      waterColor: new THREE.Color(0x0d2630).lerp(this.time.skyColor, 0.16),
+      waterColor: this._waterColor.copy(this._zoneWater).lerp(this.time.skyColor, 0.16),
       choppiness: this.weather.choppiness
     });
     this.vegetation.update(dt, wind, this.player.position);
@@ -571,6 +780,8 @@ export class Game {
       time: this.clock.elapsedTime,
       weatherModifier: this.weather.biteModifier,
       feeding: this.time.feedingFactor,
+      // Lo que esté pasando en el agua ahora mismo pesa tanto como la hora.
+      worldEvent: this.worldEvents,
       wind,
       lookDelta: this.player.lookDelta,
       cameraPosition: this.player.position,
@@ -579,17 +790,37 @@ export class Game {
       playerNoise: clamp((moving.speed / 5.6) * (moving.surface === 'agua' ? 1.4 : 0.35), 0, 1.4),
       lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
       lureAction: this.fishing.lure.action,
+      // Función, no vector: cada pez consulta la corriente de su propio sitio.
+      flowAt: this.terrain.field.hasCurrent
+        ? (x, z, out) => this.terrain.field.flowAt(x, z, out)
+        : null,
       onBite: () => {},
       onSpit: () => {}
     };
 
+    if (!panelOpen && !talking) {
+      this.worldEvents.update(dt, {
+        hour: this.time.hour,
+        rain: this.weather.rainAmount,
+        cloudiness: this.weather.cloudiness,
+        night: this.time.nightFactor,
+        level: this.economy.level
+      });
+    }
     if (!panelOpen) {
       this.fishing.update(dt, context);
       this.fishManager.update(dt, context);
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    if (this.crew) {
+      // Los personajes siguen vivos con un panel abierto: al cerrarlo no se
+      // ven dar un salto para recolocarse.
+      this.crew.update(dt, this.player.position, this.talkingTo);
+      for (const npc of this.crew.npcs) npc.setMarker(this.quests.npcMarker(npc.id));
+    }
     if (!panelOpen) this.interaction.update(this.player.position);
+    if (talking && this.talkFocus) this._aimAtFocus(dt);
     this.player.holdingRod = this.fishing.rodStowed ? 0 : 1;
     this.cameraFx.update(dt);
 
@@ -603,6 +834,12 @@ export class Game {
         casts: this.economy.stats.casts,
         landed: this.economy.stats.landed,
         money: this.economy.money,
+        level: this.economy.level,
+        discovered: this.economy.discovered,
+        questsActive: this.quests.active.length,
+        nearNpc: this.crew.npcs.some((n) => n.attention > 0.5),
+        hasCurrent: !!this.terrain.field.hasCurrent,
+        worldEvent: !!this.worldEvents.current,
         nearBoat: this.boat.canBoard(this.player.position),
         rig: this.fishing.lure.rig
       }, dt);
@@ -610,6 +847,9 @@ export class Game {
       else if (!this.coach.text) this.ui.showCoach(null);
       this.lastEvent = null;
 
+      this.ui.setLevel(this.economy.level, this.economy.title, this.economy.levelProgress);
+      this.ui.setWorldEvent(this.worldEvents.label);
+      this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name);
       this.ui.update({
         fishing: this.fishing.hud,
         time: this.time,
@@ -632,6 +872,7 @@ export class Game {
 
     I.register({
       object: this.boat.group,
+      anchorHeight: 0.55,
       range: 4.5,
       label: () => (this.player.platform ? 'E · desembarcar' : 'E · subir a la barca'),
       enabled: () => this.player.platform === this.boat || this.boat.canBoard(this.player.position),
@@ -639,6 +880,7 @@ export class Game {
     });
     I.register({
       object: this.props.camp,
+      anchorHeight: 0.5,
       range: 4,
       label: () => `E · descansar hasta las ${String(Math.floor(this._nextFeedingHour())).padStart(2, '0')}:00`,
       enabled: () => !this.player.platform,
@@ -646,6 +888,7 @@ export class Game {
     });
     I.register({
       object: this.props.sign,
+      anchorHeight: 1.1,
       range: 4,
       label: () => `E · ${this.zone.name}: leer el cartel`,
       enabled: () => !this.player.platform,
@@ -653,10 +896,195 @@ export class Game {
     });
     I.register({
       object: this.props.bucket,
-      range: 3,
+      anchorHeight: 0.2,
+      range: 2.8,
       label: 'E · mirar el cubo de cebo',
       enabled: () => !this.player.platform,
       action: () => this._inspectBait()
+    });
+
+    for (const npc of this.crew.npcs) {
+      I.register({
+        object: npc.root,
+        anchorHeight: 1.35,          // el pecho, no los pies
+        range: 3.6,
+        label: () => {
+          const marca = this.quests.npcMarker(npc.id);
+          const cola = marca === 'entregar' ? ' · tiene algo que decirte'
+            : marca === 'nueva' ? ' · quiere hablar contigo' : '';
+          return `E · hablar con ${npc.name}${cola}`;
+        },
+        enabled: () => !this.player.platform && this.fishing.state !== 'fighting',
+        action: () => this.talkTo(npc.id)
+      });
+    }
+  }
+
+  // -------------------------------------------------------------- diálogo
+  /**
+   * Conversación con un personaje.
+   *
+   * Una sola pantalla encadena todo lo que puede pasar con él: entregar lo que
+   * ya está hecho, ofrecer lo siguiente, abrir la tienda o los permisos, y
+   * despedirse. El orden importa: primero se cobra, luego se acepta.
+   */
+  talkTo(npcId) {
+    const npc = STORY.NPCS[npcId];
+    const actor = this.crew.byId(npcId);
+    // Sólo se habla con quien está delante. Sin esto se podía entregar una
+    // misión a alguien que estaba a tres zonas de distancia.
+    if (!npc || !actor) return false;
+    this.talkingTo = npcId;
+    // La vista se lleva sola hacia la cara del personaje: hablar mirando al
+    // suelo o de perfil rompía por completo la escena.
+    this.talkFocus = actor
+      ? actor.root.position.clone().setY(actor.root.position.y + 1.5 * actor.height)
+      : null;
+    actor?.speak();
+    this.audio?.greet();
+    this.input.releaseLock();
+
+    const primera = !this.quests.metNpcs.has(npcId);
+    this.quests.meet(npcId);
+    const { offer, turnIn, inProgress } = this.quests.forNpc(npcId);
+
+    // Lo primero, cobrar lo que ya está hecho.
+    if (turnIn.length) { this._dialogueTurnIn(npc, turnIn[0]); return; }
+    if (offer.length) { this._dialogueOffer(npc, offer[0], primera); return; }
+
+    const lines = primera ? [...npc.greet] : [this._pick(npc.idle)];
+    if (inProgress.length) {
+      const q = inProgress[0];
+      lines.push(`—Sigue con lo tuyo: <em>${q.title}</em>. Aquí estaré.`);
+    }
+    this._openDialogue(npc, lines, this._npcOptions(npc));
+    return true;
+  }
+
+  _pick(list) { return list[Math.floor(Math.random() * list.length)]; }
+
+  /** Lo que el jugador ya lleva hecho, para no pedirle dos veces lo mismo. */
+  _questSnapshot() {
+    return {
+      records: this.economy.records,
+      discovered: this.economy.discovered,
+      level: this.economy.level,
+      money: this.economy.money,
+      pages: this.quests.pages.length,
+      visited: this.economy.zonesVisited,
+      met: this.quests.metNpcs,
+      owns: (category, id) => this.inventory.has(category, id)
+    };
+  }
+
+  /** Encara suavemente la vista con quien está hablando. */
+  _aimAtFocus(dt) {
+    const eye = this.camera.getWorldPosition(new THREE.Vector3());
+    const dx = this.talkFocus.x - eye.x;
+    const dz = this.talkFocus.z - eye.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.2) return;
+    const wantYaw = Math.atan2(-dx, -dz);
+    const wantPitch = Math.atan2(this.talkFocus.y - eye.y, dist);
+    let d = wantYaw - this.player.yaw;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const k = 1 - Math.exp(-5 * dt);
+    this.player.yaw += d * k;
+    this.player.pitch += (wantPitch - this.player.pitch) * k;
+  }
+
+  /** Opciones fijas de un personaje: su tienda, sus permisos, despedirse. */
+  _npcOptions(npc) {
+    const options = [];
+    if (npc.shop) {
+      options.push({
+        label: 'Ver la tienda',
+        action: () => this._panelFromDialogue(() => this.ui.showShop(this.inventory, this.economy))
+      });
+    }
+    if (npc.sellsPermits) {
+      options.push({
+        label: 'Permisos y mapa',
+        action: () => this._panelFromDialogue(() => this._openMap())
+      });
+    }
+    options.push({ label: 'Despedirse', action: () => {} });
+    return options;
+  }
+
+  _openDialogue(npc, lines, options) {
+    const actor = this.crew.byId(npc.id);
+    this.ui.showDialogue({
+      name: npc.name,
+      role: npc.role,
+      lines,
+      options,
+      onAdvance: () => { actor?.speak(); this.audio?.dialogueBeat(); },
+      onClose: () => {
+        this.talkingTo = null;
+        this.talkFocus = null;
+        if (!this.ui.isPanelOpen) this.input.requestLock();
+      }
+    });
+  }
+
+  _panelFromDialogue(open) {
+    this.ui.closeDialogue();
+    open();
+  }
+
+  _dialogueOffer(npc, quest, primera) {
+    const lines = primera ? [...npc.greet] : [];
+    lines.push(`—<em>${quest.title}</em>`, quest.summary);
+    if (quest.hint) lines.push(`—${quest.hint}`);
+    this._openDialogue(npc, lines, [
+      {
+        label: 'Aceptar',
+        action: () => {
+          this.quests.accept(quest.id, this._questSnapshot());
+          this._persist();
+          // Encadena: si tiene más que ofrecer, sigue la conversación.
+          const mas = this.quests.forNpc(npc.id);
+          if (mas.offer.length) setTimeout(() => this._dialogueOffer(npc, mas.offer[0], false), 120);
+        }
+      },
+      { label: 'Ahora no', action: () => {} },
+      ...this._npcOptions(npc).filter((o) => o.label !== 'Despedirse')
+    ]);
+  }
+
+  _dialogueTurnIn(npc, quest) {
+    const lines = [...(quest.complete ?? ['—Buen trabajo.'])];
+    this._openDialogue(npc, lines, [
+      {
+        label: 'Cobrar la misión',
+        action: () => {
+          this.quests.turnIn(quest.id);
+          const siguiente = this.quests.forNpc(npc.id);
+          if (siguiente.turnIn.length) setTimeout(() => this._dialogueTurnIn(npc, siguiente.turnIn[0]), 140);
+          else if (siguiente.offer.length) setTimeout(() => this._dialogueOffer(npc, siguiente.offer[0], false), 140);
+        }
+      }
+    ]);
+  }
+
+  _openQuests() { this.ui.showQuests(this.quests, STORY); }
+
+  _openJournal() {
+    this.ui.showJournal(this.economy, SPECIES, {
+      RARITY_LABEL,
+      zonesOf: (id) => ZONES.filter((z) => z.species.includes(id) &&
+        this.economy.zonesVisited.has(z.id)).map((z) => z.short),
+      lureName: (id) => findItem('lures', id)?.name ?? id
+    });
+  }
+
+  _openMap() {
+    this.ui.showZones(ZONES, this.economy, this.zone.id, {
+      quests: this.quests,
+      lockReason,
+      speciesKnown: (zone) => zone.species.filter((id) => this.economy.records[id]?.count).length
     });
   }
 

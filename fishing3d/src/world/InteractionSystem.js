@@ -31,6 +31,9 @@ export class InteractionSystem {
   /**
    * @param target.object   malla o grupo al que mirar
    * @param target.anchor   punto alternativo si no hay malla
+   * @param target.anchorHeight  altura sobre el origen del objeto a la que se
+   *        apunta. El origen de una persona está en los pies: apuntar ahí
+   *        obliga a mirar al suelo para hablar con ella.
    * @param target.range    distancia máxima en metros
    * @param target.label    texto del aviso; puede ser función
    * @param target.action   qué ocurre al interactuar
@@ -53,7 +56,11 @@ export class InteractionSystem {
 
   _anchorOf(target, out) {
     if (target.anchor) return out.copy(target.anchor);
-    if (target.object) return target.object.getWorldPosition(out);
+    if (target.object) {
+      target.object.getWorldPosition(out);
+      if (target.anchorHeight) out.y += target.anchorHeight;
+      return out;
+    }
     return out.set(0, 0, 0);
   }
 

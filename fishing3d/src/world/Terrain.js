@@ -24,6 +24,9 @@ export class Terrain {
   constructor(textures, options = {}) {
     this.field = createHeightField(options);
     this.waterLevel = WATER_LEVEL;
+    const bedShallow = new THREE.Color(options.bedShallow ?? COLORS.fondo.getHex());
+    const bedDeep = new THREE.Color(options.bedDeep ?? COLORS.limo.getHex());
+    const deepAt = Math.max(2.5, (options.maxDepth ?? 9.5) * 0.62);
 
     const { resolution, size } = this.field;
     const geometry = new THREE.PlaneGeometry(size, size, resolution - 1, resolution - 1);
@@ -44,8 +47,10 @@ export class Terrain {
       const variation = fbm(tint, x * 0.03, z * 0.03, 3, 0.5);
 
       if (h < -0.35) {
-        // Fondo del lago: arena en el bajío, limo oscuro en lo hondo.
-        color.copy(COLORS.fondo).lerp(COLORS.limo, smoothstep(-1.2, -5.5, h));
+        // Fondo: arena o grava en el bajío, limo oscuro en lo hondo. La
+        // profundidad a la que oscurece depende del calado de la zona, o un
+        // río de tres metros saldría tan negro como una hoya de veinte.
+        color.copy(bedShallow).lerp(bedDeep, smoothstep(-1.2, -deepAt, h));
       } else if (h < 0.85) {
         color.copy(COLORS.arena).lerp(COLORS.fondo, smoothstep(0.85, -0.35, h) * 0.55);
       } else {

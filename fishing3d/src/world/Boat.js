@@ -81,8 +81,16 @@ export class Boat {
   }
 
   /** ¿Está el jugador lo bastante cerca para subirse? */
+  /**
+   * Distancia en planta, no en el espacio: el jugador vadeando está medio metro
+   * por encima del casco flotando, y contar ese desnivel dejaba el fondeadero
+   * sin punto de embarque en algunas orillas.
+   */
   canBoard(playerPosition) {
-    return !this.occupied && playerPosition.distanceTo(this.group.position) < 3.4;
+    if (this.occupied) return false;
+    const dx = playerPosition.x - this.group.position.x;
+    const dz = playerPosition.z - this.group.position.z;
+    return Math.hypot(dx, dz) < 4.2;
   }
 
   board() { this.occupied = true; }
