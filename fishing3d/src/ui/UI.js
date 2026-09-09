@@ -62,6 +62,9 @@ const CSS = `
   background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
 .sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
 
+.sw-fade { position: absolute; inset: 0; background: #05080b; opacity: 0; pointer-events: none;
+  transition: opacity .55s ease; }
+.sw-fade.on { opacity: 1; }
 .sw-coach { position: absolute; left: 50%; bottom: 152px; transform: translateX(-50%);
   width: min(560px, 88vw); background: var(--panel); border: 1px solid var(--accent);
   border-left-width: 3px; border-radius: 9px; padding: 10px 14px; font-size: 13.5px;
@@ -200,6 +203,9 @@ export class UI {
     this.fpsBox.style.display = 'none';
     this.root.appendChild(this.fpsBox);
 
+    this.fadeBox = el('div', 'sw-fade');
+    this.root.appendChild(this.fadeBox);
+
     this.toast = el('div', 'sw-toast');
     this.toast.style.display = 'none';
     this.root.appendChild(this.toast);
@@ -325,6 +331,15 @@ export class UI {
     this._overlay('Still Waters', body, { onClose: onStart });
   }
 
+  /** Funde a negro, ejecuta `during` y vuelve. Para saltos de tiempo. */
+  fadeThrough(during, { hold = 620 } = {}) {
+    this.fadeBox.classList.add('on');
+    setTimeout(() => {
+      during?.();
+      setTimeout(() => this.fadeBox.classList.remove('on'), 260);
+    }, hold);
+  }
+
   setCrosshairVisible(value) {
     this.crosshair.style.display = value ? 'block' : 'none';
   }
@@ -414,7 +429,9 @@ export class UI {
           act.appendChild(el('span', 'sw-tag', 'Equipado'));
         } else {
           const b = el('button', 'sw-btn', 'Equipar');
-          b.addEventListener('click', () => { this.cb.onEquip?.(this.gearTab, item.id); render(); });
+          b.addEventListener('click', () => {
+            if (this.cb.onEquip?.(this.gearTab, item.id) !== false) render();
+          });
           act.appendChild(b);
         }
         row.appendChild(act);

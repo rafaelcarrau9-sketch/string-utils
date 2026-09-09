@@ -129,20 +129,33 @@ function fishMaterial(species) {
   });
 
   // Ondulación de nado en el vertex shader: la cola bate y el cuerpo serpentea.
-  material.userData.uniforms = { uTime: { value: 0 }, uSwim: { value: 1 } };
+  material.userData.uniforms = {
+    uTime: { value: 0 },
+    uSwim: { value: 1 },      // amplitud del coleteo
+    uBeat: { value: 7 },      // frecuencia: los peces pequeños baten más rápido
+    uFlex: { value: 0 }       // arqueo del cuerpo al forcejear
+  };
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = material.userData.uniforms.uTime;
-    shader.uniforms.uSwim = material.userData.uniforms.uSwim;
+    Object.assign(shader.uniforms, material.userData.uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `
         #include <common>
         uniform float uTime;
         uniform float uSwim;
+        uniform float uBeat;
+        uniform float uFlex;
       `)
       .replace('#include <begin_vertex>', `
         #include <begin_vertex>
-        float tailFactor = clamp(-transformed.z * 0.9 + 0.35, 0.0, 1.6);
-        transformed.x += sin(uTime * 7.0 + transformed.z * 2.4) * 0.09 * tailFactor * uSwim;
+        // La onda recorre el cuerpo de la cabeza a la cola, y la cola es la
+        // que más se desplaza: así se lee como natación y no como vibración.
+        float along = clamp(0.5 - transformed.z, 0.0, 1.4);
+        float tailFactor = along * along;
+        float wave = sin(uTime * uBeat - transformed.z * 5.0);
+        transformed.x += wave * 0.085 * tailFactor * uSwim;
+        // Al forcejear el cuerpo se arquea, no sólo colea.
+        transformed.x += sin(uTime * uBeat * 1.7) * uFlex * 0.16 * along;
+        transformed.y += cos(uTime * uBeat * 1.3) * uFlex * 0.06 * along;
       `);
   };
   return material;
@@ -177,6 +190,15 @@ export class Fish {
     this.mesh.castShadow = false;
     this.mesh.visible = false;                // se enciende al acercarse
     this.mesh.userData.fish = this;
+
+    // Los peces pequeños y rápidos baten más veces por segundo que los grandes.
+    const sizeFactor = clamp(1.4 - this.length / 120, 0.45, 1.35);
+    this.material.userData.uniforms.uBeat.value = 3.4 + this.species.speed * 1.5 * sizeFactor;
+
+    this.heading2D = this.heading;
+    this.turnRate = 0;
+    this.pitch = 0;
+    this.roll = 0;
   }
 
   get displayName() { return this.species.name; }
@@ -208,7 +230,9 @@ export class Fish {
     // Cobrado: la malla la coloca quien lo está mostrando, no el pez.
     if (this.state === FishState.CAUGHT) return;
     this.stateTime += dt;
-    this.material.userData.uniforms.uTime.value += dt * (0.6 + this.velocity.length() * 0.5);
+    // El reloj del aleteo corre más deprisa cuanto más rápido nada.
+    this.material.userData.uniforms.uTime.value +=
+      dt * (0.55 + this.velocity.length() / Math.max(0.6, this.species.speed) * 0.9);
 
     switch (this.state) {
       case FishState.SWIMMING: this._wander(dt, context); break;
@@ -221,6 +245,24 @@ export class Fish {
       default: break;
     }
 
+    // Huida: un pez no se queda quieto con alguien vadeando encima.
+    if (!this.isBusy && context.playerPosition) {
+      const dx = this.position.x - context.playerPosition.x;
+      const dz = this.position.z - context.playerPosition.z;
+      const near = Math.hypot(dx, dz);
+      const alarm = context.playerNoise ?? 0;
+      const radius = 4.5 + alarm * 5;
+      if (near < radius && near > 0.01) {
+        const push = (1 - near / radius) * this.species.speed * (0.5 + alarm);
+        this.velocity.x += (dx / near) * push * dt * 6;
+        this.velocity.z += (dz / near) * push * dt * 6;
+        if (this.state !== FishState.ESCAPING && near < radius * 0.6) {
+          this.interest = 0;
+          this.setState(FishState.ESCAPING);
+        }
+      }
+    }
+
     if (!this.isBusy) {
       this.position.addScaledVector(this.velocity, dt);
       this._clampToWater(context.terrain);
@@ -231,11 +273,35 @@ export class Fish {
   _applyTransform(dt) {
     this.mesh.position.copy(this.position);
     const speed = this.velocity.length();
+    const u = this.material.userData.uniforms;
+
     if (speed > 0.02) {
-      const look = this.position.clone().addScaledVector(this.velocity, 1 / Math.max(speed, 0.001));
-      this.mesh.lookAt(look);
+      // Rumbo amortiguado: `lookAt` cada fotograma hacía que el pez girase de
+      // golpe al menor cambio de velocidad.
+      const desired = Math.atan2(this.velocity.x, this.velocity.z);
+      let delta = desired - this.heading2D;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      const turn = delta * (1 - Math.exp(-4.5 * dt));
+      this.heading2D += turn;
+      this.turnRate = damp(this.turnRate, turn / Math.max(dt, 1e-3), 6, dt);
+
+      // Cabeceo al subir o bajar en el agua.
+      const climb = clamp(this.velocity.y / Math.max(speed, 0.001), -1, 1);
+      this.pitch = damp(this.pitch, -Math.asin(climb) * 0.7, 5, dt);
+    } else {
+      this.turnRate = damp(this.turnRate, 0, 6, dt);
     }
-    this.material.userData.uniforms.uSwim.value = clamp(0.35 + speed * 0.5, 0.3, 2.2);
+
+    // Alabeo: el pez se inclina hacia dentro de la curva.
+    this.roll = damp(this.roll, clamp(-this.turnRate * 0.28, -0.5, 0.5), 5, dt);
+    this.mesh.rotation.set(this.pitch, this.heading2D + Math.PI / 2, this.roll);
+
+    // El coleteo sigue a la velocidad; la frecuencia, al tamaño de la especie.
+    const cruise = Math.max(0.6, this.species.speed);
+    u.uSwim.value = damp(u.uSwim.value, clamp(0.3 + (speed / cruise) * 1.5, 0.3, 2.4), 6, dt);
+    const fighting = this.state === FishState.FIGHTING || this.state === FishState.HOOKED;
+    u.uFlex.value = damp(u.uFlex.value, fighting ? 0.55 + (1 - this.energy) * -0.3 : 0, 4, dt);
   }
 
   /** No sale del agua ni atraviesa el fondo. */

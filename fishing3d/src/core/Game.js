@@ -12,6 +12,8 @@ import { SkyDome } from '../world/SkyDome.js';
 import { Vegetation } from '../world/Vegetation.js';
 import { Trees } from '../world/Trees.js';
 import { GrassBlades } from '../world/GrassBlades.js';
+import { AmbientLife } from '../world/AmbientLife.js';
+import { CameraFx } from '../player/CameraFx.js';
 import { Boat } from '../world/Boat.js';
 import { ZONES, zoneOf } from '../world/Zones.js';
 import { Props } from '../world/Props.js';
@@ -56,6 +58,7 @@ export class Game {
     this._initPlayer();
     this._initProgress();
     this._initFishing();
+    this.cameraFx = new CameraFx(this.camera, { baseFov: this.settings.fov });
     this._initUI();
     this._initPerformance();
     this._bindInput();
@@ -132,11 +135,15 @@ export class Game {
     this.fishManager = new FishManager(this.scene, this.terrain, {
       seed: zone.terrain.seed + 3, species: zone.species
     });
+    this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
+      seed: zone.terrain.seed + 7, audio: this.audio
+    });
   }
 
   _disposeZone() {
     if (!this.terrain) return;
     this.fishManager?.dispose();
+    this.ambient?.dispose();
     this.boat?.dispose();
     this.props?.dispose();
     this.trees?.dispose();
@@ -206,18 +213,37 @@ export class Game {
       fishManager: this.fishManager,
       equipment: this.equipment,
       events: {
-        onCast: () => { this.economy.stats.casts++; this.audio.cast(); },
+        onCast: (power) => {
+          this.economy.stats.casts++;
+          this.audio.cast();
+          this.cameraFx.addFovKick(2.5 + power * 3.5);
+        },
         onSplash: (p) => this.audio.splash(0.9),
         onBite: () => this.audio.bite(),
-        onHookSet: () => { this.economy.stats.hooked++; this.audio.hookSet(); },
+        onHookSet: () => {
+          this.economy.stats.hooked++;
+          this.audio.hookSet();
+          this.cameraFx.addShake(0.35);
+          this.cameraFx.addFovKick(-3);
+        },
         onDragSlip: () => { if (Math.random() < 0.35) this.audio.dragSlip(); },
-        onJump: (fish) => this.water.splash(fish.position, 1.1),
+        onJump: (fish) => {
+          this.water.splash(fish.position, 1.1);
+          this.audio.thrash(clamp(0.4 + fish.weight * 0.06, 0.4, 1.4));
+          this.cameraFx.addShake(0.18);
+        },
+        onRun: () => this.cameraFx.addShake(0.12),
         onLineBreak: () => {
           this.economy.stats.lineBreaks++; this.economy.stats.lost++;
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
+          this.cameraFx.addShake(0.9);
         },
         onFishLost: () => { this.economy.stats.lost++; this.lastEvent = 'fishLost'; },
-        onLanded: (fish) => { this.lastEvent = 'landed'; this._onLanded(fish); }
+        onLanded: (fish) => {
+          this.lastEvent = 'landed';
+          this.cameraFx.addShake(0.2);
+          this._onLanded(fish);
+        }
       }
     });
   }
@@ -244,7 +270,12 @@ export class Game {
 
   _initUI() {
     this.ui = new UI({
-      onEquip: (category, id) => { this.equipment.equip(category, id); this._persist(); },
+      onEquip: (category, id) => {
+        const result = this.equipment.equip(category, id);
+        if (typeof result === 'string') { this.fishing._say(result, 'bad'); return false; }
+        this._persist();
+        return true;
+      },
       onBuy: (category, id) => {
         if (this.economy.buy(category, id)) {
           this.inventory.add(category, id);
@@ -299,7 +330,12 @@ export class Game {
         case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
-        case 'KeyE': if (!this.ui.isPanelOpen) this._toggleBoat(); break;
+        case 'KeyE': {
+          if (this.ui.isPanelOpen) break;
+          const target = this._interactables()[0];
+          if (target) target.action();
+          break;
+        }
         case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
@@ -389,6 +425,7 @@ export class Game {
     if (key === 'autoQuality') this.perf.auto = value;
     if (key === 'fov') {
       this.camera.fov = value;
+      this.cameraFx.setBaseFov(value);
       this.camera.updateProjectionMatrix();
     }
     if (key === 'masterVolume') this.audio.setVolume(value);
@@ -474,9 +511,12 @@ export class Game {
     this.weather.update(dt, this.player.position, this.time.fogColor);
     this.sky.update(this.time, this.weather, dt, this.player.position);
 
+    // El viento base más la racha en curso: la vegetación se mueve a rachas,
+    // no a velocidad constante.
+    const gust = this.ambient?.gustStrength ?? 0;
     const wind = new THREE.Vector3(
       this.weather.windDirection.x, 0, this.weather.windDirection.y
-    ).multiplyScalar(this.weather.windSpeed);
+    ).multiplyScalar(this.weather.windSpeed * (1 + gust * 0.55));
 
     this.water.update(dt, {
       sunDirection: this.time.sunDirection,
@@ -507,6 +547,9 @@ export class Game {
       wind,
       lookDelta: this.player.lookDelta,
       cameraPosition: this.player.position,
+      playerPosition: this.player.position,
+      // Cuanto más ruido hace el jugador, antes se espantan.
+      playerNoise: clamp((moving.speed / 5.6) * (moving.surface === 'agua' ? 1.4 : 0.35), 0, 1.4),
       lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
       lureAction: this.fishing.lure.action,
       onBite: () => {},
@@ -516,7 +559,10 @@ export class Game {
     if (!panelOpen) {
       this.fishing.update(dt, context);
       this.fishManager.update(dt, context);
+      this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
+      this._updateFeedback(dt, moving);
     }
+    this.cameraFx.update(dt);
 
     if (!headless) {
       this.perf.update(dt);
@@ -550,11 +596,98 @@ export class Game {
     }
   }
 
-  /** Aviso contextual bajo el punto de mira. */
+  /**
+   * Puntos con los que se puede interactuar, en orden de prioridad.
+   *
+   * Todos comparten la misma tecla y el mismo aviso bajo el punto de mira, de
+   * modo que el jugador aprende un solo gesto y vale para todo.
+   */
+  _interactables() {
+    const list = [];
+    const here = this.player.position;
+
+    if (this.player.platform) {
+      list.push({ label: 'W/S bogar · A/D virar · E desembarcar', action: () => this._toggleBoat() });
+      return list;
+    }
+    if (this.boat.canBoard(here)) {
+      list.push({ label: 'E · subir a la barca', action: () => this._toggleBoat() });
+    }
+    const camp = this.props.camp?.position;
+    if (camp && here.distanceTo(camp) < 3.6) {
+      const next = this._nextFeedingHour();
+      list.push({
+        label: `E · descansar junto al fuego hasta las ${String(Math.floor(next)).padStart(2, '0')}:00`,
+        action: () => this._rest(next)
+      });
+    }
+    return list;
+  }
+
   _contextHint() {
-    if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
-    if (this.boat.canBoard(this.player.position)) return 'E para subir a la barca';
-    return '';
+    return this._interactables()[0]?.label ?? '';
+  }
+
+  /** Siguiente hora punta de actividad: amanecer o atardecer. */
+  _nextFeedingHour() {
+    const h = this.time.hour;
+    return h < 5.5 || h >= 19 ? 6 : 19;
+  }
+
+  /** Descansar: salta a la siguiente franja buena, con fundido. */
+  _rest(hour) {
+    if (this.fishing.state !== 'idle') { this.fishing.reelIn(); }
+    this.input.releaseLock();
+    this.ui.fadeThrough(() => {
+      this.time.setHour(hour);
+      // Al levantarse, el tiempo puede haber cambiado.
+      if (Math.random() < 0.55) this.weather.cycle();
+      this._persist();
+      this.fishing._say(`Has descansado. Son las ${String(Math.floor(hour)).padStart(2, '0')}:00 · ${this.weather.label}`);
+      this.input.requestLock();
+    });
+  }
+
+  /**
+   * Reacciones continuas: tirón de cámara durante la pelea, zumbido del hilo,
+   * clics del carrete y ondas al vadear.
+   */
+  _updateFeedback(dt, moving) {
+    const f = this.fishing;
+
+    // La vista se va detrás del pez cuando tira, proporcional a la tensión.
+    if (f.state === 'fighting' && f.hooked) {
+      const toFish = f.hooked.position.clone().sub(this.camera.getWorldPosition(new THREE.Vector3()));
+      const forward = this.camera.getWorldDirection(new THREE.Vector3());
+      const lateral = forward.x * toFish.z - forward.z * toFish.x;
+      const strength = clamp(f.tensionRatio, 0, 1) * 0.02;
+      this.cameraFx.setPull(clamp(-lateral * 0.002, -1, 1) * strength, -strength * 0.5);
+      this.cameraFx.setRoll(f.sidePressure * 0.035);
+      this._stressTimer = (this._stressTimer ?? 0) - dt;
+      if (this._stressTimer <= 0 && f.tensionRatio > 0.55) {
+        this._stressTimer = 0.28;
+        this.audio.lineStress(f.tensionRatio);
+      }
+    } else {
+      this.cameraFx.setPull(0, 0);
+      this.cameraFx.setRoll(0);
+    }
+
+    // Clics del carrete al ritmo de la recogida.
+    if (f.retrieveInput > 0.05 && f.state !== 'idle') {
+      this._reelTimer = (this._reelTimer ?? 0) - dt * f.retrieveInput * (1 + f.tensionRatio);
+      if (this._reelTimer <= 0) { this._reelTimer = 0.1; this.audio.reelTick(f.retrieveInput); }
+    }
+
+    // Andar por el agua somera levanta ondas y suena.
+    if (moving.surface === 'agua' && moving.speed > 1) {
+      this._wadeTimer = (this._wadeTimer ?? 0) - dt * moving.speed * 0.45;
+      if (this._wadeTimer <= 0) {
+        this._wadeTimer = 1;
+        this.water.splash(this.player.position, 0.25 + moving.depth * 0.3);
+        this.audio.wade();
+      }
+    }
   }
 
   _updateAudio(dt, moving) {
@@ -584,6 +717,7 @@ export class Game {
     this.vegetation.dispose();
     this.trees.dispose();
     this.grass.dispose();
+    this.ambient.dispose();
     this.boat.dispose();
     this.props.dispose();
     this.water.dispose();

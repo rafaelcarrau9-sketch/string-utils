@@ -705,6 +705,10 @@ class TextureLibrary {
       ...extra
     });
     material.normalScale.set(1, 1);
+    // Compartido: lo entrega la biblioteca a varios sistemas y sólo ella lo
+    // destruye. Sin esta marca, el primer sistema que se descarta al cambiar
+    // de zona dejaba sin programa a los demás.
+    material.userData.shared = true;
     this.cache.set(key, material);
     return material;
   }
@@ -1556,7 +1560,9 @@ class Vegetation {
 
   dispose() {
     this.group.traverse((o) => {
-      if (o.isInstancedMesh) { o.geometry.dispose(); o.material.dispose(); }
+      if (!o.isInstancedMesh) return;
+      o.geometry.dispose();
+      if (!o.material.userData.shared) o.material.dispose();
     });
     this.scene.remove(this.group);
   }
@@ -1958,7 +1964,226 @@ class Trees {
   dispose() {
     [this.near.trunk, this.near.broad, this.near.conifer, this.far].forEach((m) => {
       m.geometry.dispose();
-      m.material.dispose();
+      if (!m.material.userData.shared) m.material.dispose();
+    });
+    this.scene.remove(this.group);
+  }
+}
+
+/* ===== src/world/AmbientLife.js ===== */
+/**
+ * Vida ambiental: lo que ocurre en el lago sin que el jugador haga nada.
+ *
+ * Peces que saltan a lo lejos, bandos de pájaros cruzando, rachas de viento
+ * que recorren la vegetación y anillos sueltos en la superficie. Nada de esto
+ * afecta a la partida; está para que el sitio no parezca una maqueta.
+ *
+ * Todos los eventos se reparten en el tiempo con esperas aleatorias y se
+ * modulan con la hora y el tiempo atmosférico: al amanecer salta más pescado,
+ * con tormenta no hay pájaros.
+ */
+
+const JUMP_POOL = 4;
+const BIRD_POOL = 6;
+
+class AmbientLife {
+  constructor(scene, terrain, water, { seed = 606, audio = null } = {}) {
+    this.scene = scene;
+    this.terrain = terrain;
+    this.water = water;
+    this.audio = audio;
+    this.rng = createRandom(seed);
+
+    this.group = new THREE.Group();
+    this.group.name = 'ambiente';
+    scene.add(this.group);
+
+    this.jumpTimer = 6 + this.rng() * 10;
+    this.birdTimer = 12 + this.rng() * 20;
+    this.gustTimer = 8 + this.rng() * 14;
+    this.rippleTimer = 3 + this.rng() * 5;
+    this.gust = 0;
+
+    this._buildJumpers();
+    this._buildBirds();
+  }
+
+  _buildJumpers() {
+    const geometry = new THREE.SphereGeometry(0.5, 8, 6);
+    const pos = geometry.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      const taper = 1 - Math.pow(Math.abs(v.z / 0.5), 2) * 0.8;
+      v.x *= 0.3 * taper; v.y *= 0.5 * taper; v.z *= 2.1;
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    geometry.computeVertexNormals();
+
+    this.jumpers = [];
+    for (let i = 0; i < JUMP_POOL; i++) {
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        color: 0x8d9aa2, roughness: 0.3, metalness: 0.35
+      }));
+      mesh.visible = false;
+      this.group.add(mesh);
+      this.jumpers.push({ mesh, active: false, t: 0, duration: 1, from: new THREE.Vector3(), to: new THREE.Vector3(), height: 1 });
+    }
+  }
+
+  _buildBirds() {
+    // Un pájaro: dos alas en uve que baten. Barato y se lee a distancia.
+    const wing = new THREE.PlaneGeometry(0.9, 0.26);
+    wing.translate(0.45, 0, 0);
+    const material = new THREE.MeshBasicMaterial({ color: 0x2a2f36, side: THREE.DoubleSide, fog: true });
+
+    this.birds = [];
+    for (let i = 0; i < BIRD_POOL; i++) {
+      const bird = new THREE.Group();
+      const left = new THREE.Mesh(wing, material);
+      const right = new THREE.Mesh(wing, material);
+      right.rotation.y = Math.PI;
+      bird.add(left); bird.add(right);
+      bird.visible = false;
+      this.group.add(bird);
+      this.birds.push({ group: bird, left, right, active: false, t: 0, speed: 1, phase: 0, from: new THREE.Vector3(), to: new THREE.Vector3() });
+    }
+  }
+
+  /** Punto de agua al azar dentro de un anillo alrededor del jugador. */
+  _waterPointNear(center, min = 14, max = 55) {
+    for (let i = 0; i < 24; i++) {
+      const angle = this.rng() * Math.PI * 2;
+      const radius = lerp(min, max, this.rng());
+      const x = center.x + Math.cos(angle) * radius;
+      const z = center.z + Math.sin(angle) * radius;
+      if (this.terrain.depthAt(x, z) > 1.2) return new THREE.Vector3(x, this.terrain.waterLevel, z);
+    }
+    return null;
+  }
+
+  _startJump(center, energy) {
+    const spot = this._waterPointNear(center);
+    if (!spot) return;
+    const jumper = this.jumpers.find((j) => !j.active);
+    if (!jumper) return;
+
+    const angle = this.rng() * Math.PI * 2;
+    const distance = 0.8 + this.rng() * 2.2;
+    jumper.from.copy(spot);
+    jumper.to.set(spot.x + Math.cos(angle) * distance, spot.y, spot.z + Math.sin(angle) * distance);
+    jumper.height = 0.5 + this.rng() * 1.1 * energy;
+    jumper.duration = 0.55 + this.rng() * 0.4;
+    jumper.t = 0;
+    jumper.size = 0.18 + this.rng() * 0.4;
+    jumper.active = true;
+    jumper.mesh.visible = true;
+    jumper.mesh.scale.setScalar(jumper.size);
+
+    this.water.splash(spot, 0.5);
+    this.audio?.distantSplash?.(clamp(1 - center.distanceTo(spot) / 70, 0.15, 1));
+  }
+
+  _startFlock(center, count) {
+    const height = 40 + this.rng() * 60;
+    const angle = this.rng() * Math.PI * 2;
+    const across = 260;
+    const from = new THREE.Vector3(
+      center.x + Math.cos(angle) * across, height, center.z + Math.sin(angle) * across
+    );
+    const to = new THREE.Vector3(
+      center.x - Math.cos(angle) * across, height + (this.rng() - 0.5) * 20, center.z - Math.sin(angle) * across
+    );
+    for (let i = 0; i < count; i++) {
+      const bird = this.birds.find((x) => !x.active);
+      if (!bird) return;
+      const spread = new THREE.Vector3((this.rng() - 0.5) * 26, (this.rng() - 0.5) * 8, (this.rng() - 0.5) * 26);
+      bird.from.copy(from).add(spread);
+      bird.to.copy(to).add(spread);
+      bird.t = -i * 0.12;                       // el bando se escalona
+      bird.speed = 0.028 + this.rng() * 0.014;
+      bird.phase = this.rng() * 6.28;
+      bird.active = true;
+      bird.group.visible = true;
+      bird.group.scale.setScalar(1.6 + this.rng() * 1.2);
+    }
+  }
+
+  /** Racha de viento en curso, que Game suma al viento base. */
+  get gustStrength() { return this.gust; }
+
+  update(dt, { player, time, weather }) {
+    const feeding = time.feedingFactor;
+    const calm = 1 - clamp(weather.rainAmount, 0, 1);
+
+    // --- peces saltando -------------------------------------------------
+    this.jumpTimer -= dt * (0.35 + feeding * 0.5);
+    if (this.jumpTimer <= 0) {
+      this.jumpTimer = 14 + this.rng() * 38 / Math.max(0.4, feeding);
+      this._startJump(player, 0.6 + feeding * 0.6);
+    }
+    for (const j of this.jumpers) {
+      if (!j.active) continue;
+      j.t += dt;
+      const k = j.t / j.duration;
+      if (k >= 1) {
+        j.active = false;
+        j.mesh.visible = false;
+        this.water.splash(j.to, 0.75);
+        continue;
+      }
+      // Parábola entre entrada y salida del agua.
+      j.mesh.position.lerpVectors(j.from, j.to, k);
+      j.mesh.position.y = j.from.y + Math.sin(k * Math.PI) * j.height;
+      const dir = j.to.clone().sub(j.from).normalize();
+      j.mesh.rotation.set(lerp(-0.9, 0.9, k), Math.atan2(dir.x, dir.z) + Math.PI / 2, Math.sin(k * 6) * 0.2);
+    }
+
+    // --- pájaros ---------------------------------------------------------
+    this.birdTimer -= dt * calm;
+    if (this.birdTimer <= 0) {
+      this.birdTimer = 25 + this.rng() * 55;
+      if (time.nightFactor < 0.6) this._startFlock(player, 2 + Math.floor(this.rng() * 4));
+    }
+    for (const bird of this.birds) {
+      if (!bird.active) continue;
+      bird.t += dt * bird.speed;
+      if (bird.t >= 1) { bird.active = false; bird.group.visible = false; continue; }
+      if (bird.t < 0) continue;
+      bird.group.position.lerpVectors(bird.from, bird.to, bird.t);
+      const dir = bird.to.clone().sub(bird.from).normalize();
+      bird.group.rotation.y = Math.atan2(dir.x, dir.z) - Math.PI / 2;
+      const flap = Math.sin(bird.phase + performance.now() * 0.006) * 0.7;
+      bird.left.rotation.z = flap;
+      bird.right.rotation.z = -flap;
+    }
+
+    // --- rachas de viento -------------------------------------------------
+    this.gustTimer -= dt;
+    if (this.gustTimer <= 0) {
+      this.gustTimer = 9 + this.rng() * 22;
+      this.gustPeak = 0.5 + this.rng() * 1.4 * (0.5 + weather.windSpeed / 9);
+      this.gustLeft = 1.6 + this.rng() * 2.4;
+    }
+    if (this.gustLeft > 0) {
+      this.gustLeft -= dt;
+      this.gust = damp(this.gust, this.gustPeak, 1.6, dt);
+    } else {
+      this.gust = damp(this.gust, 0, 1.1, dt);
+    }
+
+    // --- anillos sueltos en la superficie ---------------------------------
+    this.rippleTimer -= dt;
+    if (this.rippleTimer <= 0) {
+      this.rippleTimer = 2 + this.rng() * 6;
+      const spot = this._waterPointNear(player, 6, 40);
+      if (spot) this.water.splash(spot, 0.18 + this.rng() * 0.2);
+    }
+  }
+
+  dispose() {
+    this.group.traverse((o) => {
+      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
     });
     this.scene.remove(this.group);
   }
@@ -2830,20 +3055,33 @@ function fishMaterial(species) {
   });
 
   // Ondulación de nado en el vertex shader: la cola bate y el cuerpo serpentea.
-  material.userData.uniforms = { uTime: { value: 0 }, uSwim: { value: 1 } };
+  material.userData.uniforms = {
+    uTime: { value: 0 },
+    uSwim: { value: 1 },      // amplitud del coleteo
+    uBeat: { value: 7 },      // frecuencia: los peces pequeños baten más rápido
+    uFlex: { value: 0 }       // arqueo del cuerpo al forcejear
+  };
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = material.userData.uniforms.uTime;
-    shader.uniforms.uSwim = material.userData.uniforms.uSwim;
+    Object.assign(shader.uniforms, material.userData.uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `
         #include <common>
         uniform float uTime;
         uniform float uSwim;
+        uniform float uBeat;
+        uniform float uFlex;
       `)
       .replace('#include <begin_vertex>', `
         #include <begin_vertex>
-        float tailFactor = clamp(-transformed.z * 0.9 + 0.35, 0.0, 1.6);
-        transformed.x += sin(uTime * 7.0 + transformed.z * 2.4) * 0.09 * tailFactor * uSwim;
+        // La onda recorre el cuerpo de la cabeza a la cola, y la cola es la
+        // que más se desplaza: así se lee como natación y no como vibración.
+        float along = clamp(0.5 - transformed.z, 0.0, 1.4);
+        float tailFactor = along * along;
+        float wave = sin(uTime * uBeat - transformed.z * 5.0);
+        transformed.x += wave * 0.085 * tailFactor * uSwim;
+        // Al forcejear el cuerpo se arquea, no sólo colea.
+        transformed.x += sin(uTime * uBeat * 1.7) * uFlex * 0.16 * along;
+        transformed.y += cos(uTime * uBeat * 1.3) * uFlex * 0.06 * along;
       `);
   };
   return material;
@@ -2878,6 +3116,15 @@ class Fish {
     this.mesh.castShadow = false;
     this.mesh.visible = false;                // se enciende al acercarse
     this.mesh.userData.fish = this;
+
+    // Los peces pequeños y rápidos baten más veces por segundo que los grandes.
+    const sizeFactor = clamp(1.4 - this.length / 120, 0.45, 1.35);
+    this.material.userData.uniforms.uBeat.value = 3.4 + this.species.speed * 1.5 * sizeFactor;
+
+    this.heading2D = this.heading;
+    this.turnRate = 0;
+    this.pitch = 0;
+    this.roll = 0;
   }
 
   get displayName() { return this.species.name; }
@@ -2909,7 +3156,9 @@ class Fish {
     // Cobrado: la malla la coloca quien lo está mostrando, no el pez.
     if (this.state === FishState.CAUGHT) return;
     this.stateTime += dt;
-    this.material.userData.uniforms.uTime.value += dt * (0.6 + this.velocity.length() * 0.5);
+    // El reloj del aleteo corre más deprisa cuanto más rápido nada.
+    this.material.userData.uniforms.uTime.value +=
+      dt * (0.55 + this.velocity.length() / Math.max(0.6, this.species.speed) * 0.9);
 
     switch (this.state) {
       case FishState.SWIMMING: this._wander(dt, context); break;
@@ -2922,6 +3171,24 @@ class Fish {
       default: break;
     }
 
+    // Huida: un pez no se queda quieto con alguien vadeando encima.
+    if (!this.isBusy && context.playerPosition) {
+      const dx = this.position.x - context.playerPosition.x;
+      const dz = this.position.z - context.playerPosition.z;
+      const near = Math.hypot(dx, dz);
+      const alarm = context.playerNoise ?? 0;
+      const radius = 4.5 + alarm * 5;
+      if (near < radius && near > 0.01) {
+        const push = (1 - near / radius) * this.species.speed * (0.5 + alarm);
+        this.velocity.x += (dx / near) * push * dt * 6;
+        this.velocity.z += (dz / near) * push * dt * 6;
+        if (this.state !== FishState.ESCAPING && near < radius * 0.6) {
+          this.interest = 0;
+          this.setState(FishState.ESCAPING);
+        }
+      }
+    }
+
     if (!this.isBusy) {
       this.position.addScaledVector(this.velocity, dt);
       this._clampToWater(context.terrain);
@@ -2932,11 +3199,35 @@ class Fish {
   _applyTransform(dt) {
     this.mesh.position.copy(this.position);
     const speed = this.velocity.length();
+    const u = this.material.userData.uniforms;
+
     if (speed > 0.02) {
-      const look = this.position.clone().addScaledVector(this.velocity, 1 / Math.max(speed, 0.001));
-      this.mesh.lookAt(look);
+      // Rumbo amortiguado: `lookAt` cada fotograma hacía que el pez girase de
+      // golpe al menor cambio de velocidad.
+      const desired = Math.atan2(this.velocity.x, this.velocity.z);
+      let delta = desired - this.heading2D;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      const turn = delta * (1 - Math.exp(-4.5 * dt));
+      this.heading2D += turn;
+      this.turnRate = damp(this.turnRate, turn / Math.max(dt, 1e-3), 6, dt);
+
+      // Cabeceo al subir o bajar en el agua.
+      const climb = clamp(this.velocity.y / Math.max(speed, 0.001), -1, 1);
+      this.pitch = damp(this.pitch, -Math.asin(climb) * 0.7, 5, dt);
+    } else {
+      this.turnRate = damp(this.turnRate, 0, 6, dt);
     }
-    this.material.userData.uniforms.uSwim.value = clamp(0.35 + speed * 0.5, 0.3, 2.2);
+
+    // Alabeo: el pez se inclina hacia dentro de la curva.
+    this.roll = damp(this.roll, clamp(-this.turnRate * 0.28, -0.5, 0.5), 5, dt);
+    this.mesh.rotation.set(this.pitch, this.heading2D + Math.PI / 2, this.roll);
+
+    // El coleteo sigue a la velocidad; la frecuencia, al tamaño de la especie.
+    const cruise = Math.max(0.6, this.species.speed);
+    u.uSwim.value = damp(u.uSwim.value, clamp(0.3 + (speed / cruise) * 1.5, 0.3, 2.4), 6, dt);
+    const fighting = this.state === FishState.FIGHTING || this.state === FishState.HOOKED;
+    u.uFlex.value = damp(u.uFlex.value, fighting ? 0.55 + (1 - this.energy) * -0.3 : 0, 4, dt);
   }
 
   /** No sale del agua ni atraviesa el fondo. */
@@ -3322,8 +3613,15 @@ class Equipment {
   get line() { return findItem('lines', this.equipped.lines) || CATALOG.lines[0]; }
   get lure() { return findItem('lures', this.equipped.lures) || CATALOG.lures[0]; }
 
+  /**
+   * Equipar. `guard` permite a la pesca vetar el cambio: no se cambia de
+   * línea con un pez colgando, ni de señuelo con el aparejo en el agua.
+   * Devuelve `true`, o el motivo del rechazo.
+   */
   equip(category, id) {
     if (!this.inventory.has(category, id)) return false;
+    const veto = this.guard?.(category);
+    if (veto) return veto;
     this.equipped[category] = id;
     return true;
   }
@@ -3763,38 +4061,106 @@ class Lure {
 
 /* ===== src/fishing/Rod.js ===== */
 /**
- * Caña en primera persona.
+ * Caña en primera persona, animada por poses.
  *
- * Es un tubo generado sobre una curva: al subir la tensión, la puntera se
- * dobla de verdad (se recalcula la curva), en vez de rotar la malla entera.
- * La puntera es también el ancla de la línea, así que lo que se ve y lo que
- * simula la física es el mismo punto.
+ * No hay clips ni esqueleto: cada situación —reposo, cargando, lanzando,
+ * pescando, peleando— define una pose (posición y rotación de la mano) y el
+ * conjunto se interpola hacia ella con amortiguación. Así nunca hay saltos
+ * entre animaciones: lo que se ve es siempre la mezcla del estado anterior y
+ * el nuevo.
+ *
+ * Encima de la pose van capas procedurales que no dependen del estado:
+ * respiración en reposo, inercia al mover la vista, el barrido del
+ * lanzamiento, el bombeo al recoger y la curvatura del blank según la tensión.
  */
+
+const RodPose = {
+  IDLE: 'idle',
+  CHARGE: 'charge',
+  CAST: 'cast',
+  FISH: 'fish',
+  FIGHT: 'fight'
+};
+
+// Posición de la mano y ángulos base de cada pose.
+const POSES = {
+  idle:   { pos: [0.40, -0.30, -0.42], rot: [0.20, -0.30, 0.20], lift: 0 },
+  charge: { pos: [0.50, -0.26, -0.30], rot: [0.44, -0.60, 0.40], lift: 0 },
+  cast:   { pos: [0.38, -0.28, -0.44], rot: [0.17, -0.26, 0.17], lift: 0 },
+  fish:   { pos: [0.38, -0.28, -0.44], rot: [0.17, -0.26, 0.17], lift: 0 },
+  fight:  { pos: [0.30, -0.20, -0.38], rot: [0.46, -0.18, 0.24], lift: 1 }
+};
+
+const CAST_DURATION = 0.42;
+
 class Rod {
   constructor(camera, equipment) {
     this.equipment = equipment;
+    this.pose = RodPose.IDLE;
     this.bend = 0;
-    this.targetBend = 0;
     this.sway = new THREE.Vector2();
+    this.breath = 0;
+    this.castTimer = 0;
+    this.castPower = 0;
+    this.windUp = 0;          // carga suavizada: sin esto caía de golpe al soltar
+    this.reelAngle = 0;
+    this.pump = 0;
+    this.twitch = 0;
+    this.strikeKick = 0;
 
+    // Nodo que se interpola hacia la pose; los hijos cuelgan de él.
     this.group = new THREE.Group();
-    this.group.position.set(0.42, -0.34, -0.42);
-    this.group.rotation.set(0.05, -0.3, 0.2);
+    this.current = {
+      pos: new THREE.Vector3(...POSES.idle.pos),
+      rot: new THREE.Vector3(...POSES.idle.rot)
+    };
+    this.group.position.copy(this.current.pos);
     camera.add(this.group);
 
-    this.material = new THREE.MeshStandardMaterial({ color: 0x4a5158, roughness: 0.35, metalness: 0.35 });
-    this.gripMaterial = new THREE.MeshStandardMaterial({ color: 0x4a3527, roughness: 0.9 });
+    const blank = new THREE.MeshStandardMaterial({ color: 0x4a5158, roughness: 0.35, metalness: 0.35 });
+    const cork = new THREE.MeshStandardMaterial({ color: 0x6b5233, roughness: 0.95 });
+    const metal = new THREE.MeshStandardMaterial({ color: 0x9aa2ab, roughness: 0.28, metalness: 0.85 });
+    const skin = new THREE.MeshStandardMaterial({ color: 0xd7ab84, roughness: 0.7 });
+    this.materials = [blank, cork, metal, skin];
+    this.material = blank;
 
-    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.28, 8), this.gripMaterial);
+    // Empuñadura de corcho
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.023, 0.027, 0.3, 10), cork);
     grip.rotation.x = Math.PI / 2;
-    grip.position.z = 0.1;
+    grip.position.z = 0.11;
     this.group.add(grip);
 
-    const reelSeat = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.06, 10),
-      new THREE.MeshStandardMaterial({ color: 0x8b8f96, roughness: 0.3, metalness: 0.8 }));
-    reelSeat.position.set(0, -0.05, 0.02);
-    this.group.add(reelSeat);
-    this.reelSeat = reelSeat;
+    // Carrete: cuerpo, bobina y manivela que gira al recoger
+    const reel = new THREE.Group();
+    reel.position.set(0, -0.058, 0.02);
+    const housing = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.036, 0.055, 14), metal);
+    housing.rotation.z = Math.PI / 2;
+    reel.add(housing);
+    const spool = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.03, 14), blank);
+    spool.rotation.z = Math.PI / 2;
+    spool.position.y = 0.04;
+    reel.add(spool);
+    this.crank = new THREE.Group();
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.055, 0.008), metal);
+    arm.position.y = 0.028;
+    this.crank.add(arm);
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.011, 8, 6), cork);
+    knob.position.y = 0.056;
+    this.crank.add(knob);
+    this.crank.position.set(0.042, 0, 0);
+    reel.add(this.crank);
+    this.group.add(reel);
+    this.reel = reel;
+
+    // Antebrazo y mano sujetando la empuñadura
+    const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.028, 0.17, 4, 8), skin);
+    forearm.rotation.set(1.3, 0, -0.22);
+    forearm.position.set(0.05, -0.1, 0.3);
+    this.group.add(forearm);
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), skin);
+    hand.scale.set(1, 0.8, 1.3);
+    hand.position.set(0.01, -0.024, 0.13);
+    this.group.add(hand);
 
     this._buildBlank();
     this.tip = new THREE.Object3D();
@@ -3802,10 +4168,6 @@ class Rod {
   }
 
   _buildBlank() {
-    if (this.blank) {
-      this.group.remove(this.blank);
-      this.blank.geometry.dispose();
-    }
     this.curve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(0, 0, -0.45),
@@ -3817,31 +4179,134 @@ class Rod {
       this.material
     );
     this.group.add(this.blank);
+
+    // Anillas guía a lo largo del blank
+    this.guides = [];
+    const guideMaterial = this.materials[2];
+    [0.3, 0.62, 0.95, 1.2].forEach((t) => {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.012, 0.0022, 5, 10), guideMaterial);
+      ring.rotation.y = Math.PI / 2;
+      this.group.add(ring);
+      this.guides.push({ mesh: ring, t });
+    });
   }
 
-  /** `tensionRatio` 0..1 respecto a la resistencia de la caña. */
-  update(dt, tensionRatio, lookDelta) {
-    this.targetBend = clamp(tensionRatio, 0, 1.2);
-    this.bend = damp(this.bend, this.targetBend, 7, dt);
+  /** Cambia de pose. La transición la hace la interpolación, no un corte. */
+  setPose(pose) {
+    if (!POSES[pose] || this.pose === pose) return;
+    if (pose === RodPose.CAST) {
+      this.castTimer = CAST_DURATION;
+      this.castPower = clamp(this.windUp, 0.25, 1);   // el latigazo hereda la carga
+    }
+    this.pose = pose;
+  }
 
-    // Balanceo suave al mover la vista: la caña "pesa".
-    this.sway.x = damp(this.sway.x, clamp(-lookDelta.x * 0.0016, -0.06, 0.06), 6, dt);
-    this.sway.y = damp(this.sway.y, clamp(-lookDelta.y * 0.0016, -0.06, 0.06), 6, dt);
-    this.group.rotation.z = 0.16 + this.sway.x;
-    this.group.rotation.x = 0.06 + this.sway.y;
+  /** Golpe seco al clavar el anzuelo. */
+  strike() { this.strikeKick = 1; }
+  /** Temblor de la puntera cuando el pez tantea el cebo. */
+  nibble(strength = 1) { this.twitch = Math.max(this.twitch, strength); }
+
+  /**
+   * @param dt
+   * @param state.tensionRatio  0..1 respecto a lo que aguanta la caña
+   * @param state.retrieve      0..1 cuánto se recoge
+   * @param state.sidePressure  -1..1 hacia dónde se ladea
+   * @param state.power         0..1 carga del lanzamiento
+   * @param state.lookDelta     movimiento de ratón, para la inercia
+   * @param state.surge         0..1 el pez está embistiendo
+   */
+  update(dt, state = {}) {
+    const {
+      tensionRatio = 0, retrieve = 0, sidePressure = 0,
+      power = 0, lookDelta = { x: 0, y: 0 }, surge = 0
+    } = state;
+
+    const target = POSES[this.pose] || POSES.idle;
+    this.breath += dt;
+    this.castTimer = Math.max(0, this.castTimer - dt);
+    this.strikeKick = damp(this.strikeKick, 0, 7, dt);
+    this.twitch = damp(this.twitch, 0, 5, dt);
+
+    // --- pose base, siempre interpolada -------------------------------
+    const speed = this.pose === RodPose.CAST ? 11 : 7;
+    this.current.pos.x = damp(this.current.pos.x, target.pos[0], speed, dt);
+    this.current.pos.y = damp(this.current.pos.y, target.pos[1], speed, dt);
+    this.current.pos.z = damp(this.current.pos.z, target.pos[2], speed, dt);
+    this.current.rot.x = damp(this.current.rot.x, target.rot[0], speed, dt);
+    this.current.rot.y = damp(this.current.rot.y, target.rot[1], speed, dt);
+    this.current.rot.z = damp(this.current.rot.z, target.rot[2], speed, dt);
+
+    // --- capas procedurales -------------------------------------------
+    // Respiración: la caña nunca está del todo quieta.
+    const breathe = Math.sin(this.breath * 1.15) * 0.008 + Math.sin(this.breath * 0.7) * 0.005;
+    // Inercia al girar la vista: la caña "pesa".
+    this.sway.x = damp(this.sway.x, clamp(-lookDelta.x * 0.0022, -0.09, 0.09), 6, dt);
+    this.sway.y = damp(this.sway.y, clamp(-lookDelta.y * 0.0022, -0.09, 0.09), 6, dt);
+    // Cargar el lanzamiento echa la caña atrás. Se amortigua en lugar de leer
+    // la potencia cruda: al soltar, ésta se pone a cero en un fotograma y la
+    // mano daba un tirón de 5 cm.
+    this.windUp = damp(this.windUp, this.pose === RodPose.CHARGE ? power : 0, 9, dt);
+    const windUp = this.windUp;
+    // Latigazo: la caña carga, se desdobla hacia delante y vuelve. Arranca en
+    // cero, así que la transición es continua sin necesidad de mezclar poses.
+    const castPhase = this.castTimer / CAST_DURATION;
+    const sweep = castPhase > 0
+      ? Math.sin(castPhase * Math.PI) * castPhase * this.castPower
+      : 0;
+    // Bombeo al recoger, más marcado cuanto más pesa el pez.
+    this.pump = damp(this.pump, retrieve * (0.4 + tensionRatio), 8, dt);
+    const pumping = Math.sin(this.breath * 6.5) * this.pump * 0.045;
+
+    this.group.position.set(
+      this.current.pos.x + this.sway.x * 0.6 - sweep * 0.09,
+      this.current.pos.y + breathe + pumping - windUp * 0.03 + sweep * 0.04,
+      this.current.pos.z - sweep * 0.22 + windUp * 0.06
+    );
+    this.group.rotation.set(
+      this.current.rot.x + this.sway.y + breathe * 0.5 - sweep * 0.75
+        + this.strikeKick * -0.5 + pumping * 1.4,
+      this.current.rot.y - windUp * 0.25 + sidePressure * 0.35,
+      this.current.rot.z + this.sway.x + sidePressure * 0.28
+    );
+
+    // --- curvatura del blank ------------------------------------------
+    // Se dobla con la tensión, con el barrido del lance y con las embestidas.
+    const targetBend = clamp(
+      tensionRatio * 1.05 + sweep * 0.8 + windUp * 0.45 + surge * 0.25 + this.strikeKick * 0.6,
+      0, 1.5
+    );
+    this.bend = damp(this.bend, targetBend, this.pose === RodPose.CAST ? 18 : 9, dt);
 
     const b = this.bend;
+    const shiver = this.twitch * Math.sin(this.breath * 34) * 0.05;
     const points = this.curve.points;
-    points[1].set(0, -b * 0.04, -0.45);
-    points[2].set(0, -b * 0.16, -0.88);
-    points[3].set(0, -b * 0.38, -1.3 + b * 0.06);
-    this.curve.needsUpdate = true;
+    points[1].set(shiver * 0.2, -b * 0.04, -0.45);
+    points[2].set(shiver * 0.6, -b * 0.17, -0.88);
+    points[3].set(shiver, -b * 0.4, -1.3 + b * 0.07);
 
-    const geometry = new THREE.TubeGeometry(this.curve, 20, 0.007, 5, false);
-    this.blank.geometry.dispose();
-    this.blank.geometry = geometry;
+    // El tubo sólo se rehace cuando la forma cambia de verdad. Regenerarlo
+    // cada fotograma eran 60 geometrías por segundo tiradas a la basura, y a
+    // simple vista no se distingue de esta versión cuantizada.
+    const shape = Math.round(b * 60) * 1000 + Math.round(shiver * 400);
+    if (shape !== this._shapeKey) {
+      this._shapeKey = shape;
+      this.blank.geometry.dispose();
+      this.blank.geometry = new THREE.TubeGeometry(this.curve, 20, 0.007, 5, false);
+    }
+
+    // Las anillas siguen la curva.
+    const p = new THREE.Vector3();
+    this.guides.forEach(({ mesh, t }) => {
+      this.curve.getPoint(t / 1.35, p);
+      mesh.position.copy(p);
+    });
 
     this.tip.position.copy(points[3]);
+
+    // --- carrete --------------------------------------------------------
+    this.reelAngle += retrieve * dt * 11;
+    this.crank.rotation.z = this.reelAngle;
+    this.reel.rotation.z = Math.sin(this.reelAngle) * 0.02;
   }
 
   /** Puntera en coordenadas de mundo: de ahí sale la línea. */
@@ -3853,8 +4318,8 @@ class Rod {
 
   dispose() {
     this.blank.geometry.dispose();
-    this.material.dispose();
-    this.gripMaterial.dispose();
+    this.materials.forEach((m) => m.dispose());
+    this.group.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
   }
 }
 
@@ -3920,6 +4385,19 @@ class FishingSystem {
     this.message = null;
     this.lastCatch = null;
 
+    // Veto de cambios de equipo mientras hay algo en marcha.
+    equipment.guard = (category) => {
+      if (this.state === FishingState.FIGHTING) {
+        return 'No puedes cambiar de equipo con un pez enganchado';
+      }
+      if (this.state !== FishingState.IDLE) {
+        return category === 'lures'
+          ? 'Recoge el sedal (R) antes de cambiar de señuelo'
+          : 'Recoge el sedal (R) antes de cambiar de equipo';
+      }
+      return null;
+    };
+
     this._rodTip = new THREE.Vector3();
     this._tmp = new THREE.Vector3();
   }
@@ -3958,6 +4436,7 @@ class FishingSystem {
     this.lineOut = 1;
     this.tension = 0;
     this.state = FishingState.CASTING;
+    this.rod.setPose(RodPose.CAST);
     this.events?.onCast?.(this.power);
     this.power = 0;
   }
@@ -3985,6 +4464,7 @@ class FishingSystem {
           jumping: 0,
           runsLeft: fish.species.fight.runs
         };
+        this.rod.strike();
         this.events?.onHookSet?.(fish);
         return true;
       }
@@ -4060,7 +4540,15 @@ class FishingSystem {
     }
 
     this._updateLineVisual(dt, context);
-    this.rod.update(dt, clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.2), context.lookDelta);
+    this.rod.setPose(this._poseForState());
+    this.rod.update(dt, {
+      tensionRatio: clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.3),
+      retrieve: this.retrieveInput,
+      sidePressure: this.sidePressure,
+      power: this.power,
+      lookDelta: context.lookDelta,
+      surge: this.fight?.burst ?? 0
+    });
     // La pieza gira despacio mientras se mira.
     if (this._trophy) {
       this._trophy.spin += dt * 0.55;
@@ -4072,6 +4560,18 @@ class FishingSystem {
     if (this.message) {
       this.message.time += dt;
       if (this.message.time > 3.5) this.message = null;
+    }
+  }
+
+  /** Qué pose corresponde al estado actual de la pesca. */
+  _poseForState() {
+    switch (this.state) {
+      case FishingState.AIMING: return RodPose.CHARGE;
+      case FishingState.CASTING: return RodPose.CAST;
+      case FishingState.FISHING:
+      case FishingState.BITE: return RodPose.FISH;
+      case FishingState.FIGHTING: return RodPose.FIGHT;
+      default: return RodPose.IDLE;
     }
   }
 
@@ -4125,6 +4625,7 @@ class FishingSystem {
     }
     // Tirones visibles en el señuelo mientras el pez lo tiene en la boca.
     this.lure.position.lerp(fish.position, 0.35 * dt * 4);
+    this.rod.nibble(0.6 + (fish.biteStrength ?? 0.5) * 0.6);
     this.lineOut = Math.max(0.8, this.lineOut - dt * 0.4);
   }
 
@@ -4468,6 +4969,8 @@ class Player {
     this._forward = new THREE.Vector3();
     this._right = new THREE.Vector3();
     this.lookDelta = new THREE.Vector2();
+    this.lean = 0;
+    this.lastYaw = 0;
   }
 
   get position() { return this.rig.position; }
@@ -4579,8 +5082,18 @@ class Player {
     const bobY = Math.sin(this.bobPhase * 2) * 0.035 * this.bobAmount;
     const bobX = Math.cos(this.bobPhase) * 0.028 * this.bobAmount;
 
+    // Inclinación: al desplazarse de lado y al girar, el cuerpo se ladea. Es
+    // lo que separa "una cámara que se traslada" de "alguien andando".
+    const strafeLean = -strafeInput * 0.022 * clamp(horizontalSpeed / RUN_SPEED, 0, 1);
+    let turnDelta = this.yaw - this.lastYaw;
+    while (turnDelta > Math.PI) turnDelta -= Math.PI * 2;
+    while (turnDelta < -Math.PI) turnDelta += Math.PI * 2;
+    this.lastYaw = this.yaw;
+    const turnLean = clamp(turnDelta * 0.5, -0.03, 0.03);
+    this.lean = damp(this.lean, strafeLean + turnLean, 7, dt);
+
     this.rig.rotation.y = this.yaw;
-    this.camera.rotation.set(this.pitch, 0, bobX * 0.35);
+    this.camera.rotation.set(this.pitch, 0, bobX * 0.35 + this.lean);
     this.camera.position.set(
       this.mode === 'third' ? 0 : bobX * 0.5,
       EYE_HEIGHT + bobY,
@@ -4620,6 +5133,58 @@ class Player {
     this.rig.position.copy(position);
     const g = this.groundHeight(position.x, position.z);
     this.rig.position.y = g.y;
+  }
+}
+
+/* ===== src/player/CameraFx.js ===== */
+/**
+ * Efectos de cámara: sacudidas, tirones y campo de visión.
+ *
+ * Todo entra como impulsos que decaen, nunca como valores fijos, de modo que
+ * la cámara siempre vuelve sola a su sitio y no se acumulan desvíos. Se aplica
+ * después del control del jugador, así que no interfiere con la puntería.
+ */
+class CameraFx {
+  constructor(camera, { baseFov = 70 } = {}) {
+    this.camera = camera;
+    this.baseFov = baseFov;
+    this.shake = 0;
+    this.fovKick = 0;
+    this.pull = { x: 0, y: 0 };
+    this.roll = 0;
+    this._t = 0;
+  }
+
+  setBaseFov(fov) { this.baseFov = fov; }
+
+  /** Sacudida breve: rotura de línea, clavada fuerte, trueno. */
+  addShake(amount) { this.shake = Math.min(1.2, this.shake + amount); }
+  /** Cambio momentáneo de campo de visión: el lance «abre» la vista. */
+  addFovKick(amount) { this.fovKick += amount; }
+  /** Tirón sostenido: el pez arrastra la vista hacia su carrera. */
+  setPull(x, y) { this.pull.x = x; this.pull.y = y; }
+  /** Inclinación lateral: presión de la caña en la pelea. */
+  setRoll(amount) { this.roll = amount; }
+
+  update(dt) {
+    this._t += dt;
+    this.shake = damp(this.shake, 0, 4.5, dt);
+    this.fovKick = damp(this.fovKick, 0, 5, dt);
+
+    // Ruido de dos frecuencias: una sacudida limpia se nota artificial.
+    const s = this.shake * this.shake;
+    const nx = (Math.sin(this._t * 47) * 0.6 + Math.sin(this._t * 23.3) * 0.4) * s * 0.035;
+    const ny = (Math.cos(this._t * 41) * 0.6 + Math.cos(this._t * 19.7) * 0.4) * s * 0.03;
+
+    this.camera.rotation.x += ny + this.pull.y;
+    this.camera.rotation.y += nx + this.pull.x;
+    this.camera.rotation.z += this.roll + nx * 0.5;
+
+    const fov = this.baseFov + this.fovKick;
+    if (Math.abs(this.camera.fov - fov) > 0.01) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
   }
 }
 
@@ -4778,6 +5343,9 @@ const CSS = `
   background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
 .sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
 
+.sw-fade { position: absolute; inset: 0; background: #05080b; opacity: 0; pointer-events: none;
+  transition: opacity .55s ease; }
+.sw-fade.on { opacity: 1; }
 .sw-coach { position: absolute; left: 50%; bottom: 152px; transform: translateX(-50%);
   width: min(560px, 88vw); background: var(--panel); border: 1px solid var(--accent);
   border-left-width: 3px; border-radius: 9px; padding: 10px 14px; font-size: 13.5px;
@@ -4916,6 +5484,9 @@ class UI {
     this.fpsBox.style.display = 'none';
     this.root.appendChild(this.fpsBox);
 
+    this.fadeBox = el('div', 'sw-fade');
+    this.root.appendChild(this.fadeBox);
+
     this.toast = el('div', 'sw-toast');
     this.toast.style.display = 'none';
     this.root.appendChild(this.toast);
@@ -5041,6 +5612,15 @@ class UI {
     this._overlay('Still Waters', body, { onClose: onStart });
   }
 
+  /** Funde a negro, ejecuta `during` y vuelve. Para saltos de tiempo. */
+  fadeThrough(during, { hold = 620 } = {}) {
+    this.fadeBox.classList.add('on');
+    setTimeout(() => {
+      during?.();
+      setTimeout(() => this.fadeBox.classList.remove('on'), 260);
+    }, hold);
+  }
+
   setCrosshairVisible(value) {
     this.crosshair.style.display = value ? 'block' : 'none';
   }
@@ -5130,7 +5710,9 @@ class UI {
           act.appendChild(el('span', 'sw-tag', 'Equipado'));
         } else {
           const b = el('button', 'sw-btn', 'Equipar');
-          b.addEventListener('click', () => { this.cb.onEquip?.(this.gearTab, item.id); render(); });
+          b.addEventListener('click', () => {
+            if (this.cb.onEquip?.(this.gearTab, item.id) !== false) render();
+          });
           act.appendChild(b);
         }
         row.appendChild(act);
@@ -5485,6 +6067,28 @@ class AudioSystem {
   lineBreak() { this._burst(0.3, { gain: 0.3, from: 4000, to: 700, type: 'highpass' }); this._tone(180, 0.4, { type: 'sawtooth', gain: 0.16, slideTo: 60 }); }
   landed() { [523, 659, 784, 1046].forEach((f, i) => this._tone(f, 0.18, { type: 'triangle', gain: 0.13, delay: i * 0.09 })); }
   coin() { this._tone(880, 0.07, { type: 'square', gain: 0.1 }); this._tone(1320, 0.09, { type: 'square', gain: 0.09, delay: 0.06 }); }
+  /** Chapoteo lejano: se atenúa y se apaga de agudos con la distancia. */
+  distantSplash(closeness = 1) {
+    const c = clamp(closeness, 0.05, 1);
+    this._burst(0.35 + (1 - c) * 0.3, { gain: 0.05 + c * 0.16, from: 600 + c * 2200, to: 200 });
+  }
+  /** Zumbido del hilo cuando la tensión aprieta. Sube de tono con ella. */
+  lineStress(ratio) {
+    if (ratio < 0.5) return;
+    this._tone(180 + ratio * 520, 0.16, { type: 'sawtooth', gain: 0.02 + ratio * 0.05 });
+  }
+  /** Coletazo del pez en la superficie. */
+  thrash(strength = 1) {
+    this._burst(0.22 * strength, { gain: 0.1 + strength * 0.12, from: 1800, to: 300 });
+    this._tone(90, 0.14, { type: 'sine', gain: 0.06 * strength, slideTo: 55 });
+  }
+  /** Clic del carrete: el intervalo lo marca quien llama, según la recogida. */
+  reelTick(speed = 1) {
+    this._tone(1200 + Math.random() * 500 + speed * 300, 0.028, { type: 'square', gain: 0.03 + speed * 0.02 });
+  }
+  /** Chapoteo del jugador al andar por el agua somera. */
+  wade() { this._burst(0.24, { gain: 0.09, from: 1500, to: 320 }); }
+
   footstep(surface) {
     if (surface === 'madera') this._tone(140 + Math.random() * 40, 0.07, { type: 'square', gain: 0.055 });
     else if (surface === 'agua') this._burst(0.2, { gain: 0.11, from: 1800, to: 400 });
@@ -5566,6 +6170,7 @@ class Game {
     this._initPlayer();
     this._initProgress();
     this._initFishing();
+    this.cameraFx = new CameraFx(this.camera, { baseFov: this.settings.fov });
     this._initUI();
     this._initPerformance();
     this._bindInput();
@@ -5642,11 +6247,15 @@ class Game {
     this.fishManager = new FishManager(this.scene, this.terrain, {
       seed: zone.terrain.seed + 3, species: zone.species
     });
+    this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
+      seed: zone.terrain.seed + 7, audio: this.audio
+    });
   }
 
   _disposeZone() {
     if (!this.terrain) return;
     this.fishManager?.dispose();
+    this.ambient?.dispose();
     this.boat?.dispose();
     this.props?.dispose();
     this.trees?.dispose();
@@ -5716,18 +6325,37 @@ class Game {
       fishManager: this.fishManager,
       equipment: this.equipment,
       events: {
-        onCast: () => { this.economy.stats.casts++; this.audio.cast(); },
+        onCast: (power) => {
+          this.economy.stats.casts++;
+          this.audio.cast();
+          this.cameraFx.addFovKick(2.5 + power * 3.5);
+        },
         onSplash: (p) => this.audio.splash(0.9),
         onBite: () => this.audio.bite(),
-        onHookSet: () => { this.economy.stats.hooked++; this.audio.hookSet(); },
+        onHookSet: () => {
+          this.economy.stats.hooked++;
+          this.audio.hookSet();
+          this.cameraFx.addShake(0.35);
+          this.cameraFx.addFovKick(-3);
+        },
         onDragSlip: () => { if (Math.random() < 0.35) this.audio.dragSlip(); },
-        onJump: (fish) => this.water.splash(fish.position, 1.1),
+        onJump: (fish) => {
+          this.water.splash(fish.position, 1.1);
+          this.audio.thrash(clamp(0.4 + fish.weight * 0.06, 0.4, 1.4));
+          this.cameraFx.addShake(0.18);
+        },
+        onRun: () => this.cameraFx.addShake(0.12),
         onLineBreak: () => {
           this.economy.stats.lineBreaks++; this.economy.stats.lost++;
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
+          this.cameraFx.addShake(0.9);
         },
         onFishLost: () => { this.economy.stats.lost++; this.lastEvent = 'fishLost'; },
-        onLanded: (fish) => { this.lastEvent = 'landed'; this._onLanded(fish); }
+        onLanded: (fish) => {
+          this.lastEvent = 'landed';
+          this.cameraFx.addShake(0.2);
+          this._onLanded(fish);
+        }
       }
     });
   }
@@ -5754,7 +6382,12 @@ class Game {
 
   _initUI() {
     this.ui = new UI({
-      onEquip: (category, id) => { this.equipment.equip(category, id); this._persist(); },
+      onEquip: (category, id) => {
+        const result = this.equipment.equip(category, id);
+        if (typeof result === 'string') { this.fishing._say(result, 'bad'); return false; }
+        this._persist();
+        return true;
+      },
       onBuy: (category, id) => {
         if (this.economy.buy(category, id)) {
           this.inventory.add(category, id);
@@ -5809,7 +6442,12 @@ class Game {
         case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
-        case 'KeyE': if (!this.ui.isPanelOpen) this._toggleBoat(); break;
+        case 'KeyE': {
+          if (this.ui.isPanelOpen) break;
+          const target = this._interactables()[0];
+          if (target) target.action();
+          break;
+        }
         case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
@@ -5899,6 +6537,7 @@ class Game {
     if (key === 'autoQuality') this.perf.auto = value;
     if (key === 'fov') {
       this.camera.fov = value;
+      this.cameraFx.setBaseFov(value);
       this.camera.updateProjectionMatrix();
     }
     if (key === 'masterVolume') this.audio.setVolume(value);
@@ -5984,9 +6623,12 @@ class Game {
     this.weather.update(dt, this.player.position, this.time.fogColor);
     this.sky.update(this.time, this.weather, dt, this.player.position);
 
+    // El viento base más la racha en curso: la vegetación se mueve a rachas,
+    // no a velocidad constante.
+    const gust = this.ambient?.gustStrength ?? 0;
     const wind = new THREE.Vector3(
       this.weather.windDirection.x, 0, this.weather.windDirection.y
-    ).multiplyScalar(this.weather.windSpeed);
+    ).multiplyScalar(this.weather.windSpeed * (1 + gust * 0.55));
 
     this.water.update(dt, {
       sunDirection: this.time.sunDirection,
@@ -6017,6 +6659,9 @@ class Game {
       wind,
       lookDelta: this.player.lookDelta,
       cameraPosition: this.player.position,
+      playerPosition: this.player.position,
+      // Cuanto más ruido hace el jugador, antes se espantan.
+      playerNoise: clamp((moving.speed / 5.6) * (moving.surface === 'agua' ? 1.4 : 0.35), 0, 1.4),
       lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
       lureAction: this.fishing.lure.action,
       onBite: () => {},
@@ -6026,7 +6671,10 @@ class Game {
     if (!panelOpen) {
       this.fishing.update(dt, context);
       this.fishManager.update(dt, context);
+      this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
+      this._updateFeedback(dt, moving);
     }
+    this.cameraFx.update(dt);
 
     if (!headless) {
       this.perf.update(dt);
@@ -6060,11 +6708,98 @@ class Game {
     }
   }
 
-  /** Aviso contextual bajo el punto de mira. */
+  /**
+   * Puntos con los que se puede interactuar, en orden de prioridad.
+   *
+   * Todos comparten la misma tecla y el mismo aviso bajo el punto de mira, de
+   * modo que el jugador aprende un solo gesto y vale para todo.
+   */
+  _interactables() {
+    const list = [];
+    const here = this.player.position;
+
+    if (this.player.platform) {
+      list.push({ label: 'W/S bogar · A/D virar · E desembarcar', action: () => this._toggleBoat() });
+      return list;
+    }
+    if (this.boat.canBoard(here)) {
+      list.push({ label: 'E · subir a la barca', action: () => this._toggleBoat() });
+    }
+    const camp = this.props.camp?.position;
+    if (camp && here.distanceTo(camp) < 3.6) {
+      const next = this._nextFeedingHour();
+      list.push({
+        label: `E · descansar junto al fuego hasta las ${String(Math.floor(next)).padStart(2, '0')}:00`,
+        action: () => this._rest(next)
+      });
+    }
+    return list;
+  }
+
   _contextHint() {
-    if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
-    if (this.boat.canBoard(this.player.position)) return 'E para subir a la barca';
-    return '';
+    return this._interactables()[0]?.label ?? '';
+  }
+
+  /** Siguiente hora punta de actividad: amanecer o atardecer. */
+  _nextFeedingHour() {
+    const h = this.time.hour;
+    return h < 5.5 || h >= 19 ? 6 : 19;
+  }
+
+  /** Descansar: salta a la siguiente franja buena, con fundido. */
+  _rest(hour) {
+    if (this.fishing.state !== 'idle') { this.fishing.reelIn(); }
+    this.input.releaseLock();
+    this.ui.fadeThrough(() => {
+      this.time.setHour(hour);
+      // Al levantarse, el tiempo puede haber cambiado.
+      if (Math.random() < 0.55) this.weather.cycle();
+      this._persist();
+      this.fishing._say(`Has descansado. Son las ${String(Math.floor(hour)).padStart(2, '0')}:00 · ${this.weather.label}`);
+      this.input.requestLock();
+    });
+  }
+
+  /**
+   * Reacciones continuas: tirón de cámara durante la pelea, zumbido del hilo,
+   * clics del carrete y ondas al vadear.
+   */
+  _updateFeedback(dt, moving) {
+    const f = this.fishing;
+
+    // La vista se va detrás del pez cuando tira, proporcional a la tensión.
+    if (f.state === 'fighting' && f.hooked) {
+      const toFish = f.hooked.position.clone().sub(this.camera.getWorldPosition(new THREE.Vector3()));
+      const forward = this.camera.getWorldDirection(new THREE.Vector3());
+      const lateral = forward.x * toFish.z - forward.z * toFish.x;
+      const strength = clamp(f.tensionRatio, 0, 1) * 0.02;
+      this.cameraFx.setPull(clamp(-lateral * 0.002, -1, 1) * strength, -strength * 0.5);
+      this.cameraFx.setRoll(f.sidePressure * 0.035);
+      this._stressTimer = (this._stressTimer ?? 0) - dt;
+      if (this._stressTimer <= 0 && f.tensionRatio > 0.55) {
+        this._stressTimer = 0.28;
+        this.audio.lineStress(f.tensionRatio);
+      }
+    } else {
+      this.cameraFx.setPull(0, 0);
+      this.cameraFx.setRoll(0);
+    }
+
+    // Clics del carrete al ritmo de la recogida.
+    if (f.retrieveInput > 0.05 && f.state !== 'idle') {
+      this._reelTimer = (this._reelTimer ?? 0) - dt * f.retrieveInput * (1 + f.tensionRatio);
+      if (this._reelTimer <= 0) { this._reelTimer = 0.1; this.audio.reelTick(f.retrieveInput); }
+    }
+
+    // Andar por el agua somera levanta ondas y suena.
+    if (moving.surface === 'agua' && moving.speed > 1) {
+      this._wadeTimer = (this._wadeTimer ?? 0) - dt * moving.speed * 0.45;
+      if (this._wadeTimer <= 0) {
+        this._wadeTimer = 1;
+        this.water.splash(this.player.position, 0.25 + moving.depth * 0.3);
+        this.audio.wade();
+      }
+    }
   }
 
   _updateAudio(dt, moving) {
@@ -6094,6 +6829,7 @@ class Game {
     this.vegetation.dispose();
     this.trees.dispose();
     this.grass.dispose();
+    this.ambient.dispose();
     this.boat.dispose();
     this.props.dispose();
     this.water.dispose();

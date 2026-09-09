@@ -191,6 +191,10 @@ export class TextureLibrary {
       ...extra
     });
     material.normalScale.set(1, 1);
+    // Compartido: lo entrega la biblioteca a varios sistemas y sólo ella lo
+    // destruye. Sin esta marca, el primer sistema que se descarta al cambiar
+    // de zona dejaba sin programa a los demás.
+    material.userData.shared = true;
     this.cache.set(key, material);
     return material;
   }

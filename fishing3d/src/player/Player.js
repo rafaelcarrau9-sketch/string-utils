@@ -46,6 +46,8 @@ export class Player {
     this._forward = new THREE.Vector3();
     this._right = new THREE.Vector3();
     this.lookDelta = new THREE.Vector2();
+    this.lean = 0;
+    this.lastYaw = 0;
   }
 
   get position() { return this.rig.position; }
@@ -157,8 +159,18 @@ export class Player {
     const bobY = Math.sin(this.bobPhase * 2) * 0.035 * this.bobAmount;
     const bobX = Math.cos(this.bobPhase) * 0.028 * this.bobAmount;
 
+    // Inclinación: al desplazarse de lado y al girar, el cuerpo se ladea. Es
+    // lo que separa "una cámara que se traslada" de "alguien andando".
+    const strafeLean = -strafeInput * 0.022 * clamp(horizontalSpeed / RUN_SPEED, 0, 1);
+    let turnDelta = this.yaw - this.lastYaw;
+    while (turnDelta > Math.PI) turnDelta -= Math.PI * 2;
+    while (turnDelta < -Math.PI) turnDelta += Math.PI * 2;
+    this.lastYaw = this.yaw;
+    const turnLean = clamp(turnDelta * 0.5, -0.03, 0.03);
+    this.lean = damp(this.lean, strafeLean + turnLean, 7, dt);
+
     this.rig.rotation.y = this.yaw;
-    this.camera.rotation.set(this.pitch, 0, bobX * 0.35);
+    this.camera.rotation.set(this.pitch, 0, bobX * 0.35 + this.lean);
     this.camera.position.set(
       this.mode === 'third' ? 0 : bobX * 0.5,
       EYE_HEIGHT + bobY,

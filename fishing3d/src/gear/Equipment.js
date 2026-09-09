@@ -24,8 +24,15 @@ export class Equipment {
   get line() { return findItem('lines', this.equipped.lines) || CATALOG.lines[0]; }
   get lure() { return findItem('lures', this.equipped.lures) || CATALOG.lures[0]; }
 
+  /**
+   * Equipar. `guard` permite a la pesca vetar el cambio: no se cambia de
+   * línea con un pez colgando, ni de señuelo con el aparejo en el agua.
+   * Devuelve `true`, o el motivo del rechazo.
+   */
   equip(category, id) {
     if (!this.inventory.has(category, id)) return false;
+    const veto = this.guard?.(category);
+    if (veto) return veto;
     this.equipped[category] = id;
     return true;
   }

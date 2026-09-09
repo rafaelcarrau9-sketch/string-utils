@@ -211,7 +211,7 @@ export class Trees {
   dispose() {
     [this.near.trunk, this.near.broad, this.near.conifer, this.far].forEach((m) => {
       m.geometry.dispose();
-      m.material.dispose();
+      if (!m.material.userData.shared) m.material.dispose();
     });
     this.scene.remove(this.group);
   }

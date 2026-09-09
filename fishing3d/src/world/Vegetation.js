@@ -211,7 +211,9 @@ export class Vegetation {
 
   dispose() {
     this.group.traverse((o) => {
-      if (o.isInstancedMesh) { o.geometry.dispose(); o.material.dispose(); }
+      if (!o.isInstancedMesh) return;
+      o.geometry.dispose();
+      if (!o.material.userData.shared) o.material.dispose();
     });
     this.scene.remove(this.group);
   }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Lure, LureState } from './Lure.js';
 import { FishingLine } from './Line.js';
-import { Rod } from './Rod.js';
+import { Rod, RodPose } from './Rod.js';
 import { FishState } from '../fish/Fish.js';
 import { clamp, lerp, damp } from '../core/MathUtils.js';
 
@@ -66,6 +66,19 @@ export class FishingSystem {
     this.message = null;
     this.lastCatch = null;
 
+    // Veto de cambios de equipo mientras hay algo en marcha.
+    equipment.guard = (category) => {
+      if (this.state === FishingState.FIGHTING) {
+        return 'No puedes cambiar de equipo con un pez enganchado';
+      }
+      if (this.state !== FishingState.IDLE) {
+        return category === 'lures'
+          ? 'Recoge el sedal (R) antes de cambiar de señuelo'
+          : 'Recoge el sedal (R) antes de cambiar de equipo';
+      }
+      return null;
+    };
+
     this._rodTip = new THREE.Vector3();
     this._tmp = new THREE.Vector3();
   }
@@ -104,6 +117,7 @@ export class FishingSystem {
     this.lineOut = 1;
     this.tension = 0;
     this.state = FishingState.CASTING;
+    this.rod.setPose(RodPose.CAST);
     this.events?.onCast?.(this.power);
     this.power = 0;
   }
@@ -131,6 +145,7 @@ export class FishingSystem {
           jumping: 0,
           runsLeft: fish.species.fight.runs
         };
+        this.rod.strike();
         this.events?.onHookSet?.(fish);
         return true;
       }
@@ -206,7 +221,15 @@ export class FishingSystem {
     }
 
     this._updateLineVisual(dt, context);
-    this.rod.update(dt, clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.2), context.lookDelta);
+    this.rod.setPose(this._poseForState());
+    this.rod.update(dt, {
+      tensionRatio: clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.3),
+      retrieve: this.retrieveInput,
+      sidePressure: this.sidePressure,
+      power: this.power,
+      lookDelta: context.lookDelta,
+      surge: this.fight?.burst ?? 0
+    });
     // La pieza gira despacio mientras se mira.
     if (this._trophy) {
       this._trophy.spin += dt * 0.55;
@@ -218,6 +241,18 @@ export class FishingSystem {
     if (this.message) {
       this.message.time += dt;
       if (this.message.time > 3.5) this.message = null;
+    }
+  }
+
+  /** Qué pose corresponde al estado actual de la pesca. */
+  _poseForState() {
+    switch (this.state) {
+      case FishingState.AIMING: return RodPose.CHARGE;
+      case FishingState.CASTING: return RodPose.CAST;
+      case FishingState.FISHING:
+      case FishingState.BITE: return RodPose.FISH;
+      case FishingState.FIGHTING: return RodPose.FIGHT;
+      default: return RodPose.IDLE;
     }
   }
 
@@ -271,6 +306,7 @@ export class FishingSystem {
     }
     // Tirones visibles en el señuelo mientras el pez lo tiene en la boca.
     this.lure.position.lerp(fish.position, 0.35 * dt * 4);
+    this.rod.nibble(0.6 + (fish.biteStrength ?? 0.5) * 0.6);
     this.lineOut = Math.max(0.8, this.lineOut - dt * 0.4);
   }
 

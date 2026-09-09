@@ -147,6 +147,39 @@ osciladores con envolvente.
 Para sustituirlos por texturas reales basta con cambiar `TextureLibrary.material()`
 por un cargador; el resto del juego sólo pide materiales por nombre.
 
+## Animación
+
+Nada se mueve por sustitución de clips: **la caña se anima por poses**. Cada
+situación —reposo, cargando, lanzando, pescando, peleando— define una posición
+y una rotación de la mano, y el conjunto se interpola hacia ella con
+amortiguación, así que la transición entre dos estados es siempre una mezcla y
+nunca un corte. Encima van capas procedurales independientes del estado:
+respiración, inercia al girar la vista, el latigazo del lance, el bombeo al
+recoger, el temblor de la puntera cuando el pez tantea y la curvatura del
+blank según la tensión. El carrete tiene manivela y gira al recoger.
+
+Los peces orientan el rumbo con amortiguación en vez de mirar al vector de
+velocidad cada fotograma, se alabean hacia dentro de la curva, cabecean al
+cambiar de profundidad y arquean el cuerpo al forcejear. La frecuencia del
+coleteo sale del tamaño y la velocidad de la especie: una trucha bate a 10 Hz
+y un siluro a 6,5.
+
+## El mundo vivo
+
+Sin que el jugador haga nada: peces que saltan a lo lejos con su chapoteo,
+bandos de pájaros cruzando el cielo, rachas de viento que recorren la
+vegetación y anillos sueltos en la superficie. Todo se modula con la hora y el
+clima —al amanecer salta más pescado, con lluvia no hay pájaros—. Vadear
+levanta ondas y espanta a los peces cercanos.
+
+## Interacción
+
+Un solo gesto para todo: acercarse y pulsar `E`. El aviso bajo el punto de
+mira dice qué se puede hacer ahí. Hoy hay dos puntos —subir a la barca y
+descansar junto al fuego hasta la siguiente hora de actividad, que es lo que
+hace jugables los horarios de las especies— y añadir uno más es una entrada
+en `Game._interactables()`.
+
 ## Los peces
 
 La silueta de cada especie no está escrita a mano: sale de su relación

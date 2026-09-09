@@ -115,6 +115,28 @@ export class AudioSystem {
   lineBreak() { this._burst(0.3, { gain: 0.3, from: 4000, to: 700, type: 'highpass' }); this._tone(180, 0.4, { type: 'sawtooth', gain: 0.16, slideTo: 60 }); }
   landed() { [523, 659, 784, 1046].forEach((f, i) => this._tone(f, 0.18, { type: 'triangle', gain: 0.13, delay: i * 0.09 })); }
   coin() { this._tone(880, 0.07, { type: 'square', gain: 0.1 }); this._tone(1320, 0.09, { type: 'square', gain: 0.09, delay: 0.06 }); }
+  /** Chapoteo lejano: se atenúa y se apaga de agudos con la distancia. */
+  distantSplash(closeness = 1) {
+    const c = clamp(closeness, 0.05, 1);
+    this._burst(0.35 + (1 - c) * 0.3, { gain: 0.05 + c * 0.16, from: 600 + c * 2200, to: 200 });
+  }
+  /** Zumbido del hilo cuando la tensión aprieta. Sube de tono con ella. */
+  lineStress(ratio) {
+    if (ratio < 0.5) return;
+    this._tone(180 + ratio * 520, 0.16, { type: 'sawtooth', gain: 0.02 + ratio * 0.05 });
+  }
+  /** Coletazo del pez en la superficie. */
+  thrash(strength = 1) {
+    this._burst(0.22 * strength, { gain: 0.1 + strength * 0.12, from: 1800, to: 300 });
+    this._tone(90, 0.14, { type: 'sine', gain: 0.06 * strength, slideTo: 55 });
+  }
+  /** Clic del carrete: el intervalo lo marca quien llama, según la recogida. */
+  reelTick(speed = 1) {
+    this._tone(1200 + Math.random() * 500 + speed * 300, 0.028, { type: 'square', gain: 0.03 + speed * 0.02 });
+  }
+  /** Chapoteo del jugador al andar por el agua somera. */
+  wade() { this._burst(0.24, { gain: 0.09, from: 1500, to: 320 }); }
+
   footstep(surface) {
     if (surface === 'madera') this._tone(140 + Math.random() * 40, 0.07, { type: 'square', gain: 0.055 });
     else if (surface === 'agua') this._burst(0.2, { gain: 0.11, from: 1800, to: 400 });
