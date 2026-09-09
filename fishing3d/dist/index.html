@@ -2811,6 +2811,10 @@ class FishManager {
  * Carretes   → capacidad de línea, velocidad de recogida, freno máximo.
  * Líneas     → resistencia en kg, diámetro (más fino = más lejos, menos aguante), elasticidad (amortigua tirones).
  * Señuelos   → peso (distancia), profundidad de trabajo, acción y atractivo.
+ *
+ * `rig` distingue dos formas de pescar: 'senuelo' hay que trabajarlo
+ * recogiendo, y 'flotador' se deja quieto con el cebo suspendido — el aviso
+ * es la boya hundiéndose.
  */
 
 const RODS = [
@@ -2847,18 +2851,18 @@ const LINES = [
 ];
 
 const LURES = [
-  { id: 'cucharilla', name: 'Cucharilla giratoria', weightG: 8, workingDepth: 1.6, action: 0.85, attraction: 1.0, price: 0,
+  { id: 'cucharilla', name: 'Cucharilla giratoria', rig: 'senuelo', weightG: 8, workingDepth: 1.6, action: 0.85, attraction: 1.0, price: 0,
     description: 'Vibración constante al recoger. Versátil.' },
-  { id: 'vinilo', name: 'Vinilo con cabeza plomada', weightG: 14, workingDepth: 3.2, action: 0.7, attraction: 1.1, price: 90,
+  { id: 'vinilo', name: 'Vinilo con cabeza plomada', rig: 'senuelo', weightG: 14, workingDepth: 3.2, action: 0.7, attraction: 1.1, price: 90,
     description: 'Trabaja a media agua. Muy imitativo.' },
-  { id: 'popper', name: 'Popper de superficie', weightG: 11, workingDepth: 0.3, action: 1.0, attraction: 0.95, price: 160,
+  { id: 'popper', name: 'Popper de superficie', rig: 'senuelo', weightG: 11, workingDepth: 0.3, action: 1.0, attraction: 0.95, price: 160,
     description: 'Chapotea en superficie. Espectacular al amanecer.' },
-  { id: 'ninfa', name: 'Ninfa lastrada', weightG: 4, workingDepth: 2.0, action: 0.45, attraction: 1.05, price: 120,
-    description: 'Discreta y ligera. Cuesta lanzarla lejos.' },
-  { id: 'cucharilla_pesada', name: 'Cucharilla pesada', weightG: 24, workingDepth: 5.0, action: 0.8, attraction: 0.9, price: 340,
+  { id: 'ninfa', name: 'Ninfa bajo flotador', rig: 'flotador', weightG: 4, workingDepth: 2.0, action: 0.45, attraction: 1.05, price: 120,
+    description: 'Se deja quieta a media agua bajo la boya. Discreta y muy imitativa.' },
+  { id: 'cucharilla_pesada', name: 'Cucharilla pesada', rig: 'senuelo', weightG: 24, workingDepth: 5.0, action: 0.8, attraction: 0.9, price: 340,
     description: 'Baja rápido: la herramienta para el fondo.' },
-  { id: 'boilie', name: 'Boilie al fondo', weightG: 18, workingDepth: 7.5, action: 0.1, attraction: 1.2, price: 210,
-    description: 'Cebo quieto en el fondo. Paciencia, pero peces grandes.' }
+  { id: 'boilie', name: 'Boilie con flotador', rig: 'flotador', weightG: 18, workingDepth: 7.5, action: 0.1, attraction: 1.2, price: 210,
+    description: 'Cebo quieto cerca del fondo. Paciencia, pero peces grandes.' }
 ];
 
 const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES };
@@ -3208,9 +3212,55 @@ class Lure {
     this.object = group;
     this.object.visible = false;
     scene.add(this.object);
+
+    this.rig = 'senuelo';
+    this.biting = false;
+    this.floatDip = 0;
+    this.floatObject = this._buildFloat();
+    this.floatObject.visible = false;
+    scene.add(this.floatObject);
+  }
+
+  /** Boya de pesca: cuerpo rojo y blanco con antena. */
+  _buildFloat() {
+    const group = new THREE.Group();
+    const red = new THREE.MeshStandardMaterial({ color: 0xd23c28, roughness: 0.45 });
+    const white = new THREE.MeshStandardMaterial({ color: 0xf0efe6, roughness: 0.5 });
+
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.075, 12, 10), red);
+    body.scale.set(1, 1.5, 1);
+    group.add(body);
+    const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.077, 0.077, 0.05, 12), white);
+    collar.position.y = 0.03;
+    group.add(collar);
+    const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.012, 0.3, 6), red);
+    antenna.position.y = 0.24;
+    group.add(antenna);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.016, 8, 6), white);
+    tip.position.y = 0.39;
+    group.add(tip);
+    const keel = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.22, 5), white);
+    keel.position.y = -0.2;
+    group.add(keel);
+    return group;
+  }
+
+  /** Cambia de montaje según el señuelo equipado. */
+  setRig(lureItem) {
+    this.rig = lureItem?.rig === 'flotador' ? 'flotador' : 'senuelo';
+  }
+
+  /** Punto del que cuelga la línea: la boya si hay montaje de flotador. */
+  get lineAnchor() {
+    return this.rig === 'flotador' && this.state === LureState.WATER
+      ? this.floatObject.position
+      : this.position;
   }
 
   cast(origin, direction, speed, lure) {
+    this.setRig(lure);
+    this.biting = false;
+    this.floatDip = 0;
     this.position.copy(origin);
     this.velocity.copy(direction).normalize().multiplyScalar(speed);
     this.state = LureState.FLYING;
@@ -3223,8 +3273,14 @@ class Lure {
   stow() {
     this.state = LureState.STOWED;
     this.object.visible = false;
+    this.floatObject.visible = false;
+    this.biting = false;
+    this.floatDip = 0;
     this.action = 0;
   }
+
+  /** El pez tiene el cebo en la boca: la boya se hunde. */
+  setBiting(value) { this.biting = value; }
 
   get isFishable() { return this.state === LureState.WATER; }
 
@@ -3275,8 +3331,10 @@ class Lure {
         }
       }
 
-      // La "acción" decae si el señuelo está quieto.
-      this.action = damp(this.action, retrieve, 6, dt);
+      // Un señuelo se trabaja recogiendo; un cebo bajo flotador atrae quieto,
+      // así que conserva una acción de fondo en vez de apagarse del todo.
+      const actionTarget = this.rig === 'flotador' ? Math.max(0.4, retrieve) : retrieve;
+      this.action = damp(this.action, actionTarget, 6, dt);
       this.object.rotation.z += this.action * dt * 6;
     }
 
@@ -3284,12 +3342,41 @@ class Lure {
     if (this.state === LureState.FLYING && this.velocity.lengthSq() > 0.01) {
       this.object.lookAt(this.position.clone().add(this.velocity));
     }
+
+    this._updateFloat(dt, waterLevel);
     return event;
   }
 
+  /**
+   * La boya flota justo encima del cebo y cabecea con el oleaje. Al picar se
+   * hunde: ese es el aviso, mucho antes que cualquier texto en pantalla.
+   */
+  _updateFloat(dt, waterLevel) {
+    const showFloat = this.rig === 'flotador' && this.state === LureState.WATER;
+    this.floatObject.visible = showFloat;
+    if (!showFloat) return;
+
+    this.floatDip = damp(this.floatDip, this.biting ? 1 : 0, this.biting ? 9 : 3.5, dt);
+    const t = performance.now() * 0.001;
+    const bob = Math.sin(t * 1.6 + this.position.x * 0.4) * 0.03
+      + Math.sin(t * 2.7 + this.position.z * 0.3) * 0.018;
+
+    this.floatObject.position.set(
+      this.position.x,
+      waterLevel + bob - this.floatDip * 0.42,
+      this.position.z
+    );
+    // Se ladea al ser arrastrada, y tiembla mientras el pez tantea el cebo.
+    const tilt = this.floatDip * 0.7 + (this.biting ? Math.sin(t * 22) * 0.12 : 0);
+    this.floatObject.rotation.set(tilt, 0, Math.sin(t * 1.3) * 0.06);
+  }
+
   dispose() {
-    this.object.traverse((o) => {
-      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+    [this.object, this.floatObject].forEach((root) => {
+      root.traverse((o) => {
+        if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+      });
+      root.parent?.remove(root);
     });
   }
 }
@@ -3448,6 +3535,8 @@ class FishingSystem {
     this.hooked = null;
     this.biteTimer = 0;
     this.retrieveInput = 0;
+    this.sidePressure = 0;      // -1 izquierda … +1 derecha, desde dónde apunta la caña
+    this.counterPressure = 0;   // >0 si esa presión va contra la carrera del pez
     this.message = null;
     this.lastCatch = null;
 
@@ -3506,6 +3595,9 @@ class FishingSystem {
         // acumula el recogido se convertiría en un pico de tensión que rompe
         // el hilo en el mismo instante de clavar.
         this.lineOut = Math.max(this.lineOut, this._rodTip.distanceTo(fish.position) + 0.15);
+        // El cebo va en la boca del pez: boya y señuelo dejan de pintarse y la
+        // línea pasa a colgar directamente de él.
+        this.lure.stow();
         this.fight = {
           stamina: 1,
           burst: 0,
@@ -3626,6 +3718,7 @@ class FishingSystem {
 
     if (this.fishManager.biting) {
       this.state = FishingState.BITE;
+      this.lure.setBiting(true);
       this.biteTimer = 0;
       this.water.splash(this.lure.position, 0.5);
       this.events?.onBite?.(this.fishManager.biting);
@@ -3637,6 +3730,7 @@ class FishingSystem {
     const fish = this.fishManager.biting;
     if (!fish) {
       // Lo ha soltado sin que reaccionáramos.
+      this.lure.setBiting(false);
       this.state = FishingState.FISHING;
       this._say('Se ha soltado');
       return;
@@ -3653,6 +3747,26 @@ class FishingSystem {
     const stats = this.stats;
     const f = this.fight;
     const species = fish.species;
+
+    // --- presión lateral ---------------------------------------------------
+    // Apuntar la caña a un lado del pez, y no de frente, es la técnica real
+    // para cansarlo: se le obliga a nadar contra la tracción en vez de tirar
+    // en línea recta. Aquí sale del propio giro de la vista, sin control nuevo.
+    const toFish = fish.position.clone().sub(this._rodTip).setY(0);
+    if (toFish.lengthSq() > 0.01) {
+      toFish.normalize();
+      const aim = new THREE.Vector3();
+      this.camera.getWorldDirection(aim);
+      aim.y = 0;
+      if (aim.lengthSq() > 0.01) {
+        aim.normalize();
+        // Seno del ángulo entre a dónde apunta la caña y dónde está el pez.
+        this.sidePressure = clamp(aim.x * toFish.z - aim.z * toFish.x, -1, 1);
+        // ¿Va esa presión en contra del desplazamiento lateral del pez?
+        const lateral = toFish.x * fish.velocity.z - toFish.z * fish.velocity.x;
+        this.counterPressure = clamp(-Math.sign(lateral) * this.sidePressure, -1, 1);
+      }
+    }
 
     // --- comportamiento del pez -------------------------------------------
     f.burstTimer -= dt;
@@ -3689,9 +3803,16 @@ class FishingSystem {
       * (0.25 + 0.75 * f.stamina);
     const pullSpeed = species.speed * 0.42 * (0.4 + f.burst) * clamp(f.stamina, 0.12, 1);
     // La tensión frena al pez: tirar cansa a los dos.
-    const resisted = pullSpeed / (1 + this.tensionRatio * 1.6);
+    // Ladear la caña le tuerce la cabeza y le quita avance; acompañar su
+    // carrera se lo regala. Ese es todo el valor de la técnica.
+    const steerFactor = clamp(1 - this.counterPressure * 0.4, 0.6, 1.3);
+    const resisted = pullSpeed * steerFactor / (1 + this.tensionRatio * 1.6);
 
     fish.velocity.copy(away).multiplyScalar(resisted);
+    // Desvío lateral leve: se nota en la trayectoria, no en la velocidad.
+    fish.velocity.addScaledVector(
+      new THREE.Vector3(-away.z, 0, away.x), this.sidePressure * resisted * 0.18
+    );
     if (f.jumping > 0) {
       f.jumping -= dt;
       fish.velocity.y = 2.4;                    // salto fuera del agua
@@ -3731,7 +3852,8 @@ class FishingSystem {
     // lo atraviesa son los picos (embestidas y saltos), y por eso apretar el
     // freno al máximo es la forma más rápida de romper la línea.
     const stiffness = lerp(9, 3.5, stats.elasticity);
-    const load = Math.max(0, stretch) * stiffness + power * 0.55;
+    const load = Math.max(0, stretch) * stiffness
+      + power * (0.55 + Math.abs(this.sidePressure) * 0.07);
     const slipping = load > this.dragForce;
     const shock = slipping ? Math.min(load - this.dragForce, load * 0.2) * (1 - stats.elasticity * 0.5) : 0;
     this.tension = damp(this.tension, Math.min(load, this.dragForce + shock), 11, dt);
@@ -3742,8 +3864,10 @@ class FishingSystem {
       this.events?.onDragSlip?.(slip);
     }
 
-    // El pez se cansa por la tensión sostenida.
-    const drain = (0.028 + this.tensionRatio * 0.16) / species.stamina;
+    // El pez se cansa por la tensión sostenida, y bastante más rápido si se
+    // le está haciendo trabajar de costado.
+    const sideBonus = clamp(1 + this.counterPressure * 0.9, 0.45, 1.9);
+    const drain = (0.028 + this.tensionRatio * 0.16) * sideBonus / species.stamina;
     f.stamina = clamp(f.stamina - drain * dt, 0, 1);
     fish.energy = f.stamina;
 
@@ -3776,6 +3900,7 @@ class FishingSystem {
   }
 
   _breakLine(fish, reason = 'La línea ha roto') {
+    this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
     this.events?.onLineBreak?.(fish);
     this.fishManager.release(fish);
@@ -3789,6 +3914,7 @@ class FishingSystem {
   }
 
   _loseFish(fish, reason) {
+    this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
     this.events?.onFishLost?.(fish);
     this.fishManager.release(fish);
@@ -3802,6 +3928,7 @@ class FishingSystem {
   }
 
   _land(fish) {
+    this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
     this.state = FishingState.LANDED;
     this.lastCatch = fish;
@@ -3827,7 +3954,7 @@ class FishingSystem {
 
   _updateLineVisual(dt, context) {
     if (!this.line.mesh.visible) return;
-    const end = this.hooked ? this.hooked.position : this.lure.position;
+    const end = this.hooked ? this.hooked.position : this.lure.lineAnchor;
     const visualLineOut = this.state === FishingState.FIGHTING
       ? this.lineOut
       : Math.max(this.lineOut, this._rodTip.distanceTo(end));
@@ -3851,7 +3978,9 @@ class FishingSystem {
       hooked: this.hooked ? {
         name: this.hooked.displayName,
         weight: this.hooked.weight,
-        stamina: this.fight?.stamina ?? 1
+        stamina: this.fight?.stamina ?? 1,
+        sidePressure: this.sidePressure,
+        counterPressure: this.counterPressure
       } : null,
       message: this.message
     };
@@ -4112,6 +4241,12 @@ const CSS = `
 .sw-prompt { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); text-align: center; width: 460px; }
 .sw-prompt .big { font-size: 26px; font-weight: 700; letter-spacing: .01em; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
 .sw-prompt .small { font-size: 13px; color: #d6e2e8; text-shadow: 0 2px 8px rgba(0,0,0,.9); margin-top: 3px; }
+.sw-prompt .side { font-size: 12px; font-weight: 600; margin-top: 5px;
+  text-shadow: 0 2px 8px rgba(0,0,0,.95); letter-spacing: .01em; }
+.sw-prompt .side.good { color: var(--good); }
+.sw-prompt .side.bad { color: var(--bad); }
+.sw-prompt .side.neutral { color: var(--dim); }
+.sw-prompt .side .ar { font-size: 15px; vertical-align: -1px; }
 .sw-prompt .bite { color: var(--warn); animation: swpulse .45s ease-in-out infinite alternate; }
 @keyframes swpulse { from { transform: scale(1); } to { transform: scale(1.05); } }
 .sw-power { width: 260px; height: 10px; margin: 8px auto 0; border-radius: 99px;
@@ -4305,10 +4440,20 @@ class UI {
       case FishingState.BITE:
         html = `<div class="big bite">¡PICADA!</div><div class="small">Clic izquierdo para clavar</div>`;
         break;
-      case FishingState.FIGHTING:
-        html = `<div class="small"><b>${hud.hooked?.name ?? ''}</b> · ${(hud.hooked?.weight ?? 0).toFixed(2)} kg
-                — recoge sin pasarte de tensión</div>`;
+      case FishingState.FIGHTING: {
+        const h = hud.hooked;
+        const counter = h?.counterPressure ?? 0;
+        const side = h?.sidePressure ?? 0;
+        let tip, cls;
+        if (counter > 0.25) { tip = 'Buena presión lateral · lo estás cansando'; cls = 'good'; }
+        else if (counter < -0.25) { tip = 'Estás acompañando su carrera · ladea la caña al otro lado'; cls = 'bad'; }
+        else { tip = 'Ladea la caña a un costado del pez para cansarlo'; cls = 'neutral'; }
+        const arrow = side > 0.15 ? '▶' : side < -0.15 ? '◀' : '●';
+        html = `<div class="small"><b>${h?.name ?? ''}</b> · ${(h?.weight ?? 0).toFixed(2)} kg
+                — recoge sin pasarte de tensión</div>
+                <div class="side ${cls}"><span class="ar">${arrow}</span> ${tip}</div>`;
         break;
+      }
       default:
         html = '';
     }

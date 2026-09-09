@@ -50,6 +50,12 @@ const CSS = `
 .sw-prompt { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); text-align: center; width: 460px; }
 .sw-prompt .big { font-size: 26px; font-weight: 700; letter-spacing: .01em; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
 .sw-prompt .small { font-size: 13px; color: #d6e2e8; text-shadow: 0 2px 8px rgba(0,0,0,.9); margin-top: 3px; }
+.sw-prompt .side { font-size: 12px; font-weight: 600; margin-top: 5px;
+  text-shadow: 0 2px 8px rgba(0,0,0,.95); letter-spacing: .01em; }
+.sw-prompt .side.good { color: var(--good); }
+.sw-prompt .side.bad { color: var(--bad); }
+.sw-prompt .side.neutral { color: var(--dim); }
+.sw-prompt .side .ar { font-size: 15px; vertical-align: -1px; }
 .sw-prompt .bite { color: var(--warn); animation: swpulse .45s ease-in-out infinite alternate; }
 @keyframes swpulse { from { transform: scale(1); } to { transform: scale(1.05); } }
 .sw-power { width: 260px; height: 10px; margin: 8px auto 0; border-radius: 99px;
@@ -243,10 +249,20 @@ export class UI {
       case FishingState.BITE:
         html = `<div class="big bite">¡PICADA!</div><div class="small">Clic izquierdo para clavar</div>`;
         break;
-      case FishingState.FIGHTING:
-        html = `<div class="small"><b>${hud.hooked?.name ?? ''}</b> · ${(hud.hooked?.weight ?? 0).toFixed(2)} kg
-                — recoge sin pasarte de tensión</div>`;
+      case FishingState.FIGHTING: {
+        const h = hud.hooked;
+        const counter = h?.counterPressure ?? 0;
+        const side = h?.sidePressure ?? 0;
+        let tip, cls;
+        if (counter > 0.25) { tip = 'Buena presión lateral · lo estás cansando'; cls = 'good'; }
+        else if (counter < -0.25) { tip = 'Estás acompañando su carrera · ladea la caña al otro lado'; cls = 'bad'; }
+        else { tip = 'Ladea la caña a un costado del pez para cansarlo'; cls = 'neutral'; }
+        const arrow = side > 0.15 ? '▶' : side < -0.15 ? '◀' : '●';
+        html = `<div class="small"><b>${h?.name ?? ''}</b> · ${(h?.weight ?? 0).toFixed(2)} kg
+                — recoge sin pasarte de tensión</div>
+                <div class="side ${cls}"><span class="ar">${arrow}</span> ${tip}</div>`;
         break;
+      }
       default:
         html = '';
     }

@@ -43,6 +43,7 @@ Requiere un navegador con **WebGL 2** (Chrome o Firefox actualizados).
 | Rueda | Ajustar el freno |
 | `E` | Subir o bajar de la barca |
 | `Z` | Zonas de pesca (comprar acceso y viajar) |
+| Ratón durante la pelea | Ladear la caña (presión lateral) |
 | `R` | Recoger el sedal |
 | `Tab` / `B` / `C` / `G` | Equipo / Tienda / Capturas / Estadísticas |
 | `F` | Cambiar cámara (primera ↔ tercera persona) |
@@ -70,6 +71,25 @@ separado:
 
 Lo único que atraviesa el freno son los **picos** (embestidas, saltos): por eso
 apretarlo al máximo es la forma más rápida de romper la línea.
+
+### Presión lateral
+
+Apuntar la caña **a un costado del pez**, y no de frente, es la técnica real
+para cansarlo: se le tuerce la cabeza y pierde avance. Sale del propio giro de
+la vista, sin añadir ningún control: el juego compara hacia dónde apunta la
+caña con hacia dónde corre el pez.
+
+| Pez | De frente | Presión contraria | Acompañando su carrera |
+|---|---|---|---|
+| Lucio 6,9 kg | 31 s | **25 s** | 39 s |
+| Carpa 12,7 kg | 34 s | **25 s** | 43 s |
+
+### Dos montajes
+
+Los señuelos declaran su `rig`. Los de **señuelo** (cucharilla, vinilo, popper)
+hay que trabajarlos recogiendo. Los de **flotador** (ninfa, boilie) se dejan
+quietos: la boya cabecea en la superficie con el cebo suspendido debajo, y
+**se hunde al picar** — el aviso llega por la boya antes que por el texto.
 
 Números medidos en la simulación automática (`build.py` aparte, ver más abajo),
 con una política de juego razonable:

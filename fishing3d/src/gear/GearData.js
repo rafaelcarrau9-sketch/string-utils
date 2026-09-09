@@ -7,6 +7,10 @@
  * Carretes   → capacidad de línea, velocidad de recogida, freno máximo.
  * Líneas     → resistencia en kg, diámetro (más fino = más lejos, menos aguante), elasticidad (amortigua tirones).
  * Señuelos   → peso (distancia), profundidad de trabajo, acción y atractivo.
+ *
+ * `rig` distingue dos formas de pescar: 'senuelo' hay que trabajarlo
+ * recogiendo, y 'flotador' se deja quieto con el cebo suspendido — el aviso
+ * es la boya hundiéndose.
  */
 
 export const RODS = [
@@ -43,18 +47,18 @@ export const LINES = [
 ];
 
 export const LURES = [
-  { id: 'cucharilla', name: 'Cucharilla giratoria', weightG: 8, workingDepth: 1.6, action: 0.85, attraction: 1.0, price: 0,
+  { id: 'cucharilla', name: 'Cucharilla giratoria', rig: 'senuelo', weightG: 8, workingDepth: 1.6, action: 0.85, attraction: 1.0, price: 0,
     description: 'Vibración constante al recoger. Versátil.' },
-  { id: 'vinilo', name: 'Vinilo con cabeza plomada', weightG: 14, workingDepth: 3.2, action: 0.7, attraction: 1.1, price: 90,
+  { id: 'vinilo', name: 'Vinilo con cabeza plomada', rig: 'senuelo', weightG: 14, workingDepth: 3.2, action: 0.7, attraction: 1.1, price: 90,
     description: 'Trabaja a media agua. Muy imitativo.' },
-  { id: 'popper', name: 'Popper de superficie', weightG: 11, workingDepth: 0.3, action: 1.0, attraction: 0.95, price: 160,
+  { id: 'popper', name: 'Popper de superficie', rig: 'senuelo', weightG: 11, workingDepth: 0.3, action: 1.0, attraction: 0.95, price: 160,
     description: 'Chapotea en superficie. Espectacular al amanecer.' },
-  { id: 'ninfa', name: 'Ninfa lastrada', weightG: 4, workingDepth: 2.0, action: 0.45, attraction: 1.05, price: 120,
-    description: 'Discreta y ligera. Cuesta lanzarla lejos.' },
-  { id: 'cucharilla_pesada', name: 'Cucharilla pesada', weightG: 24, workingDepth: 5.0, action: 0.8, attraction: 0.9, price: 340,
+  { id: 'ninfa', name: 'Ninfa bajo flotador', rig: 'flotador', weightG: 4, workingDepth: 2.0, action: 0.45, attraction: 1.05, price: 120,
+    description: 'Se deja quieta a media agua bajo la boya. Discreta y muy imitativa.' },
+  { id: 'cucharilla_pesada', name: 'Cucharilla pesada', rig: 'senuelo', weightG: 24, workingDepth: 5.0, action: 0.8, attraction: 0.9, price: 340,
     description: 'Baja rápido: la herramienta para el fondo.' },
-  { id: 'boilie', name: 'Boilie al fondo', weightG: 18, workingDepth: 7.5, action: 0.1, attraction: 1.2, price: 210,
-    description: 'Cebo quieto en el fondo. Paciencia, pero peces grandes.' }
+  { id: 'boilie', name: 'Boilie con flotador', rig: 'flotador', weightG: 18, workingDepth: 7.5, action: 0.1, attraction: 1.2, price: 210,
+    description: 'Cebo quieto cerca del fondo. Paciencia, pero peces grandes.' }
 ];
 
 export const CATALOG = { rods: RODS, reels: REELS, lines: LINES, lures: LURES };

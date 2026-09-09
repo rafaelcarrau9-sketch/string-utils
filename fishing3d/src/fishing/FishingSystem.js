@@ -61,6 +61,8 @@ export class FishingSystem {
     this.hooked = null;
     this.biteTimer = 0;
     this.retrieveInput = 0;
+    this.sidePressure = 0;      // -1 izquierda … +1 derecha, desde dónde apunta la caña
+    this.counterPressure = 0;   // >0 si esa presión va contra la carrera del pez
     this.message = null;
     this.lastCatch = null;
 
@@ -119,6 +121,9 @@ export class FishingSystem {
         // acumula el recogido se convertiría en un pico de tensión que rompe
         // el hilo en el mismo instante de clavar.
         this.lineOut = Math.max(this.lineOut, this._rodTip.distanceTo(fish.position) + 0.15);
+        // El cebo va en la boca del pez: boya y señuelo dejan de pintarse y la
+        // línea pasa a colgar directamente de él.
+        this.lure.stow();
         this.fight = {
           stamina: 1,
           burst: 0,
@@ -239,6 +244,7 @@ export class FishingSystem {
 
     if (this.fishManager.biting) {
       this.state = FishingState.BITE;
+      this.lure.setBiting(true);
       this.biteTimer = 0;
       this.water.splash(this.lure.position, 0.5);
       this.events?.onBite?.(this.fishManager.biting);
@@ -250,6 +256,7 @@ export class FishingSystem {
     const fish = this.fishManager.biting;
     if (!fish) {
       // Lo ha soltado sin que reaccionáramos.
+      this.lure.setBiting(false);
       this.state = FishingState.FISHING;
       this._say('Se ha soltado');
       return;
@@ -266,6 +273,26 @@ export class FishingSystem {
     const stats = this.stats;
     const f = this.fight;
     const species = fish.species;
+
+    // --- presión lateral ---------------------------------------------------
+    // Apuntar la caña a un lado del pez, y no de frente, es la técnica real
+    // para cansarlo: se le obliga a nadar contra la tracción en vez de tirar
+    // en línea recta. Aquí sale del propio giro de la vista, sin control nuevo.
+    const toFish = fish.position.clone().sub(this._rodTip).setY(0);
+    if (toFish.lengthSq() > 0.01) {
+      toFish.normalize();
+      const aim = new THREE.Vector3();
+      this.camera.getWorldDirection(aim);
+      aim.y = 0;
+      if (aim.lengthSq() > 0.01) {
+        aim.normalize();
+        // Seno del ángulo entre a dónde apunta la caña y dónde está el pez.
+        this.sidePressure = clamp(aim.x * toFish.z - aim.z * toFish.x, -1, 1);
+        // ¿Va esa presión en contra del desplazamiento lateral del pez?
+        const lateral = toFish.x * fish.velocity.z - toFish.z * fish.velocity.x;
+        this.counterPressure = clamp(-Math.sign(lateral) * this.sidePressure, -1, 1);
+      }
+    }
 
     // --- comportamiento del pez -------------------------------------------
     f.burstTimer -= dt;
@@ -302,9 +329,16 @@ export class FishingSystem {
       * (0.25 + 0.75 * f.stamina);
     const pullSpeed = species.speed * 0.42 * (0.4 + f.burst) * clamp(f.stamina, 0.12, 1);
     // La tensión frena al pez: tirar cansa a los dos.
-    const resisted = pullSpeed / (1 + this.tensionRatio * 1.6);
+    // Ladear la caña le tuerce la cabeza y le quita avance; acompañar su
+    // carrera se lo regala. Ese es todo el valor de la técnica.
+    const steerFactor = clamp(1 - this.counterPressure * 0.4, 0.6, 1.3);
+    const resisted = pullSpeed * steerFactor / (1 + this.tensionRatio * 1.6);
 
     fish.velocity.copy(away).multiplyScalar(resisted);
+    // Desvío lateral leve: se nota en la trayectoria, no en la velocidad.
+    fish.velocity.addScaledVector(
+      new THREE.Vector3(-away.z, 0, away.x), this.sidePressure * resisted * 0.18
+    );
     if (f.jumping > 0) {
       f.jumping -= dt;
       fish.velocity.y = 2.4;                    // salto fuera del agua
@@ -344,7 +378,8 @@ export class FishingSystem {
     // lo atraviesa son los picos (embestidas y saltos), y por eso apretar el
     // freno al máximo es la forma más rápida de romper la línea.
     const stiffness = lerp(9, 3.5, stats.elasticity);
-    const load = Math.max(0, stretch) * stiffness + power * 0.55;
+    const load = Math.max(0, stretch) * stiffness
+      + power * (0.55 + Math.abs(this.sidePressure) * 0.07);
     const slipping = load > this.dragForce;
     const shock = slipping ? Math.min(load - this.dragForce, load * 0.2) * (1 - stats.elasticity * 0.5) : 0;
     this.tension = damp(this.tension, Math.min(load, this.dragForce + shock), 11, dt);
@@ -355,8 +390,10 @@ export class FishingSystem {
       this.events?.onDragSlip?.(slip);
     }
 
-    // El pez se cansa por la tensión sostenida.
-    const drain = (0.028 + this.tensionRatio * 0.16) / species.stamina;
+    // El pez se cansa por la tensión sostenida, y bastante más rápido si se
+    // le está haciendo trabajar de costado.
+    const sideBonus = clamp(1 + this.counterPressure * 0.9, 0.45, 1.9);
+    const drain = (0.028 + this.tensionRatio * 0.16) * sideBonus / species.stamina;
     f.stamina = clamp(f.stamina - drain * dt, 0, 1);
     fish.energy = f.stamina;
 
@@ -389,6 +426,7 @@ export class FishingSystem {
   }
 
   _breakLine(fish, reason = 'La línea ha roto') {
+    this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
     this.events?.onLineBreak?.(fish);
     this.fishManager.release(fish);
@@ -402,6 +440,7 @@ export class FishingSystem {
   }
 
   _loseFish(fish, reason) {
+    this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
     this.events?.onFishLost?.(fish);
     this.fishManager.release(fish);
@@ -415,6 +454,7 @@ export class FishingSystem {
   }
 
   _land(fish) {
+    this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
     this.state = FishingState.LANDED;
     this.lastCatch = fish;
@@ -440,7 +480,7 @@ export class FishingSystem {
 
   _updateLineVisual(dt, context) {
     if (!this.line.mesh.visible) return;
-    const end = this.hooked ? this.hooked.position : this.lure.position;
+    const end = this.hooked ? this.hooked.position : this.lure.lineAnchor;
     const visualLineOut = this.state === FishingState.FIGHTING
       ? this.lineOut
       : Math.max(this.lineOut, this._rodTip.distanceTo(end));
@@ -464,7 +504,9 @@ export class FishingSystem {
       hooked: this.hooked ? {
         name: this.hooked.displayName,
         weight: this.hooked.weight,
-        stamina: this.fight?.stamina ?? 1
+        stamina: this.fight?.stamina ?? 1,
+        sidePressure: this.sidePressure,
+        counterPressure: this.counterPressure
       } : null,
       message: this.message
     };

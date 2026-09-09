@@ -46,9 +46,55 @@ export class Lure {
     this.object = group;
     this.object.visible = false;
     scene.add(this.object);
+
+    this.rig = 'senuelo';
+    this.biting = false;
+    this.floatDip = 0;
+    this.floatObject = this._buildFloat();
+    this.floatObject.visible = false;
+    scene.add(this.floatObject);
+  }
+
+  /** Boya de pesca: cuerpo rojo y blanco con antena. */
+  _buildFloat() {
+    const group = new THREE.Group();
+    const red = new THREE.MeshStandardMaterial({ color: 0xd23c28, roughness: 0.45 });
+    const white = new THREE.MeshStandardMaterial({ color: 0xf0efe6, roughness: 0.5 });
+
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.075, 12, 10), red);
+    body.scale.set(1, 1.5, 1);
+    group.add(body);
+    const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.077, 0.077, 0.05, 12), white);
+    collar.position.y = 0.03;
+    group.add(collar);
+    const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.012, 0.3, 6), red);
+    antenna.position.y = 0.24;
+    group.add(antenna);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.016, 8, 6), white);
+    tip.position.y = 0.39;
+    group.add(tip);
+    const keel = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.22, 5), white);
+    keel.position.y = -0.2;
+    group.add(keel);
+    return group;
+  }
+
+  /** Cambia de montaje según el señuelo equipado. */
+  setRig(lureItem) {
+    this.rig = lureItem?.rig === 'flotador' ? 'flotador' : 'senuelo';
+  }
+
+  /** Punto del que cuelga la línea: la boya si hay montaje de flotador. */
+  get lineAnchor() {
+    return this.rig === 'flotador' && this.state === LureState.WATER
+      ? this.floatObject.position
+      : this.position;
   }
 
   cast(origin, direction, speed, lure) {
+    this.setRig(lure);
+    this.biting = false;
+    this.floatDip = 0;
     this.position.copy(origin);
     this.velocity.copy(direction).normalize().multiplyScalar(speed);
     this.state = LureState.FLYING;
@@ -61,8 +107,14 @@ export class Lure {
   stow() {
     this.state = LureState.STOWED;
     this.object.visible = false;
+    this.floatObject.visible = false;
+    this.biting = false;
+    this.floatDip = 0;
     this.action = 0;
   }
+
+  /** El pez tiene el cebo en la boca: la boya se hunde. */
+  setBiting(value) { this.biting = value; }
 
   get isFishable() { return this.state === LureState.WATER; }
 
@@ -113,8 +165,10 @@ export class Lure {
         }
       }
 
-      // La "acción" decae si el señuelo está quieto.
-      this.action = damp(this.action, retrieve, 6, dt);
+      // Un señuelo se trabaja recogiendo; un cebo bajo flotador atrae quieto,
+      // así que conserva una acción de fondo en vez de apagarse del todo.
+      const actionTarget = this.rig === 'flotador' ? Math.max(0.4, retrieve) : retrieve;
+      this.action = damp(this.action, actionTarget, 6, dt);
       this.object.rotation.z += this.action * dt * 6;
     }
 
@@ -122,12 +176,41 @@ export class Lure {
     if (this.state === LureState.FLYING && this.velocity.lengthSq() > 0.01) {
       this.object.lookAt(this.position.clone().add(this.velocity));
     }
+
+    this._updateFloat(dt, waterLevel);
     return event;
   }
 
+  /**
+   * La boya flota justo encima del cebo y cabecea con el oleaje. Al picar se
+   * hunde: ese es el aviso, mucho antes que cualquier texto en pantalla.
+   */
+  _updateFloat(dt, waterLevel) {
+    const showFloat = this.rig === 'flotador' && this.state === LureState.WATER;
+    this.floatObject.visible = showFloat;
+    if (!showFloat) return;
+
+    this.floatDip = damp(this.floatDip, this.biting ? 1 : 0, this.biting ? 9 : 3.5, dt);
+    const t = performance.now() * 0.001;
+    const bob = Math.sin(t * 1.6 + this.position.x * 0.4) * 0.03
+      + Math.sin(t * 2.7 + this.position.z * 0.3) * 0.018;
+
+    this.floatObject.position.set(
+      this.position.x,
+      waterLevel + bob - this.floatDip * 0.42,
+      this.position.z
+    );
+    // Se ladea al ser arrastrada, y tiembla mientras el pez tantea el cebo.
+    const tilt = this.floatDip * 0.7 + (this.biting ? Math.sin(t * 22) * 0.12 : 0);
+    this.floatObject.rotation.set(tilt, 0, Math.sin(t * 1.3) * 0.06);
+  }
+
   dispose() {
-    this.object.traverse((o) => {
-      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+    [this.object, this.floatObject].forEach((root) => {
+      root.traverse((o) => {
+        if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+      });
+      root.parent?.remove(root);
     });
   }
 }
