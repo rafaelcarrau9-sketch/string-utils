@@ -34,6 +34,7 @@ MODULES = [
     "src/world/WaterBody.js",
     "src/world/SkyDome.js",
     "src/world/Vegetation.js",
+    "src/world/GrassBlades.js",
     "src/world/Trees.js",
     "src/world/Props.js",
     "src/world/Boat.js",

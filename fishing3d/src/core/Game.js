@@ -11,6 +11,7 @@ import { WaterBody } from '../world/WaterBody.js';
 import { SkyDome } from '../world/SkyDome.js';
 import { Vegetation } from '../world/Vegetation.js';
 import { Trees } from '../world/Trees.js';
+import { GrassBlades } from '../world/GrassBlades.js';
 import { Boat } from '../world/Boat.js';
 import { ZONES, zoneOf } from '../world/Zones.js';
 import { Props } from '../world/Props.js';
@@ -118,6 +119,9 @@ export class Game {
     this.vegetation = new Vegetation(this.scene, this.terrain, this.textures, this.preset, {
       seed: zone.terrain.seed + 1, density: zone.vegetation.grass
     });
+    this.grass = new GrassBlades(this.scene, this.terrain, this.preset, {
+      seed: zone.terrain.seed + 5, density: zone.vegetation.grass
+    });
     this.trees = new Trees(this.scene, this.terrain, this.textures, this.preset, {
       seed: zone.terrain.seed + 2, count: zone.vegetation.trees, conifer: zone.vegetation.conifer
     });
@@ -136,6 +140,7 @@ export class Game {
     this.boat?.dispose();
     this.props?.dispose();
     this.trees?.dispose();
+    this.grass?.dispose();
     this.vegetation?.dispose();
     if (this.water) {
       this.scene.remove(this.water.water);
@@ -224,6 +229,7 @@ export class Game {
       renderer: this.renderer,
       sky: this.sky,
       vegetationRef: () => this.vegetation,
+      grassRef: () => this.grass,
       treesRef: () => this.trees,
       weather: this.weather,
       settings: this.settings,
@@ -479,6 +485,7 @@ export class Game {
       choppiness: this.weather.choppiness
     });
     this.vegetation.update(dt, wind, this.player.position);
+    this.grass.update(dt, wind, this.player.position);
     this.trees.update(this.player.position);
 
     const aboard = this.player.platform === this.boat;
@@ -576,6 +583,7 @@ export class Game {
     this.fishManager.dispose();
     this.vegetation.dispose();
     this.trees.dispose();
+    this.grass.dispose();
     this.boat.dispose();
     this.props.dispose();
     this.water.dispose();

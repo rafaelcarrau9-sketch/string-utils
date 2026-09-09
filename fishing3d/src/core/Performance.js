@@ -22,11 +22,12 @@ const PATIENCE_DOWN = 2;   // ventanas malas seguidas antes de bajar
 const PATIENCE_UP = 6;     // ventanas buenas seguidas antes de subir
 
 export class Performance {
-  constructor({ renderer, sky, vegetationRef, treesRef, weather, settings, onChange }) {
+  constructor({ renderer, sky, vegetationRef, treesRef, grassRef, weather, settings, onChange }) {
     this.renderer = renderer;
     this.sky = sky;
     this.vegetationRef = vegetationRef;   // función: devuelve la vegetación actual
     this.treesRef = treesRef;
+    this.grassRef = grassRef;
     this.weather = weather;
     this.settings = settings;
     this.onChange = onChange;
@@ -122,6 +123,7 @@ export class Performance {
       trees.nearDistance = Math.min(70, preset.viewDistance * 0.4);
       trees._lastRebuild.set(1e9, 0, 1e9);   // fuerza recalcular el LOD
     }
+    this.grassRef?.()?.setBudget?.(preset.grassDensity);
     if (this.weather?.rain) {
       this.weather.rainCount = Math.min(this.weather.rainCount, preset.rainParticles);
     }

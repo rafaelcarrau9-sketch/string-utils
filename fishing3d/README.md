@@ -218,6 +218,15 @@ igualmente el consejo de la pelea.
 
 ## Rendimiento
 
+- **Césped de briznas reales** en un radio de 9,5 m alrededor del jugador:
+  cintas curvadas de cuatro segmentos, instanciadas, con viento en el vertex
+  shader y verde distinto por brizna. El conjunto es fijo y *acompaña* al
+  jugador —cuando se aleja 2,5 m, las posiciones se recalculan sobre el
+  terreno nuevo—, así que hay césped denso en todo el mapa con una sola draw
+  call y un número acotado de instancias. Las briznas del borde se acortan
+  para que el disco no se corte en un círculo visible.
+- La hierba lejana sigue siendo cartas cruzadas: a distancia se lee igual y
+  cuesta una fracción.
 - Vegetación en `InstancedMesh` agrupada por celdas, con corte por distancia.
 - **LOD real en el arbolado**: cerca, tronco con ramas y copa de varios
   volúmenes; lejos, un cartel con la mancha de follaje. El cambio se hace
