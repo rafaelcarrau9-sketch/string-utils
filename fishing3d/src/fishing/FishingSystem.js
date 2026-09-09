@@ -207,6 +207,14 @@ export class FishingSystem {
 
     this._updateLineVisual(dt, context);
     this.rod.update(dt, clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.2), context.lookDelta);
+    // La pieza gira despacio mientras se mira.
+    if (this._trophy) {
+      this._trophy.spin += dt * 0.55;
+      const mesh = this._trophy.fish.mesh;
+      mesh.rotation.y = Math.PI / 2 + Math.sin(this._trophy.spin) * 0.5;
+      mesh.rotation.z = Math.sin(this._trophy.spin * 1.7) * 0.08;
+    }
+
     if (this.message) {
       this.message.time += dt;
       if (this.message.time > 3.5) this.message = null;
@@ -453,6 +461,45 @@ export class FishingSystem {
     this._say(reason, 'bad');
   }
 
+  /**
+   * Levantar la pieza.
+   *
+   * El pez pasa a colgar de la cámara, a la distancia justa para que quepa en
+   * pantalla. No se reescala: uno de dos metros se aleja más, pero sigue
+   * ocupando mucho más que uno de treinta centímetros. Eso es lo que hace que
+   * el tamaño se sienta.
+   */
+  _showTrophy(fish) {
+    const mesh = fish.mesh;
+    this._trophy = { fish, parent: mesh.parent, spin: 0 };
+    fish.setState(FishState.CAUGHT);
+    this.camera.add(mesh);
+    mesh.visible = true;
+    const lengthM = fish.length / 100;
+    // Por encima del centro, para que la ficha de captura no lo tape.
+    mesh.position.set(0, 0.28 + lengthM * 0.06, -(0.3 + lengthM * 0.72));
+    mesh.rotation.set(0, Math.PI / 2, 0);
+
+    // Luz propia: da igual que sea de noche o que el pez esté a contraluz.
+    if (!this._trophyLight) {
+      this._trophyLight = new THREE.PointLight(0xfff0d8, 0, 6, 2);
+      this._trophyLight.position.set(0.45, 0.5, 0.35);
+      this.camera.add(this._trophyLight);
+    }
+    this._trophyLight.intensity = 3.2;
+  }
+
+  _hideTrophy() {
+    if (!this._trophy) return;
+    const { fish, parent } = this._trophy;
+    this.camera.remove(fish.mesh);
+    parent?.add(fish.mesh);
+    fish.mesh.rotation.set(0, 0, 0);
+    fish.mesh.visible = false;
+    if (this._trophyLight) this._trophyLight.intensity = 0;
+    this._trophy = null;
+  }
+
   _land(fish) {
     this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
@@ -462,6 +509,7 @@ export class FishingSystem {
     this.lure.stow();
     this.line.setVisible(false);
     this.water.splash(fish.position, 1.4);
+    this._showTrophy(fish);
     this.events?.onLanded?.(fish);
     this.hooked = null;
     this.fight = null;
@@ -469,6 +517,7 @@ export class FishingSystem {
 
   /** Se llama desde la UI cuando el jugador cierra la ficha de captura. */
   finishCatch(keep = true) {
+    this._hideTrophy();
     const fish = this.lastCatch;
     this.lastCatch = null;
     this.state = FishingState.IDLE;

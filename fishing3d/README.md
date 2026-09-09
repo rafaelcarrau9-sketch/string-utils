@@ -147,6 +147,22 @@ osciladores con envolvente.
 Para sustituirlos por texturas reales basta con cambiar `TextureLibrary.material()`
 por un cargador; el resto del juego sólo pide materiales por nombre.
 
+## Los peces
+
+La silueta de cada especie no está escrita a mano: sale de su relación
+peso/longitud del catálogo. Una carpa, con mucho peso por centímetro, queda
+alta y comprimida; un lucio o un siluro, largos y bajos. Encima van caudal
+ahorquillada, dorsal, anal y pectorales, y el vientre claro se pinta por
+vértice, que es lo que hace que se lea como pez y no como un bulto.
+
+La malla se normaliza a **exactamente su longitud declarada**, así que un lucio
+de 88 cm mide 88 cm en el mundo.
+
+Al cobrar uno, se levanta la pieza: el pez pasa a colgar de la cámara con su
+tamaño real, girando despacio, y la ficha con las medidas se coloca abajo para
+no taparlo. No se reescala, así que uno de dos metros se aleja más pero sigue
+ocupando mucho más que uno de treinta centímetros.
+
 ## Zonas
 
 Una zona es un juego de parámetros en `Zones.js`: forma del lago, paleta,

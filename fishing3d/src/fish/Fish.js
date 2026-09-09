@@ -26,43 +26,104 @@ export const FishState = {
 
 const geometryCache = new Map();
 
-/** Cuerpo de pez: elipsoide afilado + caudal + dorsal, fusionados. */
-function fishGeometry(speciesId) {
-  if (geometryCache.has(speciesId)) return geometryCache.get(speciesId);
+/**
+ * Cuerpo de pez construido a partir de los datos de la especie.
+ *
+ * La silueta no está escrita a mano: sale de la relación peso/longitud del
+ * catálogo. Una carpa (mucho peso por centímetro) queda alta y comprimida; un
+ * lucio o un siluro, largos y bajos. Encima se montan caudal ahorquillada,
+ * dorsal, anal y pectorales.
+ *
+ * Los colores van por vértice para dar el vientre claro, que es lo que hace
+ * que un pez se lea como pez y no como un bulto.
+ */
+function fishGeometry(species) {
+  if (geometryCache.has(species.id)) return geometryCache.get(species.id);
 
-  const body = new THREE.SphereGeometry(0.5, 14, 10);
+  // 0 = alargado (lucio, siluro), 1 = alto y comprimido (carpa, tenca).
+  const chunk = clamp((species.weightPerLength - 0.0000073) / (0.000027 - 0.0000073), 0, 1);
+  const height = 0.42 + chunk * 0.34;      // alto del cuerpo
+  const width = 0.22 + chunk * 0.12;       // anchura (los peces son delgados)
+
+  const body = new THREE.SphereGeometry(0.5, 20, 14);
   const pos = body.attributes.position;
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
-    const t = v.z / 0.5;                       // -1 cola, +1 morro
-    const taper = 1 - Math.pow(Math.abs(t), 2.1) * 0.85;
-    v.x *= 0.42 * taper;
-    v.y *= 0.62 * taper;
-    v.z *= 2.0;
+    const t = v.z / 0.5;                                   // -1 cola … +1 morro
+    // Perfil: hocico afilado, lomo ancho por delante del centro, pedúnculo fino.
+    const taper = Math.pow(1 - Math.abs(t) * 0.92, 0.55) * (1 - Math.pow(Math.max(0, -t), 2.4) * 0.55);
+    const back = t > 0 ? 1 + t * 0.12 : 1;                 // lomo algo más alto delante
+    v.x *= width * taper * 2;
+    v.y *= height * taper * back * 2;
+    v.z *= 2.05;
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   body.computeVertexNormals();
 
-  const caudal = new THREE.PlaneGeometry(0.55, 0.7, 1, 1);
-  caudal.rotateY(Math.PI / 2);
-  caudal.translate(0, 0, -1.15);
+  const parts = [body];
 
-  const dorsal = new THREE.PlaneGeometry(0.7, 0.3, 1, 1);
-  dorsal.rotateY(Math.PI / 2);
-  dorsal.translate(0, 0.3, 0.05);
+  // Caudal ahorquillada: dos lóbulos desde el pedúnculo.
+  const caudal = new THREE.BufferGeometry();
+  const cw = 0.02, ch = height * 1.35, cz = -1.02, tip = -1.62;
+  const verts = new Float32Array([
+    0, 0, cz,   0, ch, tip,   0, ch * 0.18, tip * 0.86,
+    0, 0, cz,   0, -ch, tip,  0, -ch * 0.18, tip * 0.86
+  ]);
+  caudal.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  caudal.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(verts.length), 3));
+  caudal.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((verts.length / 3) * 2), 2));
+  caudal.computeVertexNormals();
+  parts.push(caudal);
 
-  const geo = mergeGeometries([body, caudal, dorsal]);
-  body.dispose(); caudal.dispose(); dorsal.dispose();
-  geometryCache.set(speciesId, geo);
+  // Aletas: dorsal, anal y dos pectorales, como planos finos.
+  const fin = (w, h, x, y, z, rotY = 0, rotZ = 0) => {
+    const g = new THREE.PlaneGeometry(w, h);
+    g.rotateY(Math.PI / 2 + rotY);
+    g.rotateZ(rotZ);
+    g.translate(x, y, z);
+    return g;
+  };
+  parts.push(fin(0.75, height * 0.75, 0, height * 0.95, 0.12));            // dorsal
+  parts.push(fin(0.42, height * 0.5, 0, -height * 0.9, -0.42));            // anal
+  parts.push(fin(0.34, 0.16, width * 1.5, -height * 0.35, 0.42, 0.5, 0.3));   // pectoral izq.
+  parts.push(fin(0.34, 0.16, -width * 1.5, -height * 0.35, 0.42, -0.5, 0.3)); // pectoral der.
+
+  const geo = mergeGeometries(parts);
+  parts.forEach((g) => g.dispose());
+
+  // Vientre claro por vértice.
+  const gp = geo.attributes.position;
+  const colors = new Float32Array(gp.count * 3);
+  const base = new THREE.Color(species.color);
+  const pale = base.clone().lerp(new THREE.Color(0xf2ece0), species.belly ?? 0.85);
+  const c = new THREE.Color();
+  for (let i = 0; i < gp.count; i++) {
+    const y = gp.getY(i);
+    const t = clamp(0.5 - y / (height * 1.6), 0, 1);       // 1 abajo, 0 arriba
+    c.copy(base).lerp(pale, Math.pow(t, 1.6));
+    colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  // Normalizado a exactamente 1 unidad de largo, morro a cola. Sin esto la
+  // escala (longitud/100) no daba la longitud real: un lucio de 88 cm se
+  // dibujaba de más de dos metros.
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  const total = bb.max.z - bb.min.z;
+  geo.translate(0, -(bb.max.y + bb.min.y) / 2, -(bb.max.z + bb.min.z) / 2);
+  geo.scale(1 / total, 1 / total, 1 / total);
+
+  geometryCache.set(species.id, geo);
   return geo;
 }
 
 function fishMaterial(species) {
   const material = new THREE.MeshStandardMaterial({
-    color: species.color,
-    roughness: 0.42,
-    metalness: 0.22,
+    vertexColors: true,
+    roughness: 0.34,
+    metalness: 0.3,
     side: THREE.DoubleSide,
     flatShading: false
   });
@@ -110,7 +171,7 @@ export class Fish {
 
     const scale = this.length / 100;          // cm → m
     this.material = fishMaterial(this.species);
-    this.mesh = new THREE.Mesh(fishGeometry(this.species.id), this.material);
+    this.mesh = new THREE.Mesh(fishGeometry(this.species), this.material);
     this.mesh.scale.setScalar(scale);
     this.mesh.position.copy(this.position);
     this.mesh.castShadow = false;
@@ -144,6 +205,8 @@ export class Fish {
   }
 
   update(dt, context) {
+    // Cobrado: la malla la coloca quien lo está mostrando, no el pez.
+    if (this.state === FishState.CAUGHT) return;
     this.stateTime += dt;
     this.material.userData.uniforms.uTime.value += dt * (0.6 + this.velocity.length() * 0.5);
 

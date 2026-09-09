@@ -78,6 +78,9 @@ const CSS = `
 
 .sw-overlay { position: absolute; inset: 0; background: rgba(6,10,13,.82); backdrop-filter: blur(7px);
   display: flex; align-items: center; justify-content: center; pointer-events: auto; padding: 22px; }
+.sw-overlay.bottom { align-items: flex-end; backdrop-filter: none;
+  background: linear-gradient(180deg, rgba(6,10,13,0) 0%, rgba(6,10,13,.2) 55%, rgba(6,10,13,.88) 100%);
+  padding-bottom: 26px; }
 .sw-panel { background: #0e1318; border: 1px solid var(--edge); border-radius: 14px;
   width: min(760px, 100%); max-height: 86vh; display: flex; flex-direction: column; box-shadow: 0 30px 80px -30px #000; }
 .sw-panel > header { display: flex; align-items: center; justify-content: space-between;
@@ -327,9 +330,9 @@ export class UI {
   }
 
   // -------------------------------------------------------------- paneles
-  _overlay(title, bodyNode, { onClose = null } = {}) {
+  _overlay(title, bodyNode, { onClose = null, placement = 'center' } = {}) {
     this.closePanel();
-    const overlay = el('div', 'sw-overlay');
+    const overlay = el('div', `sw-overlay${placement === 'bottom' ? ' bottom' : ''}`);
     const panel = el('div', 'sw-panel');
     const header = el('header');
     header.appendChild(el('h2', null, title));
@@ -384,7 +387,7 @@ export class UI {
     actions.appendChild(release);
     body.appendChild(actions);
 
-    this._overlay('Captura', body, { onClose: onRelease });
+    this._overlay('Captura', body, { onClose: onRelease, placement: 'bottom' });
   }
 
   showGear(inventory, equipment) {

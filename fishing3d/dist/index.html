@@ -2539,43 +2539,104 @@ const FishState = {
 
 const geometryCache = new Map();
 
-/** Cuerpo de pez: elipsoide afilado + caudal + dorsal, fusionados. */
-function fishGeometry(speciesId) {
-  if (geometryCache.has(speciesId)) return geometryCache.get(speciesId);
+/**
+ * Cuerpo de pez construido a partir de los datos de la especie.
+ *
+ * La silueta no está escrita a mano: sale de la relación peso/longitud del
+ * catálogo. Una carpa (mucho peso por centímetro) queda alta y comprimida; un
+ * lucio o un siluro, largos y bajos. Encima se montan caudal ahorquillada,
+ * dorsal, anal y pectorales.
+ *
+ * Los colores van por vértice para dar el vientre claro, que es lo que hace
+ * que un pez se lea como pez y no como un bulto.
+ */
+function fishGeometry(species) {
+  if (geometryCache.has(species.id)) return geometryCache.get(species.id);
 
-  const body = new THREE.SphereGeometry(0.5, 14, 10);
+  // 0 = alargado (lucio, siluro), 1 = alto y comprimido (carpa, tenca).
+  const chunk = clamp((species.weightPerLength - 0.0000073) / (0.000027 - 0.0000073), 0, 1);
+  const height = 0.42 + chunk * 0.34;      // alto del cuerpo
+  const width = 0.22 + chunk * 0.12;       // anchura (los peces son delgados)
+
+  const body = new THREE.SphereGeometry(0.5, 20, 14);
   const pos = body.attributes.position;
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
-    const t = v.z / 0.5;                       // -1 cola, +1 morro
-    const taper = 1 - Math.pow(Math.abs(t), 2.1) * 0.85;
-    v.x *= 0.42 * taper;
-    v.y *= 0.62 * taper;
-    v.z *= 2.0;
+    const t = v.z / 0.5;                                   // -1 cola … +1 morro
+    // Perfil: hocico afilado, lomo ancho por delante del centro, pedúnculo fino.
+    const taper = Math.pow(1 - Math.abs(t) * 0.92, 0.55) * (1 - Math.pow(Math.max(0, -t), 2.4) * 0.55);
+    const back = t > 0 ? 1 + t * 0.12 : 1;                 // lomo algo más alto delante
+    v.x *= width * taper * 2;
+    v.y *= height * taper * back * 2;
+    v.z *= 2.05;
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   body.computeVertexNormals();
 
-  const caudal = new THREE.PlaneGeometry(0.55, 0.7, 1, 1);
-  caudal.rotateY(Math.PI / 2);
-  caudal.translate(0, 0, -1.15);
+  const parts = [body];
 
-  const dorsal = new THREE.PlaneGeometry(0.7, 0.3, 1, 1);
-  dorsal.rotateY(Math.PI / 2);
-  dorsal.translate(0, 0.3, 0.05);
+  // Caudal ahorquillada: dos lóbulos desde el pedúnculo.
+  const caudal = new THREE.BufferGeometry();
+  const cw = 0.02, ch = height * 1.35, cz = -1.02, tip = -1.62;
+  const verts = new Float32Array([
+    0, 0, cz,   0, ch, tip,   0, ch * 0.18, tip * 0.86,
+    0, 0, cz,   0, -ch, tip,  0, -ch * 0.18, tip * 0.86
+  ]);
+  caudal.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  caudal.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(verts.length), 3));
+  caudal.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((verts.length / 3) * 2), 2));
+  caudal.computeVertexNormals();
+  parts.push(caudal);
 
-  const geo = mergeGeometries([body, caudal, dorsal]);
-  body.dispose(); caudal.dispose(); dorsal.dispose();
-  geometryCache.set(speciesId, geo);
+  // Aletas: dorsal, anal y dos pectorales, como planos finos.
+  const fin = (w, h, x, y, z, rotY = 0, rotZ = 0) => {
+    const g = new THREE.PlaneGeometry(w, h);
+    g.rotateY(Math.PI / 2 + rotY);
+    g.rotateZ(rotZ);
+    g.translate(x, y, z);
+    return g;
+  };
+  parts.push(fin(0.75, height * 0.75, 0, height * 0.95, 0.12));            // dorsal
+  parts.push(fin(0.42, height * 0.5, 0, -height * 0.9, -0.42));            // anal
+  parts.push(fin(0.34, 0.16, width * 1.5, -height * 0.35, 0.42, 0.5, 0.3));   // pectoral izq.
+  parts.push(fin(0.34, 0.16, -width * 1.5, -height * 0.35, 0.42, -0.5, 0.3)); // pectoral der.
+
+  const geo = mergeGeometries(parts);
+  parts.forEach((g) => g.dispose());
+
+  // Vientre claro por vértice.
+  const gp = geo.attributes.position;
+  const colors = new Float32Array(gp.count * 3);
+  const base = new THREE.Color(species.color);
+  const pale = base.clone().lerp(new THREE.Color(0xf2ece0), species.belly ?? 0.85);
+  const c = new THREE.Color();
+  for (let i = 0; i < gp.count; i++) {
+    const y = gp.getY(i);
+    const t = clamp(0.5 - y / (height * 1.6), 0, 1);       // 1 abajo, 0 arriba
+    c.copy(base).lerp(pale, Math.pow(t, 1.6));
+    colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  // Normalizado a exactamente 1 unidad de largo, morro a cola. Sin esto la
+  // escala (longitud/100) no daba la longitud real: un lucio de 88 cm se
+  // dibujaba de más de dos metros.
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  const total = bb.max.z - bb.min.z;
+  geo.translate(0, -(bb.max.y + bb.min.y) / 2, -(bb.max.z + bb.min.z) / 2);
+  geo.scale(1 / total, 1 / total, 1 / total);
+
+  geometryCache.set(species.id, geo);
   return geo;
 }
 
 function fishMaterial(species) {
   const material = new THREE.MeshStandardMaterial({
-    color: species.color,
-    roughness: 0.42,
-    metalness: 0.22,
+    vertexColors: true,
+    roughness: 0.34,
+    metalness: 0.3,
     side: THREE.DoubleSide,
     flatShading: false
   });
@@ -2623,7 +2684,7 @@ class Fish {
 
     const scale = this.length / 100;          // cm → m
     this.material = fishMaterial(this.species);
-    this.mesh = new THREE.Mesh(fishGeometry(this.species.id), this.material);
+    this.mesh = new THREE.Mesh(fishGeometry(this.species), this.material);
     this.mesh.scale.setScalar(scale);
     this.mesh.position.copy(this.position);
     this.mesh.castShadow = false;
@@ -2657,6 +2718,8 @@ class Fish {
   }
 
   update(dt, context) {
+    // Cobrado: la malla la coloca quien lo está mostrando, no el pez.
+    if (this.state === FishState.CAUGHT) return;
     this.stateTime += dt;
     this.material.userData.uniforms.uTime.value += dt * (0.6 + this.velocity.length() * 0.5);
 
@@ -3810,6 +3873,14 @@ class FishingSystem {
 
     this._updateLineVisual(dt, context);
     this.rod.update(dt, clamp(this.tension / Math.max(1, stats.rodStrength), 0, 1.2), context.lookDelta);
+    // La pieza gira despacio mientras se mira.
+    if (this._trophy) {
+      this._trophy.spin += dt * 0.55;
+      const mesh = this._trophy.fish.mesh;
+      mesh.rotation.y = Math.PI / 2 + Math.sin(this._trophy.spin) * 0.5;
+      mesh.rotation.z = Math.sin(this._trophy.spin * 1.7) * 0.08;
+    }
+
     if (this.message) {
       this.message.time += dt;
       if (this.message.time > 3.5) this.message = null;
@@ -4056,6 +4127,45 @@ class FishingSystem {
     this._say(reason, 'bad');
   }
 
+  /**
+   * Levantar la pieza.
+   *
+   * El pez pasa a colgar de la cámara, a la distancia justa para que quepa en
+   * pantalla. No se reescala: uno de dos metros se aleja más, pero sigue
+   * ocupando mucho más que uno de treinta centímetros. Eso es lo que hace que
+   * el tamaño se sienta.
+   */
+  _showTrophy(fish) {
+    const mesh = fish.mesh;
+    this._trophy = { fish, parent: mesh.parent, spin: 0 };
+    fish.setState(FishState.CAUGHT);
+    this.camera.add(mesh);
+    mesh.visible = true;
+    const lengthM = fish.length / 100;
+    // Por encima del centro, para que la ficha de captura no lo tape.
+    mesh.position.set(0, 0.28 + lengthM * 0.06, -(0.3 + lengthM * 0.72));
+    mesh.rotation.set(0, Math.PI / 2, 0);
+
+    // Luz propia: da igual que sea de noche o que el pez esté a contraluz.
+    if (!this._trophyLight) {
+      this._trophyLight = new THREE.PointLight(0xfff0d8, 0, 6, 2);
+      this._trophyLight.position.set(0.45, 0.5, 0.35);
+      this.camera.add(this._trophyLight);
+    }
+    this._trophyLight.intensity = 3.2;
+  }
+
+  _hideTrophy() {
+    if (!this._trophy) return;
+    const { fish, parent } = this._trophy;
+    this.camera.remove(fish.mesh);
+    parent?.add(fish.mesh);
+    fish.mesh.rotation.set(0, 0, 0);
+    fish.mesh.visible = false;
+    if (this._trophyLight) this._trophyLight.intensity = 0;
+    this._trophy = null;
+  }
+
   _land(fish) {
     this.sidePressure = this.counterPressure = 0;
     this.retrieveInput = 0;
@@ -4065,6 +4175,7 @@ class FishingSystem {
     this.lure.stow();
     this.line.setVisible(false);
     this.water.splash(fish.position, 1.4);
+    this._showTrophy(fish);
     this.events?.onLanded?.(fish);
     this.hooked = null;
     this.fight = null;
@@ -4072,6 +4183,7 @@ class FishingSystem {
 
   /** Se llama desde la UI cuando el jugador cierra la ficha de captura. */
   finishCatch(keep = true) {
+    this._hideTrophy();
     const fish = this.lastCatch;
     this.lastCatch = null;
     this.state = FishingState.IDLE;
@@ -4494,6 +4606,9 @@ const CSS = `
 
 .sw-overlay { position: absolute; inset: 0; background: rgba(6,10,13,.82); backdrop-filter: blur(7px);
   display: flex; align-items: center; justify-content: center; pointer-events: auto; padding: 22px; }
+.sw-overlay.bottom { align-items: flex-end; backdrop-filter: none;
+  background: linear-gradient(180deg, rgba(6,10,13,0) 0%, rgba(6,10,13,.2) 55%, rgba(6,10,13,.88) 100%);
+  padding-bottom: 26px; }
 .sw-panel { background: #0e1318; border: 1px solid var(--edge); border-radius: 14px;
   width: min(760px, 100%); max-height: 86vh; display: flex; flex-direction: column; box-shadow: 0 30px 80px -30px #000; }
 .sw-panel > header { display: flex; align-items: center; justify-content: space-between;
@@ -4743,9 +4858,9 @@ class UI {
   }
 
   // -------------------------------------------------------------- paneles
-  _overlay(title, bodyNode, { onClose = null } = {}) {
+  _overlay(title, bodyNode, { onClose = null, placement = 'center' } = {}) {
     this.closePanel();
-    const overlay = el('div', 'sw-overlay');
+    const overlay = el('div', `sw-overlay${placement === 'bottom' ? ' bottom' : ''}`);
     const panel = el('div', 'sw-panel');
     const header = el('header');
     header.appendChild(el('h2', null, title));
@@ -4800,7 +4915,7 @@ class UI {
     actions.appendChild(release);
     body.appendChild(actions);
 
-    this._overlay('Captura', body, { onClose: onRelease });
+    this._overlay('Captura', body, { onClose: onRelease, placement: 'bottom' });
   }
 
   showGear(inventory, equipment) {
