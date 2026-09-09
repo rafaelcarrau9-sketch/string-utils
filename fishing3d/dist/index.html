@@ -210,11 +210,140 @@ const DEFAULT_SETTINGS = {
   sensitivity: 1,
   invertY: false,
   masterVolume: 0.8,
-  showFps: false
+  showFps: false,
+  autoQuality: true
 };
 
 function presetFor(settings) {
   return QUALITY_PRESETS[settings.quality] || QUALITY_PRESETS.medio;
+}
+
+/* ===== src/core/Performance.js ===== */
+/**
+ * Vigilancia de rendimiento y calidad adaptativa.
+ *
+ * No sé en qué máquina se va a jugar, así que el juego lo averigua solo:
+ * mide los fotogramas por segundo y, si no llega, baja un escalón de calidad;
+ * si sobra holgura durante un buen rato, vuelve a subir.
+ *
+ * Sólo toca lo que se puede cambiar en caliente sin reconstruir la escena:
+ * resolución de render, sombras, distancias de dibujado y densidad de lluvia.
+ * El reflejo del agua se fija al crear el mundo y no se toca aquí.
+ */
+
+const LEVELS = ['bajo', 'medio', 'alto'];
+
+const LOW_FPS = 32;        // por debajo de esto, molesta
+const HIGH_FPS = 56;       // por encima, sobra margen para subir
+const SAMPLE_SECONDS = 2;  // ventana de medición
+const PATIENCE_DOWN = 2;   // ventanas malas seguidas antes de bajar
+const PATIENCE_UP = 6;     // ventanas buenas seguidas antes de subir
+
+class Performance {
+  constructor({ renderer, sky, vegetationRef, treesRef, weather, settings, onChange }) {
+    this.renderer = renderer;
+    this.sky = sky;
+    this.vegetationRef = vegetationRef;   // función: devuelve la vegetación actual
+    this.treesRef = treesRef;
+    this.weather = weather;
+    this.settings = settings;
+    this.onChange = onChange;
+
+    this.levelIndex = LEVELS.indexOf(settings.quality);
+    if (this.levelIndex < 0) this.levelIndex = 1;
+    this.auto = settings.autoQuality !== false;
+
+    this.frames = 0;
+    this.elapsed = 0;
+    this.fps = 60;
+    this.badWindows = 0;
+    this.goodWindows = 0;
+    this.locked = false;      // se bloquea si el jugador toca la calidad a mano
+  }
+
+  get level() { return LEVELS[this.levelIndex]; }
+  get preset() { return QUALITY_PRESETS[this.level]; }
+
+  /** El jugador ha elegido calidad a mano: se respeta y se deja de ajustar. */
+  lockTo(quality) {
+    const index = LEVELS.indexOf(quality);
+    if (index < 0) return;
+    this.levelIndex = index;
+    this.locked = true;
+    this.apply();
+  }
+
+  update(dt) {
+    this.frames += 1;
+    this.elapsed += dt;
+    if (this.elapsed < SAMPLE_SECONDS) return;
+
+    this.fps = this.frames / this.elapsed;
+    this.frames = 0;
+    this.elapsed = 0;
+    if (!this.auto || this.locked) return;
+
+    if (this.fps < LOW_FPS) {
+      this.goodWindows = 0;
+      this.badWindows += 1;
+      if (this.badWindows >= PATIENCE_DOWN && this.levelIndex > 0) {
+        this.badWindows = 0;
+        this.levelIndex -= 1;
+        this.apply();
+        this.onChange?.(this.level, 'baja', Math.round(this.fps));
+      }
+    } else if (this.fps > HIGH_FPS) {
+      this.badWindows = 0;
+      this.goodWindows += 1;
+      if (this.goodWindows >= PATIENCE_UP && this.levelIndex < LEVELS.length - 1) {
+        this.goodWindows = 0;
+        this.levelIndex += 1;
+        this.apply();
+        this.onChange?.(this.level, 'sube', Math.round(this.fps));
+      }
+    } else {
+      this.badWindows = 0;
+      this.goodWindows = 0;
+    }
+  }
+
+  /** Lleva el preset actual a los sistemas vivos. */
+  apply() {
+    const preset = this.preset;
+    this.settings.quality = this.level;
+
+    this.renderer.setPixelRatio(
+      clamp(Math.min(window.devicePixelRatio, 2) * preset.pixelRatio, 0.5, 2)
+    );
+
+    this.renderer.shadowMap.enabled = preset.shadows;
+    if (this.sky?.sun) {
+      const sun = this.sky.sun;
+      sun.castShadow = preset.shadows;
+      if (preset.shadows && sun.shadow.mapSize.width !== preset.shadowMapSize) {
+        sun.shadow.mapSize.set(preset.shadowMapSize, preset.shadowMapSize);
+        // Tirar el mapa fuerza a three a recrearlo con el tamaño nuevo.
+        sun.shadow.map?.dispose();
+        sun.shadow.map = null;
+      }
+    }
+
+    const vegetation = this.vegetationRef?.();
+    if (vegetation) {
+      vegetation.viewDistance = preset.viewDistance;
+      vegetation.tiles.forEach((mesh) => {
+        mesh.userData.cullDistance = Math.min(mesh.userData.cullDistance, preset.viewDistance);
+      });
+    }
+    const trees = this.treesRef?.();
+    if (trees) {
+      trees.nearDistance = Math.min(70, preset.viewDistance * 0.4);
+      trees._lastRebuild.set(1e9, 0, 1e9);   // fuerza recalcular el LOD
+    }
+    if (this.weather?.rain) {
+      this.weather.rainCount = Math.min(this.weather.rainCount, preset.rainParticles);
+    }
+  }
 }
 
 /* ===== src/core/SaveSystem.js ===== */
@@ -4194,6 +4323,102 @@ class Player {
   }
 }
 
+/* ===== src/ui/Coach.js ===== */
+/**
+ * Avisos de aprendizaje.
+ *
+ * El juego tiene bastantes sistemas y ninguno se explica solo. Estos avisos
+ * salen una única vez, en el momento en que hacen falta, y se recuerdan en la
+ * partida guardada para no repetirse nunca más.
+ *
+ * Cada aviso es una condición sobre el estado del juego, no una secuencia
+ * fija: si alguien engancha un pez antes de leer nada, el consejo de la pelea
+ * le llega igual.
+ */
+
+const TIPS = [
+  {
+    id: 'picada',
+    when: (s) => s.fishingState === 'bite',
+    text: 'Clic izquierdo AHORA para clavar — la ventana es de poco más de un segundo.'
+  },
+  {
+    id: 'pelea',
+    when: (s) => s.fishingState === 'fighting',
+    text: 'Recoge con clic derecho, pero suelta cuando la tensión suba. Ladea la caña a un costado del pez para cansarlo.'
+  },
+  {
+    id: 'freno',
+    when: (s) => s.lastEvent === 'lineBreak',
+    text: 'La línea ha reventado: baja el freno con la rueda del ratón para que ceda hilo antes de romper.'
+  },
+  {
+    id: 'holgura',
+    when: (s) => s.lastEvent === 'fishLost',
+    text: 'Se soltó el anzuelo: si dejas demasiada holgura, el pez se libera. Mantén algo de tensión.'
+  },
+  {
+    id: 'vender',
+    when: (s) => s.lastEvent === 'landed',
+    text: 'Cobrado. Con B abres la tienda: mejores cañas llegan más lejos y mejores líneas aguantan más.'
+  },
+  {
+    id: 'cebo',
+    when: (s) => s.casts >= 4 && s.landed === 0,
+    text: 'Prueba otro señuelo (Tab): cada especie tiene sus preferencias y su profundidad.'
+  },
+  {
+    id: 'barca',
+    when: (s) => s.nearBoat,
+    text: 'Con E subes a la barca. Los peces de fondo, como el siluro, no pican desde la orilla.'
+  },
+  {
+    id: 'zonas',
+    when: (s) => s.money >= 2500,
+    text: 'Ya te llega para otra zona de pesca: pulsa Z.'
+  },
+  {
+    id: 'flotador',
+    when: (s) => s.rig === 'flotador' && s.fishingState === 'fishing',
+    text: 'Montaje de flotador: no hace falta recoger. Espera y vigila la boya — se hundirá al picar.'
+  }
+];
+
+const DISPLAY_SECONDS = 7;
+
+class Coach {
+  constructor(seen = []) {
+    this.seen = new Set(seen);
+    this.current = null;
+    this.timer = 0;
+    this.enabled = true;
+  }
+
+  /** Devuelve el texto de un aviso nuevo, o null. */
+  check(state, dt) {
+    if (this.current) {
+      this.timer -= dt;
+      if (this.timer <= 0) this.current = null;
+      return null;
+    }
+    if (!this.enabled) return null;
+
+    for (const tip of TIPS) {
+      if (this.seen.has(tip.id)) continue;
+      if (!tip.when(state)) continue;
+      this.seen.add(tip.id);
+      this.current = tip.text;
+      this.timer = DISPLAY_SECONDS;
+      return tip.text;
+    }
+    return null;
+  }
+
+  get text() { return this.current; }
+
+  toJSON() { return [...this.seen]; }
+}
+
 /* ===== src/ui/UI.js ===== */
 /**
  * Interfaz: HUD de pesca y pantallas (equipo, tienda, capturas, estadísticas,
@@ -4253,6 +4478,13 @@ const CSS = `
   background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
 .sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
 
+.sw-coach { position: absolute; left: 50%; bottom: 152px; transform: translateX(-50%);
+  width: min(560px, 88vw); background: var(--panel); border: 1px solid var(--accent);
+  border-left-width: 3px; border-radius: 9px; padding: 10px 14px; font-size: 13.5px;
+  line-height: 1.5; backdrop-filter: blur(8px); box-shadow: 0 10px 30px -12px #000; }
+.sw-fps { position: absolute; right: 16px; top: 14px; font-family: ui-monospace, monospace;
+  font-size: 11px; color: var(--dim); background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 6px; padding: 3px 8px; }
 .sw-hintline { position: absolute; left: 50%; top: calc(50% + 28px); transform: translateX(-50%);
   font-size: 12.5px; font-weight: 550; color: #dbe7ee; text-shadow: 0 2px 8px rgba(0,0,0,.95);
   letter-spacing: .01em; }
@@ -4287,6 +4519,7 @@ const CSS = `
 .sw-item.equipped { border-color: rgba(111,211,199,.55); }
 .sw-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent); }
 
+.sw-cta { display: block; width: 100%; padding: 13px; font-size: 15px; border-radius: 10px; }
 .sw-catch { text-align: center; }
 .sw-catch .name { font-size: 26px; font-weight: 700; }
 .sw-catch .latin { font-style: italic; color: var(--dim); font-size: 13px; margin-top: 2px; }
@@ -4372,6 +4605,14 @@ class UI {
     this.hint = el('div', 'sw-hintline');
     this.root.appendChild(this.hint);
 
+    this.coachBox = el('div', 'sw-coach');
+    this.coachBox.style.display = 'none';
+    this.root.appendChild(this.coachBox);
+
+    this.fpsBox = el('div', 'sw-fps');
+    this.fpsBox.style.display = 'none';
+    this.root.appendChild(this.fpsBox);
+
     this.toast = el('div', 'sw-toast');
     this.toast.style.display = 'none';
     this.root.appendChild(this.toast);
@@ -4419,6 +4660,12 @@ class UI {
 
     this._updatePrompt(hud);
     this._updateToast(hud.message);
+    if (data.fps !== undefined) {
+      this.fpsBox.style.display = 'block';
+      this.fpsBox.textContent = `${data.fps} fps · ${data.quality}`;
+    } else if (this.fpsBox.style.display !== 'none') {
+      this.fpsBox.style.display = 'none';
+    }
   }
 
   _updatePrompt(hud) {
@@ -4465,6 +4712,30 @@ class UI {
     this.toast.style.display = 'block';
     this.toast.textContent = message.text;
     this.toast.className = `sw-toast${message.kind === 'bad' ? ' bad' : ''}`;
+  }
+
+  /** Muestra un aviso de aprendizaje; `null` lo retira. */
+  showCoach(text) {
+    if (!text) { this.coachBox.style.display = 'none'; return; }
+    this.coachBox.style.display = 'block';
+    this.coachBox.innerHTML = text;
+  }
+
+  showWelcome(onStart) {
+    const body = el('div', 'help');
+    body.innerHTML = `
+      <p>Estás en el muelle del <b>Lago de la Niebla</b>. Tres cosas y ya puedes pescar:</p>
+      <div class="sw-keys" style="margin:12px 0 14px">
+        <b>Clic izq. mantenido</b><span>Carga el lanzamiento; al soltar, lanza. Cuanto más cargues, más lejos.</span>
+        <b>Clic izq.</b><span>Clavar cuando pique. La ventana es corta.</span>
+        <b>Clic der. mantenido</b><span>Recoger. Vigila la tensión: si se dispara, suelta.</span>
+      </div>
+      <p class="sw-hint">El resto se explica solo sobre la marcha. <b>Esc</b> muestra todos los controles.</p>`;
+    const go = el('button', 'sw-btn sw-cta', 'Empezar a pescar');
+    go.style.marginTop = '16px';
+    go.addEventListener('click', () => { this.closePanel(); onStart?.(); });
+    body.appendChild(go);
+    this._overlay('Still Waters', body, { onClose: onStart });
   }
 
   setCrosshairVisible(value) {
@@ -4732,9 +5003,26 @@ class UI {
     slider('Sensibilidad', 'sensitivity', 0.2, 3, 0.1, settings.sensitivity, (v) => v.toFixed(1));
     slider('Volumen', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
 
+    const toggle = (label, key, value, note) => {
+      const field = el('div', 'sw-field');
+      field.innerHTML = `<label>${label}${note ? `<div class="sw-hint" style="margin-top:2px">${note}</div>` : ''}</label>`;
+      const btn = el('button', 'sw-btn' + (value ? '' : ' ghost'), value ? 'Activado' : 'Desactivado');
+      btn.addEventListener('click', () => {
+        const next = btn.textContent === 'Desactivado';
+        btn.textContent = next ? 'Activado' : 'Desactivado';
+        btn.className = 'sw-btn' + (next ? '' : ' ghost');
+        this.cb.onSetting?.(key, next);
+      });
+      field.appendChild(btn);
+      body.appendChild(field);
+    };
+    toggle('Calidad automática', 'autoQuality', settings.autoQuality !== false,
+      'Baja la calidad sola si el juego no va fluido, y la sube si sobra margen.');
+    toggle('Mostrar fps', 'showFps', !!settings.showFps);
+
     const hint = el('div', 'sw-hint');
     hint.style.marginTop = '14px';
-    hint.innerHTML = 'La calidad se aplica al reiniciar el mundo desde el menú de pausa.';
+    hint.innerHTML = 'Elegir calidad a mano desactiva el ajuste automático.';
     body.appendChild(hint);
 
     this._overlay('Configuración', body);
@@ -4976,8 +5264,10 @@ class Game {
     this._initProgress();
     this._initFishing();
     this._initUI();
+    this._initPerformance();
     this._bindInput();
     this._loadProgress();
+    if (!this.save.load()) this.ui.showWelcome(() => this.input.requestLock());
   }
 
   // --------------------------------------------------------------- montaje
@@ -5125,9 +5415,31 @@ class Game {
         onHookSet: () => { this.economy.stats.hooked++; this.audio.hookSet(); },
         onDragSlip: () => { if (Math.random() < 0.35) this.audio.dragSlip(); },
         onJump: (fish) => this.water.splash(fish.position, 1.1),
-        onLineBreak: () => { this.economy.stats.lineBreaks++; this.economy.stats.lost++; this.audio.lineBreak(); },
-        onFishLost: () => { this.economy.stats.lost++; },
-        onLanded: (fish) => this._onLanded(fish)
+        onLineBreak: () => {
+          this.economy.stats.lineBreaks++; this.economy.stats.lost++;
+          this.lastEvent = 'lineBreak'; this.audio.lineBreak();
+        },
+        onFishLost: () => { this.economy.stats.lost++; this.lastEvent = 'fishLost'; },
+        onLanded: (fish) => { this.lastEvent = 'landed'; this._onLanded(fish); }
+      }
+    });
+  }
+
+  _initPerformance() {
+    this.coach = new Coach();
+    this.lastEvent = null;
+    this.perf = new Performance({
+      renderer: this.renderer,
+      sky: this.sky,
+      vegetationRef: () => this.vegetation,
+      treesRef: () => this.trees,
+      weather: this.weather,
+      settings: this.settings,
+      onChange: (level, direccion, fps) => {
+        const texto = direccion === 'baja'
+          ? `Calidad bajada a «${level}» para ir fluido (${fps} fps)`
+          : `Calidad subida a «${level}» (${fps} fps)`;
+        this.fishing._say(texto);
       }
     });
   }
@@ -5275,6 +5587,8 @@ class Game {
 
   _applySetting(key, value) {
     this.settings[key] = value;
+    if (key === 'quality') this.perf.lockTo(value);
+    if (key === 'autoQuality') this.perf.auto = value;
     if (key === 'fov') {
       this.camera.fov = value;
       this.camera.updateProjectionMatrix();
@@ -5290,7 +5604,8 @@ class Game {
       inventory: this.inventory.toJSON(),
       equipment: this.equipment.toJSON(),
       economy: this.economy.toJSON(),
-      world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id }
+      world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
+      coach: this.coach?.toJSON() ?? []
     });
   }
 
@@ -5308,6 +5623,7 @@ class Game {
       this.travelTo(data.world.zone);
     }
     this.audio.setVolume(this.settings.masterVolume);
+    if (Array.isArray(data.coach)) this.coach.seen = new Set(data.coach);
   }
 
   // ---------------------------------------------------------------- bucle
@@ -5404,14 +5720,31 @@ class Game {
     }
 
     if (!headless) {
+      this.perf.update(dt);
       this._updateAudio(dt, moving);
+
+      const tip = this.coach.check({
+        fishingState: this.fishing.state,
+        lastEvent: this.lastEvent,
+        casts: this.economy.stats.casts,
+        landed: this.economy.stats.landed,
+        money: this.economy.money,
+        nearBoat: this.boat.canBoard(this.player.position),
+        rig: this.fishing.lure.rig
+      }, dt);
+      if (tip) { this.ui.showCoach(tip); this._persist(); }
+      else if (!this.coach.text) this.ui.showCoach(null);
+      this.lastEvent = null;
+
       this.ui.update({
         fishing: this.fishing.hud,
         time: this.time,
         weather: this.weather,
         money: this.economy.money,
         equipment: this.equipment,
-        hint: this._contextHint()
+        hint: this._contextHint(),
+        fps: this.settings.showFps ? Math.round(this.perf.fps) : undefined,
+        quality: this.perf.level
       });
       this.autosaveTimer += dt;
       if (this.autosaveTimer > 30) { this.autosaveTimer = 0; this._persist(); }

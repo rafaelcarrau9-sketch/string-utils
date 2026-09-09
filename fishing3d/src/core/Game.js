@@ -27,6 +27,8 @@ import { Equipment } from '../gear/Equipment.js';
 import { Economy } from '../economy/Economy.js';
 
 import { UI } from '../ui/UI.js';
+import { Coach } from '../ui/Coach.js';
+import { Performance } from './Performance.js';
 import { AudioSystem } from '../audio/AudioSystem.js';
 
 /**
@@ -54,8 +56,10 @@ export class Game {
     this._initProgress();
     this._initFishing();
     this._initUI();
+    this._initPerformance();
     this._bindInput();
     this._loadProgress();
+    if (!this.save.load()) this.ui.showWelcome(() => this.input.requestLock());
   }
 
   // --------------------------------------------------------------- montaje
@@ -203,9 +207,31 @@ export class Game {
         onHookSet: () => { this.economy.stats.hooked++; this.audio.hookSet(); },
         onDragSlip: () => { if (Math.random() < 0.35) this.audio.dragSlip(); },
         onJump: (fish) => this.water.splash(fish.position, 1.1),
-        onLineBreak: () => { this.economy.stats.lineBreaks++; this.economy.stats.lost++; this.audio.lineBreak(); },
-        onFishLost: () => { this.economy.stats.lost++; },
-        onLanded: (fish) => this._onLanded(fish)
+        onLineBreak: () => {
+          this.economy.stats.lineBreaks++; this.economy.stats.lost++;
+          this.lastEvent = 'lineBreak'; this.audio.lineBreak();
+        },
+        onFishLost: () => { this.economy.stats.lost++; this.lastEvent = 'fishLost'; },
+        onLanded: (fish) => { this.lastEvent = 'landed'; this._onLanded(fish); }
+      }
+    });
+  }
+
+  _initPerformance() {
+    this.coach = new Coach();
+    this.lastEvent = null;
+    this.perf = new Performance({
+      renderer: this.renderer,
+      sky: this.sky,
+      vegetationRef: () => this.vegetation,
+      treesRef: () => this.trees,
+      weather: this.weather,
+      settings: this.settings,
+      onChange: (level, direccion, fps) => {
+        const texto = direccion === 'baja'
+          ? `Calidad bajada a «${level}» para ir fluido (${fps} fps)`
+          : `Calidad subida a «${level}» (${fps} fps)`;
+        this.fishing._say(texto);
       }
     });
   }
@@ -353,6 +379,8 @@ export class Game {
 
   _applySetting(key, value) {
     this.settings[key] = value;
+    if (key === 'quality') this.perf.lockTo(value);
+    if (key === 'autoQuality') this.perf.auto = value;
     if (key === 'fov') {
       this.camera.fov = value;
       this.camera.updateProjectionMatrix();
@@ -368,7 +396,8 @@ export class Game {
       inventory: this.inventory.toJSON(),
       equipment: this.equipment.toJSON(),
       economy: this.economy.toJSON(),
-      world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id }
+      world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
+      coach: this.coach?.toJSON() ?? []
     });
   }
 
@@ -386,6 +415,7 @@ export class Game {
       this.travelTo(data.world.zone);
     }
     this.audio.setVolume(this.settings.masterVolume);
+    if (Array.isArray(data.coach)) this.coach.seen = new Set(data.coach);
   }
 
   // ---------------------------------------------------------------- bucle
@@ -482,14 +512,31 @@ export class Game {
     }
 
     if (!headless) {
+      this.perf.update(dt);
       this._updateAudio(dt, moving);
+
+      const tip = this.coach.check({
+        fishingState: this.fishing.state,
+        lastEvent: this.lastEvent,
+        casts: this.economy.stats.casts,
+        landed: this.economy.stats.landed,
+        money: this.economy.money,
+        nearBoat: this.boat.canBoard(this.player.position),
+        rig: this.fishing.lure.rig
+      }, dt);
+      if (tip) { this.ui.showCoach(tip); this._persist(); }
+      else if (!this.coach.text) this.ui.showCoach(null);
+      this.lastEvent = null;
+
       this.ui.update({
         fishing: this.fishing.hud,
         time: this.time,
         weather: this.weather,
         money: this.economy.money,
         equipment: this.equipment,
-        hint: this._contextHint()
+        hint: this._contextHint(),
+        fps: this.settings.showFps ? Math.round(this.perf.fps) : undefined,
+        quality: this.perf.level
       });
       this.autosaveTimer += dt;
       if (this.autosaveTimer > 30) { this.autosaveTimer = 0; this._persist(); }

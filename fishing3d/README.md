@@ -185,6 +185,21 @@ Importa porque las especies de fondo (el siluro vive entre 4,5 y 9,5 m) no
 pican desde la orilla. Doce segundos bogando desde el fondeadero llevan a más
 de 6 m de calado.
 
+## Rendimiento y primeros pasos
+
+**La calidad se ajusta sola.** El juego mide sus fotogramas por segundo en
+ventanas de dos segundos: si baja de 32 durante dos ventanas seguidas, baja un
+escalón (resolución de render, sombras, distancias de dibujado, lluvia); si
+pasa de 56 durante seis ventanas, vuelve a subir. Elegir calidad a mano en
+Configuración desactiva el ajuste. Ahí mismo se puede mostrar el contador de fps.
+
+**Avisos de aprendizaje.** En partida nueva sale una tarjeta con las tres
+acciones básicas, y a partir de ahí los consejos aparecen cuando hacen falta
+—al picar, al pelear, al romper la línea, al acercarse a la barca— una sola vez
+cada uno, y se recuerdan en la partida guardada. Son condiciones sobre el
+estado, no una secuencia fija: quien enganche un pez antes de leer nada recibe
+igualmente el consejo de la pelea.
+
 ## Rendimiento
 
 - Vegetación en `InstancedMesh` agrupada por celdas, con corte por distancia.

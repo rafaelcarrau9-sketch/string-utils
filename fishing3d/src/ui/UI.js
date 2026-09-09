@@ -62,6 +62,13 @@ const CSS = `
   background: rgba(0,0,0,.55); border: 1px solid var(--edge); overflow: hidden; }
 .sw-power i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--warn)); }
 
+.sw-coach { position: absolute; left: 50%; bottom: 152px; transform: translateX(-50%);
+  width: min(560px, 88vw); background: var(--panel); border: 1px solid var(--accent);
+  border-left-width: 3px; border-radius: 9px; padding: 10px 14px; font-size: 13.5px;
+  line-height: 1.5; backdrop-filter: blur(8px); box-shadow: 0 10px 30px -12px #000; }
+.sw-fps { position: absolute; right: 16px; top: 14px; font-family: ui-monospace, monospace;
+  font-size: 11px; color: var(--dim); background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 6px; padding: 3px 8px; }
 .sw-hintline { position: absolute; left: 50%; top: calc(50% + 28px); transform: translateX(-50%);
   font-size: 12.5px; font-weight: 550; color: #dbe7ee; text-shadow: 0 2px 8px rgba(0,0,0,.95);
   letter-spacing: .01em; }
@@ -96,6 +103,7 @@ const CSS = `
 .sw-item.equipped { border-color: rgba(111,211,199,.55); }
 .sw-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent); }
 
+.sw-cta { display: block; width: 100%; padding: 13px; font-size: 15px; border-radius: 10px; }
 .sw-catch { text-align: center; }
 .sw-catch .name { font-size: 26px; font-weight: 700; }
 .sw-catch .latin { font-style: italic; color: var(--dim); font-size: 13px; margin-top: 2px; }
@@ -181,6 +189,14 @@ export class UI {
     this.hint = el('div', 'sw-hintline');
     this.root.appendChild(this.hint);
 
+    this.coachBox = el('div', 'sw-coach');
+    this.coachBox.style.display = 'none';
+    this.root.appendChild(this.coachBox);
+
+    this.fpsBox = el('div', 'sw-fps');
+    this.fpsBox.style.display = 'none';
+    this.root.appendChild(this.fpsBox);
+
     this.toast = el('div', 'sw-toast');
     this.toast.style.display = 'none';
     this.root.appendChild(this.toast);
@@ -228,6 +244,12 @@ export class UI {
 
     this._updatePrompt(hud);
     this._updateToast(hud.message);
+    if (data.fps !== undefined) {
+      this.fpsBox.style.display = 'block';
+      this.fpsBox.textContent = `${data.fps} fps · ${data.quality}`;
+    } else if (this.fpsBox.style.display !== 'none') {
+      this.fpsBox.style.display = 'none';
+    }
   }
 
   _updatePrompt(hud) {
@@ -274,6 +296,30 @@ export class UI {
     this.toast.style.display = 'block';
     this.toast.textContent = message.text;
     this.toast.className = `sw-toast${message.kind === 'bad' ? ' bad' : ''}`;
+  }
+
+  /** Muestra un aviso de aprendizaje; `null` lo retira. */
+  showCoach(text) {
+    if (!text) { this.coachBox.style.display = 'none'; return; }
+    this.coachBox.style.display = 'block';
+    this.coachBox.innerHTML = text;
+  }
+
+  showWelcome(onStart) {
+    const body = el('div', 'help');
+    body.innerHTML = `
+      <p>Estás en el muelle del <b>Lago de la Niebla</b>. Tres cosas y ya puedes pescar:</p>
+      <div class="sw-keys" style="margin:12px 0 14px">
+        <b>Clic izq. mantenido</b><span>Carga el lanzamiento; al soltar, lanza. Cuanto más cargues, más lejos.</span>
+        <b>Clic izq.</b><span>Clavar cuando pique. La ventana es corta.</span>
+        <b>Clic der. mantenido</b><span>Recoger. Vigila la tensión: si se dispara, suelta.</span>
+      </div>
+      <p class="sw-hint">El resto se explica solo sobre la marcha. <b>Esc</b> muestra todos los controles.</p>`;
+    const go = el('button', 'sw-btn sw-cta', 'Empezar a pescar');
+    go.style.marginTop = '16px';
+    go.addEventListener('click', () => { this.closePanel(); onStart?.(); });
+    body.appendChild(go);
+    this._overlay('Still Waters', body, { onClose: onStart });
   }
 
   setCrosshairVisible(value) {
@@ -541,9 +587,26 @@ export class UI {
     slider('Sensibilidad', 'sensitivity', 0.2, 3, 0.1, settings.sensitivity, (v) => v.toFixed(1));
     slider('Volumen', 'masterVolume', 0, 1, 0.05, settings.masterVolume, (v) => `${Math.round(v * 100)}%`);
 
+    const toggle = (label, key, value, note) => {
+      const field = el('div', 'sw-field');
+      field.innerHTML = `<label>${label}${note ? `<div class="sw-hint" style="margin-top:2px">${note}</div>` : ''}</label>`;
+      const btn = el('button', 'sw-btn' + (value ? '' : ' ghost'), value ? 'Activado' : 'Desactivado');
+      btn.addEventListener('click', () => {
+        const next = btn.textContent === 'Desactivado';
+        btn.textContent = next ? 'Activado' : 'Desactivado';
+        btn.className = 'sw-btn' + (next ? '' : ' ghost');
+        this.cb.onSetting?.(key, next);
+      });
+      field.appendChild(btn);
+      body.appendChild(field);
+    };
+    toggle('Calidad automática', 'autoQuality', settings.autoQuality !== false,
+      'Baja la calidad sola si el juego no va fluido, y la sube si sobra margen.');
+    toggle('Mostrar fps', 'showFps', !!settings.showFps);
+
     const hint = el('div', 'sw-hint');
     hint.style.marginTop = '14px';
-    hint.innerHTML = 'La calidad se aplica al reiniciar el mundo desde el menú de pausa.';
+    hint.innerHTML = 'Elegir calidad a mano desactiva el ajuste automático.';
     body.appendChild(hint);
 
     this._overlay('Configuración', body);

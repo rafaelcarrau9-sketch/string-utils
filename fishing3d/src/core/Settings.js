@@ -46,7 +46,8 @@ export const DEFAULT_SETTINGS = {
   sensitivity: 1,
   invertY: false,
   masterVolume: 0.8,
-  showFps: false
+  showFps: false,
+  autoQuality: true
 };
 
 export function presetFor(settings) {
