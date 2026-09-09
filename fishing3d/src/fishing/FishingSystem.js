@@ -55,12 +55,14 @@ export class FishingSystem {
     this.power = 0;              // carga del lanzamiento 0..1
     this.charging = false;
     this.lineOut = 0;
+    this._slipping = false;
     this.tension = 0;
     this.dragSetting = 0.45;     // 0..1 del freno máximo
     this.slackTimer = 0;
     this.hooked = null;
     this.biteTimer = 0;
     this.retrieveInput = 0;
+    this.rodStowed = false;
     this.sidePressure = 0;      // -1 izquierda … +1 derecha, desde dónde apunta la caña
     this.counterPressure = 0;   // >0 si esa presión va contra la carrera del pez
     this.message = null;
@@ -86,10 +88,27 @@ export class FishingSystem {
   get stats() { return this.equipment.stats; }
   get tensionRatio() { return clamp(this.tension / this.stats.lineStrength, 0, 1.4); }
   get dragForce() { return this.dragSetting * this.stats.maxDrag; }
-  get canCast() { return this.state === FishingState.IDLE; }
+  get canCast() { return this.state === FishingState.IDLE && !this.rodStowed; }
+
+  /** Guardar o sacar la caña. No se puede con el aparejo fuera. */
+  toggleRod() {
+    if (this.state !== FishingState.IDLE) {
+      this._say('Recoge el sedal antes de guardar la caña', 'bad');
+      return false;
+    }
+    this.rodStowed = !this.rodStowed;
+    this._say(this.rodStowed ? 'Caña guardada' : 'Caña lista');
+    return true;
+  }
 
   // ---------------------------------------------------------------- entrada
   beginCast() {
+    // Con la caña guardada, el primer clic la saca: una sola acción para el
+    // jugador, aunque por dentro sean dos estados.
+    if (this.rodStowed && this.state === FishingState.IDLE) {
+      this.rodStowed = false;
+      return;
+    }
     if (!this.canCast) return;
     this.state = FishingState.AIMING;
     this.charging = true;
@@ -139,6 +158,9 @@ export class FishingSystem {
         // línea pasa a colgar directamente de él.
         this.lure.stow();
         this.fight = {
+          lastDistance: this._rodTip.distanceTo(fish.position),
+          hookHold: 1,
+          warned: false,
           stamina: 1,
           burst: 0,
           burstTimer: 1 + Math.random() * 2,
@@ -252,7 +274,7 @@ export class FishingSystem {
       case FishingState.FISHING:
       case FishingState.BITE: return RodPose.FISH;
       case FishingState.FIGHTING: return RodPose.FIGHT;
-      default: return RodPose.IDLE;
+      default: return this.rodStowed ? RodPose.STOWED : RodPose.IDLE;
     }
   }
 
@@ -398,9 +420,23 @@ export class FishingSystem {
 
     // --- carrete y línea ---------------------------------------------------
     const distance = this._rodTip.distanceTo(fish.position);
+    // Red de seguridad: ni el pez más rápido ni el jugador corriendo separan la
+    // puntera del pez más de esto en un fotograma. Si la distancia da un salto
+    // mayor, no ha habido un tirón: ha saltado la geometría (un
+    // teletransporte, una pestaña que vuelve del segundo plano). Se reajusta el
+    // hilo en vez de romperlo por un pico que el jugador no ha provocado.
+    if (distance - f.lastDistance > 12 * dt + 0.35) {
+      this.lineOut = clamp(distance + 0.15, 0.8, stats.capacity - 1);
+      this.tension = Math.min(this.tension, this.dragForce);
+    }
+    f.lastDistance = distance;
     if (this.retrieveInput > 0.05) {
-      // Cuanta más tensión, más cuesta recuperar hilo.
-      const effort = stats.retrieveSpeed * this.retrieveInput / (1 + this.tensionRatio * 2.2);
+      // Cuanta más tensión, más cuesta recuperar hilo. Y mientras el freno
+      // patina no se recupera nada: el carrete gira en vacío contra el
+      // embrague. Es lo que impide ganar la pelea a base de manivela.
+      const effort = this._slipping
+        ? 0
+        : stats.retrieveSpeed * this.retrieveInput / (1 + this.tensionRatio * 2.2);
       this.lineOut = Math.max(0.8, this.lineOut - effort * dt);
     }
 
@@ -425,13 +461,36 @@ export class FishingSystem {
     const load = Math.max(0, stretch) * stiffness
       + power * (0.55 + Math.abs(this.sidePressure) * 0.07);
     const slipping = load > this.dragForce;
+    this._slipping = slipping;
     const shock = slipping ? Math.min(load - this.dragForce, load * 0.2) * (1 - stats.elasticity * 0.5) : 0;
     this.tension = damp(this.tension, Math.min(load, this.dragForce + shock), 11, dt);
 
     if (slipping) {
+      // El freno cede hilo, pero sólo el que el pez se está llevando de
+      // verdad: si soltase más que la distancia que gana, fabricaría holgura
+      // de la nada y el pez se soltaría solo después de cada carrera.
       const slip = (load - this.dragForce) * 0.4;
-      this.lineOut = Math.min(stats.capacity, this.lineOut + slip * dt);
+      this.lineOut = Math.min(
+        stats.capacity,
+        Math.min(this.lineOut + slip * dt, distance + 0.25)
+      );
       this.events?.onDragSlip?.(slip);
+    }
+
+    // El anzuelo también se cansa. Cuanto más grande es el pez para el aparejo
+    // que lleva el jugador, antes abre su propio agujero y se suelta. Es lo
+    // que le pone final a las peleas imposibles: con equipo de iniciación un
+    // siluro de récord no rompe el hilo — se suelta — y eso es exactamente la
+    // razón para ir a comprar una caña mejor.
+    const overmatch = clamp(power / Math.max(0.6, this.dragForce), 0, 4);
+    f.hookHold = clamp(f.hookHold - dt * 0.012 * overmatch * (0.4 + this.tensionRatio), 0, 1);
+    if (!f.warned && f.hookHold < 0.35) {
+      f.warned = true;
+      this._say('El anzuelo empieza a ceder: cóbralo ya', 'bad');
+    }
+    if (f.hookHold <= 0) {
+      this._loseFish(fish, 'El anzuelo ha abierto su agujero y se ha soltado');
+      return;
     }
 
     // El pez se cansa por la tensión sostenida, y bastante más rápido si se
@@ -512,17 +571,26 @@ export class FishingSystem {
     this.camera.add(mesh);
     mesh.visible = true;
     const lengthM = fish.length / 100;
-    // Por encima del centro, para que la ficha de captura no lo tape.
-    mesh.position.set(0, 0.28 + lengthM * 0.06, -(0.3 + lengthM * 0.72));
+    // Encuadre a partir del campo de visión real: colocarlo con números fijos
+    // dejaba a los ejemplares grandes cortados por el borde de la pantalla.
+    const dist = 0.42 + lengthM * 0.85;
+    const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5);
+    // Por encima del centro, para que la ficha de captura no lo tape, pero
+    // dentro del cuadro.
+    mesh.position.set(0, halfHeight * 0.52, -dist);
     mesh.rotation.set(0, Math.PI / 2, 0);
 
     // Luz propia: da igual que sea de noche o que el pez esté a contraluz.
     if (!this._trophyLight) {
       this._trophyLight = new THREE.PointLight(0xfff0d8, 0, 6, 2);
-      this._trophyLight.position.set(0.45, 0.5, 0.35);
       this.camera.add(this._trophyLight);
     }
-    this._trophyLight.intensity = 3.2;
+    // La luz se coloca junto al pez, no junto a la cámara: a metro y medio, con
+    // caída cuadrática, apenas le llegaba nada y el ejemplar salía en sombra.
+    this._trophyLight.position.set(dist * 0.5, mesh.position.y + 0.35, -dist * 0.55);
+    // Con la exposición del render en su valor normal, 3.2 quemaba el pez a
+    // blanco y se perdían los colores de la especie.
+    this._trophyLight.intensity = 1.1;
   }
 
   _hideTrophy() {
@@ -590,6 +658,7 @@ export class FishingSystem {
         name: this.hooked.displayName,
         weight: this.hooked.weight,
         stamina: this.fight?.stamina ?? 1,
+        hookHold: this.fight?.hookHold ?? 1,
         sidePressure: this.sidePressure,
         counterPressure: this.counterPressure
       } : null,

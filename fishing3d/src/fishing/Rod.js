@@ -20,7 +20,8 @@ export const RodPose = {
   CHARGE: 'charge',
   CAST: 'cast',
   FISH: 'fish',
-  FIGHT: 'fight'
+  FIGHT: 'fight',
+  STOWED: 'stowed'
 };
 
 // Posición de la mano y ángulos base de cada pose.
@@ -29,7 +30,9 @@ const POSES = {
   charge: { pos: [0.50, -0.26, -0.30], rot: [0.44, -0.60, 0.40], lift: 0 },
   cast:   { pos: [0.38, -0.28, -0.44], rot: [0.17, -0.26, 0.17], lift: 0 },
   fish:   { pos: [0.38, -0.28, -0.44], rot: [0.17, -0.26, 0.17], lift: 0 },
-  fight:  { pos: [0.30, -0.20, -0.38], rot: [0.46, -0.18, 0.24], lift: 1 }
+  fight:  { pos: [0.30, -0.20, -0.38], rot: [0.46, -0.18, 0.24], lift: 1 },
+  // Guardada: baja y atrás, apoyada en el hombro y fuera del encuadre.
+  stowed: { pos: [0.52, -0.72, -0.10], rot: [-0.75, -0.55, 0.55], lift: 0 }
 };
 
 const CAST_DURATION = 0.42;

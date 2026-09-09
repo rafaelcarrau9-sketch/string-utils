@@ -38,8 +38,15 @@ export function mergeGeometries(geometries) {
   return result;
 }
 
-/** Dos planos cruzados en X, con el pivote en la base. Para hierba y follaje. */
-export function crossPlanes(width, height) {
+/**
+ * Dos planos cruzados en X, con el pivote en la base. Para hierba y follaje.
+ *
+ * `upBias` inclina las normales hacia arriba. Sin esto los planos son
+ * verticales, su normal es horizontal y con el sol alto el producto N·L vale
+ * casi cero: las copas salen negras a mediodía. Las hojas reales no son un
+ * plano, así que fingir una normal más redonda es lo correcto, no un truco.
+ */
+export function crossPlanes(width, height, upBias = 0) {
   const a = new THREE.PlaneGeometry(width, height, 1, 2);
   a.translate(0, height / 2, 0);
   const b = a.clone();
@@ -47,5 +54,17 @@ export function crossPlanes(width, height) {
   const merged = mergeGeometries([a, b]);
   a.dispose();
   b.dispose();
+  if (upBias > 0) {
+    const normals = merged.attributes.normal;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < normals.count; i++) {
+      v.fromBufferAttribute(normals, i);
+      v.multiplyScalar(1 - upBias);
+      v.y += upBias;
+      v.normalize();
+      normals.setXYZ(i, v.x, v.y, v.z);
+    }
+    normals.needsUpdate = true;
+  }
   return merged;
 }

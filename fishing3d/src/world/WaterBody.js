@@ -47,6 +47,17 @@ export class WaterBody {
     this.rippleGroup.position.y = level + 0.02;
     this._rippleGeometry = new THREE.RingGeometry(0.06, 0.1, 24);
     this._rippleGeometry.rotateX(-Math.PI / 2);
+    // Reserva fija de anillos. Antes cada salpicadura creaba y destruía su
+    // material: cuarenta ondas eran cuarenta materiales y cuarenta programas.
+    this._pool = [];
+    for (let i = 0; i < 48; i++) {
+      const ring = new THREE.Mesh(this._rippleGeometry, new THREE.MeshBasicMaterial({
+        color: 0xdff0f5, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false
+      }));
+      ring.visible = false;
+      this.rippleGroup.add(ring);
+      this._pool.push(ring);
+    }
   }
 
   /**
@@ -106,22 +117,23 @@ export class WaterBody {
 
   /** Onda expansiva en la superficie: caída del señuelo, pez que colea... */
   splash(position, strength = 1) {
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xdff0f5, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false
-    });
-    const ring = new THREE.Mesh(this._rippleGeometry, material);
+    // Se recicla el anillo más viejo si no queda ninguno libre.
+    let ring = this._pool.find((r) => !r.visible);
+    if (!ring) { ring = this.ripples[0]; this._retire(ring); ring = this._pool.find((r) => !r.visible); }
+    if (!ring) return;
     ring.position.set(position.x, 0, position.z);
+    ring.scale.setScalar(1);
+    ring.visible = true;
+    ring.material.opacity = 0.5;
     ring.userData = { age: 0, strength: clamp(strength, 0.2, 3) };
-    this.rippleGroup.add(ring);
     this.ripples.push(ring);
-    if (this.ripples.length > 40) this._retire(this.ripples[0]);
   }
 
   _retire(ring) {
     const i = this.ripples.indexOf(ring);
     if (i >= 0) this.ripples.splice(i, 1);
-    this.rippleGroup.remove(ring);
-    ring.material.dispose();
+    ring.visible = false;
+    ring.material.opacity = 0;
   }
 
   update(dt, { sunDirection, sunColor, waterColor, choppiness = 1 } = {}) {
@@ -153,6 +165,7 @@ export class WaterBody {
   }
 
   dispose() {
+    this._pool.forEach((r) => r.material.dispose());
     this.water.geometry.dispose();
     this.water.material.dispose();
     this._rippleGeometry.dispose();

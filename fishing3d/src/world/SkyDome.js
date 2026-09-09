@@ -11,6 +11,8 @@ import { createRandom, clamp, lerp } from '../core/MathUtils.js';
  */
 
 const SKY_SCALE = 3000;
+// Cuánto se atenúa el cielo para poder exponer el resto de la escena.
+const SKY_DIM = 0.40;
 
 export class SkyDome {
   constructor(scene, textures, preset) {
@@ -18,6 +20,22 @@ export class SkyDome {
 
     this.sky = new Sky();
     this.sky.scale.setScalar(SKY_SCALE);
+    // El cielo de Preetham emite muchísima más luz que cualquier superficie del
+    // lago. Con una sola exposición para todo había que bajarla tanto que el
+    // resto de la escena salía casi negro: el arbolado era una silueta y la
+    // orilla, una mancha marrón. Se atenúa el cielo en su propio shader y se
+    // devuelve la exposición del render a un valor normal, así que el cielo
+    // sigue igual de luminoso y todo lo demás recibe la luz que le toca.
+    // Y con el sol bajo el horizonte, Preetham devuelve un pardo sucio en vez de
+    // una noche: se mezcla con el azul nocturno de la paleta.
+    this.sky.material.uniforms.uNight = { value: 0 };
+    this.sky.material.uniforms.uNightColor = { value: new THREE.Color(0x0a1224) };
+    this.sky.material.fragmentShader = this.sky.material.fragmentShader
+      .replace('varying vec3 vSunDirection;',
+        'varying vec3 vSunDirection;\nuniform float uNight;\nuniform vec3 uNightColor;')
+      .replace('gl_FragColor = vec4( retColor, 1.0 );',
+        `gl_FragColor = vec4( mix( retColor * ${SKY_DIM.toFixed(3)}, uNightColor, uNight ), 1.0 );`);
+    this.sky.material.needsUpdate = true;
     this.sky.material.uniforms.turbidity.value = 2.2;
     this.sky.material.uniforms.rayleigh.value = 3.1;
     this.sky.material.uniforms.mieCoefficient.value = 0.0028;
@@ -132,12 +150,19 @@ export class SkyDome {
     this.ambient.color.copy(time.ambientColor);
     this.ambient.intensity = lerp(1.2, 1.15, daylight);
 
+    this.sky.material.uniforms.uNight.value = time.nightFactor * 0.88;
+    this.sky.material.uniforms.uNightColor.value.copy(time.skyColor);
+
     this.stars.material.opacity = time.nightFactor * (1 - weather.cloudiness * 0.85);
     this.stars.visible = this.stars.material.opacity > 0.02;
     this.stars.rotation.y += dt * 0.0035;
 
     this.cloudLayers.forEach((layer, i) => {
-      layer.material.opacity = clamp(weather.cloudiness * 0.85, 0, 0.9) * (i === 0 ? 1 : 0.6);
+      // Con el cielo despejado no debe quedar ni un velo: antes, una nubosidad
+      // residual del 10 % se veía de noche como una capa de suciedad sobre las
+      // estrellas. Y de noche las nubes no se iluminan solas.
+      layer.material.opacity = clamp((weather.cloudiness - 0.16) * 1.15, 0, 0.9)
+        * (i === 0 ? 1 : 0.6) * lerp(0.3, 1, daylight);
       layer.visible = layer.material.opacity > 0.02;
       layer.material.color.copy(time.skyColor).lerp(new THREE.Color(0xffffff), 0.55 - weather.cloudiness * 0.4);
       layer.material.map.offset.x += dt * weather.windSpeed * 0.0016 * (i + 1);

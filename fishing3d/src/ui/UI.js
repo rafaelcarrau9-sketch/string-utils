@@ -186,6 +186,14 @@ export class UI {
       </div>
       <div class="sub">
         <div class="label"><span>Hilo fuera</span><b class="l-val">0 m</b></div>
+      </div>
+      <div class="sub fight-only">
+        <div class="label"><span>Pez agotado</span><b class="f-val">0 %</b></div>
+        <div class="sw-bar"><i class="f-fill" style="background:var(--good)"></i></div>
+      </div>
+      <div class="sub fight-only">
+        <div class="label"><span>Anzuelo</span><b class="h-val">100 %</b></div>
+        <div class="sw-bar"><i class="h-fill" style="background:var(--good)"></i></div>
       </div>`;
     this.root.appendChild(this.tensionBox);
 
@@ -239,6 +247,12 @@ export class UI {
       <div class="row"><span>${equipment.lure.name}</span><span>${equipment.lure.workingDepth.toFixed(1)} m</span></div>`;
 
     const hud = fishing;
+    // El panel de tensión sólo importa con el aparejo fuera. En reposo estorba.
+    const relevante = hud.state !== FishingState.IDLE && hud.state !== FishingState.AIMING;
+    const quiere = relevante ? 'block' : 'none';
+    if (this.tensionBox.style.display !== quiere) this.tensionBox.style.display = quiere;
+    if (!relevante) { this._updatePrompt(hud); this._updateToast(hud.message); return; }
+
     const ratio = clamp(hud.tensionRatio, 0, 1);
     const fill = this.tensionBox.querySelector('.t-fill');
     fill.style.width = `${ratio * 100}%`;
@@ -250,6 +264,28 @@ export class UI {
     this.tensionBox.querySelector('.d-val').textContent = `${hud.drag.toFixed(1)} kg`;
     this.tensionBox.querySelector('.l-val').textContent =
       `${hud.lineOut.toFixed(0)} / ${hud.capacity} m`;
+
+    // Durante la pelea el jugador necesita ver las dos cuentas atrás que
+    // deciden el desenlace: lo que le queda al pez y lo que le queda al
+    // anzuelo. Sin esto, perder una captura parece arbitrario.
+    const luchando = hud.state === FishingState.FIGHTING && hud.hooked;
+    const verPelea = luchando ? 'block' : 'none';
+    this.tensionBox.querySelectorAll('.fight-only').forEach((n) => {
+      if (n.style.display !== verPelea) n.style.display = verPelea;
+    });
+    if (luchando) {
+      const cansancio = clamp(1 - hud.hooked.stamina, 0, 1);
+      const fFill = this.tensionBox.querySelector('.f-fill');
+      fFill.style.width = `${cansancio * 100}%`;
+      fFill.style.background = cansancio > 0.7 ? 'var(--good)' : 'var(--warn)';
+      this.tensionBox.querySelector('.f-val').textContent = `${Math.round(cansancio * 100)} %`;
+
+      const hold = clamp(hud.hooked.hookHold ?? 1, 0, 1);
+      const hFill = this.tensionBox.querySelector('.h-fill');
+      hFill.style.width = `${hold * 100}%`;
+      hFill.style.background = hold < 0.35 ? 'var(--bad)' : hold < 0.65 ? 'var(--warn)' : 'var(--good)';
+      this.tensionBox.querySelector('.h-val').textContent = `${Math.round(hold * 100)} %`;
+    }
 
     this._updatePrompt(hud);
     this._updateToast(hud.message);

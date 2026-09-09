@@ -14,6 +14,7 @@ import { Trees } from '../world/Trees.js';
 import { GrassBlades } from '../world/GrassBlades.js';
 import { AmbientLife } from '../world/AmbientLife.js';
 import { CameraFx } from '../player/CameraFx.js';
+import { InteractionSystem } from '../world/InteractionSystem.js';
 import { Boat } from '../world/Boat.js';
 import { ZONES, zoneOf } from '../world/Zones.js';
 import { Props } from '../world/Props.js';
@@ -59,6 +60,14 @@ export class Game {
     this._initProgress();
     this._initFishing();
     this.cameraFx = new CameraFx(this.camera, { baseFov: this.settings.fov });
+    // Una sola fuente de verdad para "qué caña se ve": la del modelo de primera
+    // persona o la que sujeta el cuerpo, nunca las dos.
+    this.player.onModeChange = (mode) => this.fishing.rod.setVisible(mode === 'first');
+
+    this.interaction = new InteractionSystem(this.camera);
+    // El mundo se construye antes que este sistema, así que la primera zona
+    // hay que registrarla aquí; los viajes posteriores lo hacen en _buildZone.
+    this._registerInteractables();
     this._initUI();
     this._initPerformance();
     this._bindInput();
@@ -80,7 +89,7 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     // El cielo de Preetham emite valores muy altos: con exposición 1 se
     // satura a blanco y el lago lo refleja como una lámina de leche.
-    this.renderer.toneMappingExposure = 0.34;
+    this.renderer.toneMappingExposure = 0.85;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(
@@ -135,6 +144,7 @@ export class Game {
     this.fishManager = new FishManager(this.scene, this.terrain, {
       seed: zone.terrain.seed + 3, species: zone.species
     });
+    if (this.interaction) this._registerInteractables();
     this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
       seed: zone.terrain.seed + 7, audio: this.audio
     });
@@ -162,7 +172,9 @@ export class Game {
   travelTo(zoneId) {
     const zone = zoneOf(zoneId);
     if (zone.id === this.zone?.id) return;
-    this.fishing.reelIn();
+    const busy = this._busyMessage('viajar');
+    if (busy) { this.fishing._say(busy, 'bad'); return; }
+    if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de viajar');
     if (this.player.platform) { this.boat.leave(); this.player.setPlatform(null); }
 
     this._buildZone(zone);
@@ -330,16 +342,15 @@ export class Game {
         case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
-        case 'KeyE': {
-          if (this.ui.isPanelOpen) break;
-          const target = this._interactables()[0];
-          if (target) target.action();
+        case 'KeyE':
+          if (!this.ui.isPanelOpen) this.interaction.interact();
           break;
-        }
+        case 'KeyQ':
+          if (!this.ui.isPanelOpen) this.fishing.toggleRod();
+          break;
         case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
-          this.fishing.rod.setVisible(this.player.mode === 'first');
           break;
         default: break;
       }
@@ -347,16 +358,32 @@ export class Game {
   }
 
   /** Sube o baja de la barca. Desembarcar exige tener orilla al lado. */
+  /**
+   * Todo lo que teletransporta al jugador o salta el reloj tiene que preguntar
+   * esto antes: con un pez enganchado la respuesta es que no.
+   */
+  _busyMessage(what) {
+    if (this.fishing.state === 'fighting') return `No puedes ${what} con un pez enganchado`;
+    return null;
+  }
+
   _toggleBoat() {
     if (this.player.platform) {
+      const busy = this._busyMessage('bajar de la barca');
+      if (busy) { this.fishing._say(busy, 'bad'); return; }
       const shore = this._findShoreNear(this.boat.position);
       if (!shore) { this.fishing._say('Acerca la barca a la orilla para bajar', 'bad'); return; }
+      // Bajar teletransporta al jugador hasta la orilla: con el sedal fuera,
+      // ese salto se traduciría en un tirón imposible.
+      if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de bajar');
       this.boat.leave();
       this.player.setPlatform(null);
       this.player.teleport(shore);
       this.fishing._say('Has desembarcado');
     } else if (this.boat.canBoard(this.player.position)) {
-      this.fishing.reelIn();
+      const busy = this._busyMessage('subir a la barca');
+      if (busy) { this.fishing._say(busy, 'bad'); return; }
+      if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de subir');
       this.player.setPlatform(this.boat);
       this.fishing._say('A bordo · W/S para bogar, A/D para virar, E para bajar');
     }
@@ -562,6 +589,8 @@ export class Game {
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    if (!panelOpen) this.interaction.update(this.player.position);
+    this.player.holdingRod = this.fishing.rodStowed ? 0 : 1;
     this.cameraFx.update(dt);
 
     if (!headless) {
@@ -596,6 +625,56 @@ export class Game {
     }
   }
 
+  /** Registra lo que se puede mirar e interactuar en la zona actual. */
+  _registerInteractables() {
+    const I = this.interaction;
+    I.clear();
+
+    I.register({
+      object: this.boat.group,
+      range: 4.5,
+      label: () => (this.player.platform ? 'E · desembarcar' : 'E · subir a la barca'),
+      enabled: () => this.player.platform === this.boat || this.boat.canBoard(this.player.position),
+      action: () => this._toggleBoat()
+    });
+    I.register({
+      object: this.props.camp,
+      range: 4,
+      label: () => `E · descansar hasta las ${String(Math.floor(this._nextFeedingHour())).padStart(2, '0')}:00`,
+      enabled: () => !this.player.platform,
+      action: () => this._rest(this._nextFeedingHour())
+    });
+    I.register({
+      object: this.props.sign,
+      range: 4,
+      label: () => `E · ${this.zone.name}: leer el cartel`,
+      enabled: () => !this.player.platform,
+      action: () => this.ui.showZones(ZONES, this.economy, this.zone.id)
+    });
+    I.register({
+      object: this.props.bucket,
+      range: 3,
+      label: 'E · mirar el cubo de cebo',
+      enabled: () => !this.player.platform,
+      action: () => this._inspectBait()
+    });
+  }
+
+  /** Examinar el cebo: consejo real según la hora y el tiempo que hace. */
+  _inspectBait() {
+    const hour = this.time.hour;
+    const band = hour < 6 || hour > 20 ? 'de noche'
+      : hour < 10 ? 'a primera hora'
+      : hour < 17 ? 'a pleno día' : 'al caer la tarde';
+    const consejo = hour < 6 || hour > 20
+      ? 'los peces de fondo están activos: prueba vinilo o boilie hondo'
+      : hour < 10 || hour > 17
+      ? 'es la mejor franja: cucharilla o popper en superficie'
+      : 'con el sol alto conviene bajar: cucharilla pesada o boilie';
+    this.audio.coin();
+    this.fishing._say(`El cubo huele fuerte. ${band.charAt(0).toUpperCase() + band.slice(1)} y ${this.weather.label.toLowerCase()}: ${consejo}`);
+  }
+
   /**
    * Puntos con los que se puede interactuar, en orden de prioridad.
    *
@@ -625,7 +704,8 @@ export class Game {
   }
 
   _contextHint() {
-    return this._interactables()[0]?.label ?? '';
+    if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
+    return this.interaction?.label ?? '';
   }
 
   /** Siguiente hora punta de actividad: amanecer o atardecer. */
@@ -636,7 +716,11 @@ export class Game {
 
   /** Descansar: salta a la siguiente franja buena, con fundido. */
   _rest(hour) {
-    if (this.fishing.state !== 'idle') { this.fishing.reelIn(); }
+    // Un pez enganchado no se abandona en silencio: se cobra o se pierde, pero
+    // nunca desaparece porque el jugador haya pulsado otra tecla.
+    const busy = this._busyMessage('descansar');
+    if (busy) { this.fishing._say(busy, 'bad'); return; }
+    if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de descansar');
     this.input.releaseLock();
     this.ui.fadeThrough(() => {
       this.time.setHour(hour);
@@ -701,13 +785,9 @@ export class Game {
       cloudiness: this.weather.cloudiness
     });
 
-    if (moving.speed > 0.8) {
-      this.footstepTimer -= dt * moving.speed;
-      if (this.footstepTimer <= 0) {
-        this.footstepTimer = 1.5;
-        this.audio.footstep(moving.surface);
-      }
-    }
+    // El paso suena cuando el pie toca de verdad, no cada N segundos: así el
+    // sonido va sincronizado con la animación por construcción.
+    if (moving.stepped) this.audio.footstep(moving.surface);
   }
 
   dispose() {

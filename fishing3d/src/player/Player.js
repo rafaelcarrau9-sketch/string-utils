@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { clamp, damp, lerp } from '../core/MathUtils.js';
+import { PlayerBody } from './PlayerBody.js';
 
 /**
  * Jugador en primera persona.
@@ -34,11 +35,14 @@ export class Player {
     this.bobPhase = 0;
     this.bobAmount = 0;
     this.surface = 'tierra';
-    this.mode = 'first';          // 'first' | 'third' (preparado, no expuesto aún)
+    this.mode = 'first';          // 'first' | 'third'
+    this.onModeChange = null;     // lo engancha Game para ocultar la caña de mano
     this.thirdPersonDistance = 3.4;
 
     this.platform = null;            // barca u otra plataforma móvil
-    this.body = this._buildBody();
+    this.crouch = 0;
+    this.bodyRig = new PlayerBody();
+    this.body = this.bodyRig.root;
     this.rig.add(this.body);
 
     this._raycaster = new THREE.Raycaster();
@@ -51,39 +55,6 @@ export class Player {
   }
 
   get position() { return this.rig.position; }
-
-  /** Figura del pescador: sólo se ve en tercera persona. */
-  _buildBody() {
-    const body = new THREE.Group();
-    const coat = new THREE.MeshStandardMaterial({ color: 0x2c4a5e, roughness: 0.85 });
-    const skin = new THREE.MeshStandardMaterial({ color: 0xd7ab84, roughness: 0.75 });
-    const hat = new THREE.MeshStandardMaterial({ color: 0x7a6a3c, roughness: 0.9 });
-
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.58, 4, 10), coat);
-    torso.position.y = 1.05;
-    body.add(torso);
-    [-1, 1].forEach((side) => {
-      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.6, 4, 8), coat);
-      leg.position.set(side * 0.13, 0.42, 0);
-      body.add(leg);
-      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.5, 4, 8), coat);
-      arm.position.set(side * 0.31, 1.05, 0.05);
-      body.add(arm);
-    });
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), skin);
-    head.position.y = 1.55;
-    body.add(head);
-    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.03, 12), hat);
-    brim.position.y = 1.63;
-    body.add(brim);
-    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), hat);
-    crown.position.y = 1.63;
-    body.add(crown);
-
-    body.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-    body.visible = false;
-    return body;
-  }
 
   /** Sube o baja de una plataforma móvil (la barca). */
   setPlatform(platform) {
@@ -117,6 +88,8 @@ export class Player {
     const forwardInput = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
     const strafeInput = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
     const running = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+    const crouching = input.isDown('ControlLeft') || input.isDown('KeyC');
+    this.crouch = damp(this.crouch, crouching ? 1 : 0, 9, dt);
 
     this._forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)).multiplyScalar(-1);
     this._right.set(this._forward.z, 0, -this._forward.x);
@@ -129,7 +102,8 @@ export class Player {
     const depth = this.terrain.depthAt(this.rig.position.x, this.rig.position.z);
     // Andar dentro del agua cuesta; a partir de cierto calado no se avanza.
     const wadeFactor = depth > 0 ? clamp(1 - depth / WADE_DEPTH, 0.25, 1) : 1;
-    const speed = (running ? RUN_SPEED : WALK_SPEED) * wadeFactor;
+    // Agachado se anda despacio, pero se pesca sin espantar tanto al pez.
+    const speed = (running ? RUN_SPEED : WALK_SPEED) * wadeFactor * (1 - this.crouch * 0.55);
 
     this.velocity.x = damp(this.velocity.x, wish.x * speed, 12, dt);
     this.velocity.z = damp(this.velocity.z, wish.z * speed, 12, dt);
@@ -171,14 +145,49 @@ export class Player {
 
     this.rig.rotation.y = this.yaw;
     this.camera.rotation.set(this.pitch, 0, bobX * 0.35 + this.lean);
+
+    let back = 0;
+    if (this.mode === 'third') {
+      // La cámara se acerca al jugador si el terreno se interpone, en vez de
+      // meterse dentro de la ladera.
+      back = this.thirdPersonDistance;
+      const behind = new THREE.Vector3(0, EYE_HEIGHT, back).applyAxisAngle(
+        new THREE.Vector3(0, 1, 0), this.yaw
+      ).add(this.rig.position);
+      const ground = this.terrain.heightAt(behind.x, behind.z) + 0.6;
+      if (behind.y < ground) {
+        const room = clamp((behind.y - this.rig.position.y) / Math.max(0.01, ground - this.rig.position.y), 0.25, 1);
+        back = this.thirdPersonDistance * room;
+      }
+      this.thirdPersonCurrent = damp(this.thirdPersonCurrent ?? back, back, 8, dt);
+      back = this.thirdPersonCurrent;
+    }
+
     this.camera.position.set(
       this.mode === 'third' ? 0 : bobX * 0.5,
-      EYE_HEIGHT + bobY,
-      this.mode === 'third' ? this.thirdPersonDistance : 0
+      EYE_HEIGHT - this.crouch * 0.45 + bobY,
+      back
     );
 
+    // El cuerpo se anima siempre: en primera persona está oculto, pero al
+    // cambiar de cámara ya está en la pose correcta en vez de arrancar de cero.
+    this.stepped = this.bodyRig.update(dt, {
+      speed: horizontalSpeed,
+      running,
+      turnRate: turnDelta / Math.max(dt, 1e-3),
+      crouch: this.crouch,
+      holdingRod: this.holdingRod ?? 1,
+      onFoot: !this.platform
+    });
+
     this.lookDelta.multiplyScalar(0.82);
-    return { speed: horizontalSpeed, surface: this.surface, depth: Math.max(0, depth) };
+    return {
+      speed: horizontalSpeed,
+      surface: this.surface,
+      depth: Math.max(0, depth),
+      stepped: this.stepped,
+      crouch: this.crouch
+    };
   }
 
   /** Embarcado: rema en vez de andar, y la vista sigue al asiento. */
@@ -196,14 +205,22 @@ export class Player {
       this.mode === 'third' ? this.thirdPersonDistance : 0
     );
     this.surface = 'barca';
+    this.bodyRig.update(dt, {
+      speed: 0, running: false, turnRate: 0,
+      crouch: 0.55, holdingRod: this.holdingRod ?? 1, onFoot: false
+    });
     this.lookDelta.multiplyScalar(0.82);
-    return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0 };
+    return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0, stepped: null, crouch: 0.55 };
   }
 
   /** Alterna primera y tercera persona; el cuerpo sólo se ve en la segunda. */
   setCameraMode(mode) {
     this.mode = mode === 'third' ? 'third' : 'first';
-    this.body.visible = this.mode === 'third';
+    this.bodyRig.setVisible(this.mode === 'third');
+    // El modelo de primera persona y el cuerpo no pueden verse a la vez. Vivía
+    // en el manejador de teclas, así que cualquier otra vía de cambio de cámara
+    // dejaba las dos cañas en pantalla.
+    this.onModeChange?.(this.mode);
   }
 
   teleport(position) {

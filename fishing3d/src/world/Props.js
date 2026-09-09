@@ -28,6 +28,8 @@ export class Props {
     this.boatAnchor = this.shorePoint(Math.PI * 0.62, -0.9);
     this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
     this._buildCamp(Math.PI * -0.35, wood, textures, preset);
+    this._buildSign(wood, preset);
+    this._buildBucket(preset);
   }
 
   /** Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`). */
@@ -150,6 +152,48 @@ export class Props {
     this.group.add(camp);
     this.camp = camp;
     this.fishingSpots.push({ name: 'Cala del campamento', position: spot.clone() });
+  }
+
+  /** Cartel a la entrada del muelle: identifica la zona. */
+  _buildSign(wood, preset) {
+    const sign = new THREE.Group();
+    const base = this.dockObject.localToWorld(new THREE.Vector3(-1.6, 0, -1.2));
+    sign.position.set(base.x, this.terrain.heightAt(base.x, base.z), base.z);
+    sign.rotation.y = this.dockObject.rotation.y + Math.PI;
+
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.06, 1.5, 6), wood);
+    post.position.y = 0.75;
+    post.castShadow = preset.shadows;
+    sign.add(post);
+    const board = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.42, 0.05), wood);
+    board.position.y = 1.35;
+    board.castShadow = preset.shadows;
+    sign.add(board);
+
+    this.group.add(sign);
+    this.sign = sign;
+  }
+
+  /** Cubo de cebo junto al fuego: se puede examinar. */
+  _buildBucket(preset) {
+    const metal = new THREE.MeshStandardMaterial({ color: 0x7d838a, roughness: 0.5, metalness: 0.6 });
+    const bucket = new THREE.Group();
+    const spot = this.camp.position;
+    bucket.position.set(spot.x + 1.1, this.terrain.heightAt(spot.x + 1.1, spot.z - 0.7) + 0.16, spot.z - 0.7);
+
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.13, 0.3, 12, 1, true), metal);
+    body.castShadow = preset.shadows;
+    bucket.add(body);
+    const bottom = new THREE.Mesh(new THREE.CircleGeometry(0.13, 12), metal);
+    bottom.rotation.x = -Math.PI / 2;
+    bottom.position.y = -0.15;
+    bucket.add(bottom);
+    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.008, 5, 12, Math.PI), metal);
+    handle.position.y = 0.15;
+    bucket.add(handle);
+
+    this.group.add(bucket);
+    this.bucket = bucket;
   }
 
   dispose() {

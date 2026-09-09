@@ -149,8 +149,15 @@ function mergeGeometries(geometries) {
   return result;
 }
 
-/** Dos planos cruzados en X, con el pivote en la base. Para hierba y follaje. */
-function crossPlanes(width, height) {
+/**
+ * Dos planos cruzados en X, con el pivote en la base. Para hierba y follaje.
+ *
+ * `upBias` inclina las normales hacia arriba. Sin esto los planos son
+ * verticales, su normal es horizontal y con el sol alto el producto N·L vale
+ * casi cero: las copas salen negras a mediodía. Las hojas reales no son un
+ * plano, así que fingir una normal más redonda es lo correcto, no un truco.
+ */
+function crossPlanes(width, height, upBias = 0) {
   const a = new THREE.PlaneGeometry(width, height, 1, 2);
   a.translate(0, height / 2, 0);
   const b = a.clone();
@@ -158,6 +165,18 @@ function crossPlanes(width, height) {
   const merged = mergeGeometries([a, b]);
   a.dispose();
   b.dispose();
+  if (upBias > 0) {
+    const normals = merged.attributes.normal;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < normals.count; i++) {
+      v.fromBufferAttribute(normals, i);
+      v.multiplyScalar(1 - upBias);
+      v.y += upBias;
+      v.normalize();
+      normals.setXYZ(i, v.x, v.y, v.z);
+    }
+    normals.needsUpdate = true;
+  }
   return merged;
 }
 
@@ -805,7 +824,7 @@ class TextureLibrary {
       const y = size / 2 + Math.sin(a) * r;
       const rad = size * (0.04 + rng() * 0.07);
       const shade = 0.45 + rng() * 0.55;
-      ctx.fillStyle = `rgba(${Math.round(48 * shade)},${Math.round(84 * shade)},${Math.round(34 * shade)},0.95)`;
+      ctx.fillStyle = `rgba(${Math.round(88 * shade)},${Math.round(134 * shade)},${Math.round(60 * shade)},0.95)`;
       ctx.beginPath();
       ctx.ellipse(x, y, rad, rad * 0.72, a, 0, Math.PI * 2);
       ctx.fill();
@@ -1087,6 +1106,17 @@ class WaterBody {
     this.rippleGroup.position.y = level + 0.02;
     this._rippleGeometry = new THREE.RingGeometry(0.06, 0.1, 24);
     this._rippleGeometry.rotateX(-Math.PI / 2);
+    // Reserva fija de anillos. Antes cada salpicadura creaba y destruía su
+    // material: cuarenta ondas eran cuarenta materiales y cuarenta programas.
+    this._pool = [];
+    for (let i = 0; i < 48; i++) {
+      const ring = new THREE.Mesh(this._rippleGeometry, new THREE.MeshBasicMaterial({
+        color: 0xdff0f5, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false
+      }));
+      ring.visible = false;
+      this.rippleGroup.add(ring);
+      this._pool.push(ring);
+    }
   }
 
   /**
@@ -1146,22 +1176,23 @@ class WaterBody {
 
   /** Onda expansiva en la superficie: caída del señuelo, pez que colea... */
   splash(position, strength = 1) {
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xdff0f5, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false
-    });
-    const ring = new THREE.Mesh(this._rippleGeometry, material);
+    // Se recicla el anillo más viejo si no queda ninguno libre.
+    let ring = this._pool.find((r) => !r.visible);
+    if (!ring) { ring = this.ripples[0]; this._retire(ring); ring = this._pool.find((r) => !r.visible); }
+    if (!ring) return;
     ring.position.set(position.x, 0, position.z);
+    ring.scale.setScalar(1);
+    ring.visible = true;
+    ring.material.opacity = 0.5;
     ring.userData = { age: 0, strength: clamp(strength, 0.2, 3) };
-    this.rippleGroup.add(ring);
     this.ripples.push(ring);
-    if (this.ripples.length > 40) this._retire(this.ripples[0]);
   }
 
   _retire(ring) {
     const i = this.ripples.indexOf(ring);
     if (i >= 0) this.ripples.splice(i, 1);
-    this.rippleGroup.remove(ring);
-    ring.material.dispose();
+    ring.visible = false;
+    ring.material.opacity = 0;
   }
 
   update(dt, { sunDirection, sunColor, waterColor, choppiness = 1 } = {}) {
@@ -1193,6 +1224,7 @@ class WaterBody {
   }
 
   dispose() {
+    this._pool.forEach((r) => r.material.dispose());
     this.water.geometry.dispose();
     this.water.material.dispose();
     this._rippleGeometry.dispose();
@@ -1209,6 +1241,8 @@ class WaterBody {
  */
 
 const SKY_SCALE = 3000;
+// Cuánto se atenúa el cielo para poder exponer el resto de la escena.
+const SKY_DIM = 0.40;
 
 class SkyDome {
   constructor(scene, textures, preset) {
@@ -1216,6 +1250,22 @@ class SkyDome {
 
     this.sky = new Sky();
     this.sky.scale.setScalar(SKY_SCALE);
+    // El cielo de Preetham emite muchísima más luz que cualquier superficie del
+    // lago. Con una sola exposición para todo había que bajarla tanto que el
+    // resto de la escena salía casi negro: el arbolado era una silueta y la
+    // orilla, una mancha marrón. Se atenúa el cielo en su propio shader y se
+    // devuelve la exposición del render a un valor normal, así que el cielo
+    // sigue igual de luminoso y todo lo demás recibe la luz que le toca.
+    // Y con el sol bajo el horizonte, Preetham devuelve un pardo sucio en vez de
+    // una noche: se mezcla con el azul nocturno de la paleta.
+    this.sky.material.uniforms.uNight = { value: 0 };
+    this.sky.material.uniforms.uNightColor = { value: new THREE.Color(0x0a1224) };
+    this.sky.material.fragmentShader = this.sky.material.fragmentShader
+      .replace('varying vec3 vSunDirection;',
+        'varying vec3 vSunDirection;\nuniform float uNight;\nuniform vec3 uNightColor;')
+      .replace('gl_FragColor = vec4( retColor, 1.0 );',
+        `gl_FragColor = vec4( mix( retColor * ${SKY_DIM.toFixed(3)}, uNightColor, uNight ), 1.0 );`);
+    this.sky.material.needsUpdate = true;
     this.sky.material.uniforms.turbidity.value = 2.2;
     this.sky.material.uniforms.rayleigh.value = 3.1;
     this.sky.material.uniforms.mieCoefficient.value = 0.0028;
@@ -1330,12 +1380,19 @@ class SkyDome {
     this.ambient.color.copy(time.ambientColor);
     this.ambient.intensity = lerp(1.2, 1.15, daylight);
 
+    this.sky.material.uniforms.uNight.value = time.nightFactor * 0.88;
+    this.sky.material.uniforms.uNightColor.value.copy(time.skyColor);
+
     this.stars.material.opacity = time.nightFactor * (1 - weather.cloudiness * 0.85);
     this.stars.visible = this.stars.material.opacity > 0.02;
     this.stars.rotation.y += dt * 0.0035;
 
     this.cloudLayers.forEach((layer, i) => {
-      layer.material.opacity = clamp(weather.cloudiness * 0.85, 0, 0.9) * (i === 0 ? 1 : 0.6);
+      // Con el cielo despejado no debe quedar ni un velo: antes, una nubosidad
+      // residual del 10 % se veía de noche como una capa de suciedad sobre las
+      // estrellas. Y de noche las nubes no se iluminan solas.
+      layer.material.opacity = clamp((weather.cloudiness - 0.16) * 1.15, 0, 0.9)
+        * (i === 0 ? 1 : 0.6) * lerp(0.3, 1, daylight);
       layer.visible = layer.material.opacity > 0.02;
       layer.material.color.copy(time.skyColor).lerp(new THREE.Color(0xffffff), 0.55 - weather.cloudiness * 0.4);
       layer.material.map.offset.x += dt * weather.windSpeed * 0.0016 * (i + 1);
@@ -1885,7 +1942,7 @@ class Trees {
       conifer: new THREE.InstancedMesh(canopyCone(rng), coniferMaterial, count)
     };
 
-    const billboardGeometry = crossPlanes(5.6, 6.4);
+    const billboardGeometry = crossPlanes(5.6, 6.4, 0.62);
     const billboardMaterial = new THREE.MeshStandardMaterial({
       map: textures.foliage(), alphaTest: 0.42, side: THREE.DoubleSide, roughness: 0.9
     });
@@ -1967,6 +2024,126 @@ class Trees {
       if (!m.material.userData.shared) m.material.dispose();
     });
     this.scene.remove(this.group);
+  }
+}
+
+/* ===== src/world/InteractionSystem.js ===== */
+/**
+ * Interacción por mirada.
+ *
+ * Los objetos se registran con su malla, un alcance y una acción. Cada
+ * fotograma se busca cuál está mirando el jugador: primero por rayo desde la
+ * cámara, y si no acierta de lleno, por ángulo respecto a la vista, para que
+ * no haya que apuntar con precisión de francotirador.
+ *
+ * El elegido se resalta —sube su emisivo— y publica su rótulo. Así el jugador
+ * ve a qué va a afectar el botón antes de pulsarlo, en vez de adivinarlo por
+ * cercanía.
+ */
+
+const MAX_ANGLE = Math.cos(THREE.MathUtils.degToRad(32));
+
+class InteractionSystem {
+  constructor(camera) {
+    this.camera = camera;
+    this.targets = [];
+    this.current = null;
+    this.raycaster = new THREE.Raycaster();
+    this._origin = new THREE.Vector3();
+    this._forward = new THREE.Vector3();
+    this._toTarget = new THREE.Vector3();
+    this._point = new THREE.Vector3();
+  }
+
+  /**
+   * @param target.object   malla o grupo al que mirar
+   * @param target.anchor   punto alternativo si no hay malla
+   * @param target.range    distancia máxima en metros
+   * @param target.label    texto del aviso; puede ser función
+   * @param target.action   qué ocurre al interactuar
+   * @param target.enabled  condición opcional
+   */
+  register(target) {
+    this.targets.push({ range: 3.5, ...target });
+    return () => this.unregister(target);
+  }
+
+  unregister(target) {
+    const i = this.targets.findIndex((t) => t === target || t.object === target);
+    if (i >= 0) this.targets.splice(i, 1);
+  }
+
+  clear() {
+    this._highlight(null);
+    this.targets.length = 0;
+  }
+
+  _anchorOf(target, out) {
+    if (target.anchor) return out.copy(target.anchor);
+    if (target.object) return target.object.getWorldPosition(out);
+    return out.set(0, 0, 0);
+  }
+
+  /** Resalta el objeto apuntado y apaga el anterior. */
+  _highlight(target) {
+    if (this._lit === target) return;
+    const paint = (t, on) => {
+      t?.object?.traverse?.((o) => {
+        if (!o.isMesh || !o.material?.emissive) return;
+        if (on) {
+          o.userData._emissive ??= o.material.emissive.getHex();
+          o.material.emissive.setHex(0x1c3a3a);
+        } else if (o.userData._emissive !== undefined) {
+          o.material.emissive.setHex(o.userData._emissive);
+        }
+      });
+    };
+    paint(this._lit, false);
+    paint(target, true);
+    this._lit = target;
+  }
+
+  update(playerPosition) {
+    this.camera.getWorldPosition(this._origin);
+    this.camera.getWorldDirection(this._forward);
+
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (const target of this.targets) {
+      if (target.enabled && !target.enabled()) continue;
+      this._anchorOf(target, this._point);
+      const distance = playerPosition.distanceTo(this._point);
+      if (distance > target.range) continue;
+
+      this._toTarget.copy(this._point).sub(this._origin);
+      const length = this._toTarget.length();
+      if (length < 1e-3) continue;
+      this._toTarget.divideScalar(length);
+      const facing = this._forward.dot(this._toTarget);
+      if (facing < MAX_ANGLE) continue;          // está a la espalda o muy de lado
+
+      // Se prefiere lo que está más centrado en la vista, y a igualdad, lo más cerca.
+      const score = facing * 2 - distance / target.range;
+      if (score > bestScore) { bestScore = score; best = target; }
+    }
+
+    this.current = best;
+    this._highlight(best);
+    return best;
+  }
+
+  get label() {
+    const t = this.current;
+    if (!t) return '';
+    return typeof t.label === 'function' ? t.label() : t.label;
+  }
+
+  /** Ejecuta la acción del objeto apuntado. Devuelve si hizo algo. */
+  interact() {
+    if (!this.current) return false;
+    this.current.action?.();
+    return true;
   }
 }
 
@@ -2217,6 +2394,8 @@ class Props {
     this.boatAnchor = this.shorePoint(Math.PI * 0.62, -0.9);
     this.fishingSpots.push({ name: 'La barca', position: this.boatAnchor.clone() });
     this._buildCamp(Math.PI * -0.35, wood, textures, preset);
+    this._buildSign(wood, preset);
+    this._buildBucket(preset);
   }
 
   /** Punto de la orilla en un ángulo dado (altura ≈ `targetHeight`). */
@@ -2339,6 +2518,48 @@ class Props {
     this.group.add(camp);
     this.camp = camp;
     this.fishingSpots.push({ name: 'Cala del campamento', position: spot.clone() });
+  }
+
+  /** Cartel a la entrada del muelle: identifica la zona. */
+  _buildSign(wood, preset) {
+    const sign = new THREE.Group();
+    const base = this.dockObject.localToWorld(new THREE.Vector3(-1.6, 0, -1.2));
+    sign.position.set(base.x, this.terrain.heightAt(base.x, base.z), base.z);
+    sign.rotation.y = this.dockObject.rotation.y + Math.PI;
+
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.06, 1.5, 6), wood);
+    post.position.y = 0.75;
+    post.castShadow = preset.shadows;
+    sign.add(post);
+    const board = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.42, 0.05), wood);
+    board.position.y = 1.35;
+    board.castShadow = preset.shadows;
+    sign.add(board);
+
+    this.group.add(sign);
+    this.sign = sign;
+  }
+
+  /** Cubo de cebo junto al fuego: se puede examinar. */
+  _buildBucket(preset) {
+    const metal = new THREE.MeshStandardMaterial({ color: 0x7d838a, roughness: 0.5, metalness: 0.6 });
+    const bucket = new THREE.Group();
+    const spot = this.camp.position;
+    bucket.position.set(spot.x + 1.1, this.terrain.heightAt(spot.x + 1.1, spot.z - 0.7) + 0.16, spot.z - 0.7);
+
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.13, 0.3, 12, 1, true), metal);
+    body.castShadow = preset.shadows;
+    bucket.add(body);
+    const bottom = new THREE.Mesh(new THREE.CircleGeometry(0.13, 12), metal);
+    bottom.rotation.x = -Math.PI / 2;
+    bottom.position.y = -0.15;
+    bucket.add(bottom);
+    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.008, 5, 12, Math.PI), metal);
+    handle.position.y = 0.15;
+    bucket.add(handle);
+
+    this.group.add(bucket);
+    this.bucket = bucket;
   }
 
   dispose() {
@@ -2541,7 +2762,8 @@ class TimeOfDay {
 
   /** 0 de día, 1 de noche cerrada. */
   get nightFactor() {
-    return 1 - smoothstep(-0.12, 0.16, Math.sin(this.elevation));
+    // Banda ancha a propósito: el crepúsculo dura, no se apaga de golpe.
+    return 1 - smoothstep(-0.26, 0.22, Math.sin(this.elevation));
   }
 
   /** Los peces comen al amanecer y al atardecer: 1 en la mejor franja. */
@@ -2560,8 +2782,11 @@ class TimeOfDay {
   }
 
   _update() {
-    // 6h amanece, 12h cenit, 18h anochece. Fuera de esa franja el sol está bajo el horizonte.
-    const dayAngle = ((this.hour - 6) / 12) * Math.PI;
+    // 6h amanece, 13:15 cenit, 20:30 anochece. Con un día de sólo doce horas el
+    // sol se ponía a las 18:00 y a las 19:00 era noche cerrada — justo la franja
+    // en la que los peces comen mejor. Un día más largo deja un ocaso de verdad
+    // en la mejor hora de pesca.
+    const dayAngle = ((this.hour - 6) / 14.5) * Math.PI;
     this.elevation = Math.sin(dayAngle) * MAX_ELEVATION;
     const azimuth = THREE.MathUtils.degToRad(-40) + (this.hour / 24) * Math.PI * 2;
 
@@ -4079,7 +4304,8 @@ const RodPose = {
   CHARGE: 'charge',
   CAST: 'cast',
   FISH: 'fish',
-  FIGHT: 'fight'
+  FIGHT: 'fight',
+  STOWED: 'stowed'
 };
 
 // Posición de la mano y ángulos base de cada pose.
@@ -4088,7 +4314,9 @@ const POSES = {
   charge: { pos: [0.50, -0.26, -0.30], rot: [0.44, -0.60, 0.40], lift: 0 },
   cast:   { pos: [0.38, -0.28, -0.44], rot: [0.17, -0.26, 0.17], lift: 0 },
   fish:   { pos: [0.38, -0.28, -0.44], rot: [0.17, -0.26, 0.17], lift: 0 },
-  fight:  { pos: [0.30, -0.20, -0.38], rot: [0.46, -0.18, 0.24], lift: 1 }
+  fight:  { pos: [0.30, -0.20, -0.38], rot: [0.46, -0.18, 0.24], lift: 1 },
+  // Guardada: baja y atrás, apoyada en el hombro y fuera del encuadre.
+  stowed: { pos: [0.52, -0.72, -0.10], rot: [-0.75, -0.55, 0.55], lift: 0 }
 };
 
 const CAST_DURATION = 0.42;
@@ -4374,12 +4602,14 @@ class FishingSystem {
     this.power = 0;              // carga del lanzamiento 0..1
     this.charging = false;
     this.lineOut = 0;
+    this._slipping = false;
     this.tension = 0;
     this.dragSetting = 0.45;     // 0..1 del freno máximo
     this.slackTimer = 0;
     this.hooked = null;
     this.biteTimer = 0;
     this.retrieveInput = 0;
+    this.rodStowed = false;
     this.sidePressure = 0;      // -1 izquierda … +1 derecha, desde dónde apunta la caña
     this.counterPressure = 0;   // >0 si esa presión va contra la carrera del pez
     this.message = null;
@@ -4405,10 +4635,27 @@ class FishingSystem {
   get stats() { return this.equipment.stats; }
   get tensionRatio() { return clamp(this.tension / this.stats.lineStrength, 0, 1.4); }
   get dragForce() { return this.dragSetting * this.stats.maxDrag; }
-  get canCast() { return this.state === FishingState.IDLE; }
+  get canCast() { return this.state === FishingState.IDLE && !this.rodStowed; }
+
+  /** Guardar o sacar la caña. No se puede con el aparejo fuera. */
+  toggleRod() {
+    if (this.state !== FishingState.IDLE) {
+      this._say('Recoge el sedal antes de guardar la caña', 'bad');
+      return false;
+    }
+    this.rodStowed = !this.rodStowed;
+    this._say(this.rodStowed ? 'Caña guardada' : 'Caña lista');
+    return true;
+  }
 
   // ---------------------------------------------------------------- entrada
   beginCast() {
+    // Con la caña guardada, el primer clic la saca: una sola acción para el
+    // jugador, aunque por dentro sean dos estados.
+    if (this.rodStowed && this.state === FishingState.IDLE) {
+      this.rodStowed = false;
+      return;
+    }
     if (!this.canCast) return;
     this.state = FishingState.AIMING;
     this.charging = true;
@@ -4458,6 +4705,9 @@ class FishingSystem {
         // línea pasa a colgar directamente de él.
         this.lure.stow();
         this.fight = {
+          lastDistance: this._rodTip.distanceTo(fish.position),
+          hookHold: 1,
+          warned: false,
           stamina: 1,
           burst: 0,
           burstTimer: 1 + Math.random() * 2,
@@ -4571,7 +4821,7 @@ class FishingSystem {
       case FishingState.FISHING:
       case FishingState.BITE: return RodPose.FISH;
       case FishingState.FIGHTING: return RodPose.FIGHT;
-      default: return RodPose.IDLE;
+      default: return this.rodStowed ? RodPose.STOWED : RodPose.IDLE;
     }
   }
 
@@ -4717,9 +4967,23 @@ class FishingSystem {
 
     // --- carrete y línea ---------------------------------------------------
     const distance = this._rodTip.distanceTo(fish.position);
+    // Red de seguridad: ni el pez más rápido ni el jugador corriendo separan la
+    // puntera del pez más de esto en un fotograma. Si la distancia da un salto
+    // mayor, no ha habido un tirón: ha saltado la geometría (un
+    // teletransporte, una pestaña que vuelve del segundo plano). Se reajusta el
+    // hilo en vez de romperlo por un pico que el jugador no ha provocado.
+    if (distance - f.lastDistance > 12 * dt + 0.35) {
+      this.lineOut = clamp(distance + 0.15, 0.8, stats.capacity - 1);
+      this.tension = Math.min(this.tension, this.dragForce);
+    }
+    f.lastDistance = distance;
     if (this.retrieveInput > 0.05) {
-      // Cuanta más tensión, más cuesta recuperar hilo.
-      const effort = stats.retrieveSpeed * this.retrieveInput / (1 + this.tensionRatio * 2.2);
+      // Cuanta más tensión, más cuesta recuperar hilo. Y mientras el freno
+      // patina no se recupera nada: el carrete gira en vacío contra el
+      // embrague. Es lo que impide ganar la pelea a base de manivela.
+      const effort = this._slipping
+        ? 0
+        : stats.retrieveSpeed * this.retrieveInput / (1 + this.tensionRatio * 2.2);
       this.lineOut = Math.max(0.8, this.lineOut - effort * dt);
     }
 
@@ -4744,13 +5008,36 @@ class FishingSystem {
     const load = Math.max(0, stretch) * stiffness
       + power * (0.55 + Math.abs(this.sidePressure) * 0.07);
     const slipping = load > this.dragForce;
+    this._slipping = slipping;
     const shock = slipping ? Math.min(load - this.dragForce, load * 0.2) * (1 - stats.elasticity * 0.5) : 0;
     this.tension = damp(this.tension, Math.min(load, this.dragForce + shock), 11, dt);
 
     if (slipping) {
+      // El freno cede hilo, pero sólo el que el pez se está llevando de
+      // verdad: si soltase más que la distancia que gana, fabricaría holgura
+      // de la nada y el pez se soltaría solo después de cada carrera.
       const slip = (load - this.dragForce) * 0.4;
-      this.lineOut = Math.min(stats.capacity, this.lineOut + slip * dt);
+      this.lineOut = Math.min(
+        stats.capacity,
+        Math.min(this.lineOut + slip * dt, distance + 0.25)
+      );
       this.events?.onDragSlip?.(slip);
+    }
+
+    // El anzuelo también se cansa. Cuanto más grande es el pez para el aparejo
+    // que lleva el jugador, antes abre su propio agujero y se suelta. Es lo
+    // que le pone final a las peleas imposibles: con equipo de iniciación un
+    // siluro de récord no rompe el hilo — se suelta — y eso es exactamente la
+    // razón para ir a comprar una caña mejor.
+    const overmatch = clamp(power / Math.max(0.6, this.dragForce), 0, 4);
+    f.hookHold = clamp(f.hookHold - dt * 0.012 * overmatch * (0.4 + this.tensionRatio), 0, 1);
+    if (!f.warned && f.hookHold < 0.35) {
+      f.warned = true;
+      this._say('El anzuelo empieza a ceder: cóbralo ya', 'bad');
+    }
+    if (f.hookHold <= 0) {
+      this._loseFish(fish, 'El anzuelo ha abierto su agujero y se ha soltado');
+      return;
     }
 
     // El pez se cansa por la tensión sostenida, y bastante más rápido si se
@@ -4831,17 +5118,26 @@ class FishingSystem {
     this.camera.add(mesh);
     mesh.visible = true;
     const lengthM = fish.length / 100;
-    // Por encima del centro, para que la ficha de captura no lo tape.
-    mesh.position.set(0, 0.28 + lengthM * 0.06, -(0.3 + lengthM * 0.72));
+    // Encuadre a partir del campo de visión real: colocarlo con números fijos
+    // dejaba a los ejemplares grandes cortados por el borde de la pantalla.
+    const dist = 0.42 + lengthM * 0.85;
+    const halfHeight = dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5);
+    // Por encima del centro, para que la ficha de captura no lo tape, pero
+    // dentro del cuadro.
+    mesh.position.set(0, halfHeight * 0.52, -dist);
     mesh.rotation.set(0, Math.PI / 2, 0);
 
     // Luz propia: da igual que sea de noche o que el pez esté a contraluz.
     if (!this._trophyLight) {
       this._trophyLight = new THREE.PointLight(0xfff0d8, 0, 6, 2);
-      this._trophyLight.position.set(0.45, 0.5, 0.35);
       this.camera.add(this._trophyLight);
     }
-    this._trophyLight.intensity = 3.2;
+    // La luz se coloca junto al pez, no junto a la cámara: a metro y medio, con
+    // caída cuadrática, apenas le llegaba nada y el ejemplar salía en sombra.
+    this._trophyLight.position.set(dist * 0.5, mesh.position.y + 0.35, -dist * 0.55);
+    // Con la exposición del render en su valor normal, 3.2 quemaba el pez a
+    // blanco y se perdían los colores de la especie.
+    this._trophyLight.intensity = 1.1;
   }
 
   _hideTrophy() {
@@ -4909,6 +5205,7 @@ class FishingSystem {
         name: this.hooked.displayName,
         weight: this.hooked.weight,
         stamina: this.fight?.stamina ?? 1,
+        hookHold: this.fight?.hookHold ?? 1,
         sidePressure: this.sidePressure,
         counterPressure: this.counterPressure
       } : null,
@@ -4920,6 +5217,241 @@ class FishingSystem {
     this.rod.dispose();
     this.line.dispose();
     this.lure.dispose();
+  }
+}
+
+/* ===== src/player/PlayerBody.js ===== */
+/**
+ * Cuerpo del pescador, animado por código.
+ *
+ * No hay mallas con esqueleto ni clips: el cuerpo se monta como una jerarquía
+ * de articulaciones —caderas, torso, cuello, hombros, codos, muslos, rodillas—
+ * y cada fotograma se calculan sus ángulos a partir del estado del jugador.
+ * Es animación procedural: no hay transiciones que mezclar porque nunca hay un
+ * salto entre clips, sólo un ciclo continuo que cambia de amplitud y ritmo.
+ *
+ * Capas, de abajo a arriba:
+ *   1. Ciclo de marcha (piernas y brazos, según la velocidad real).
+ *   2. Postura (agachado, inclinación al girar, peso al frenar).
+ *   3. Respiración y microbalanceo, para que el reposo no sea una estatua.
+ *   4. Pose de los brazos según lo que hacen las manos (sujetar la caña).
+ */
+
+const SKIN = 0xd7ab84;
+const COAT = 0x2c4a5e;
+const TROUSERS = 0x3a4048;
+const HAT = 0x7a6a3c;
+
+function limb(material, radius, length) {
+  const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(radius, length, 4, 8), material);
+  mesh.position.y = -length / 2 - radius * 0.5;   // cuelga de la articulación
+  mesh.castShadow = true;
+  return mesh;
+}
+
+class PlayerBody {
+  constructor() {
+    this.root = new THREE.Group();
+    this.root.visible = false;
+
+    const skin = new THREE.MeshStandardMaterial({ color: SKIN, roughness: 0.75 });
+    const coat = new THREE.MeshStandardMaterial({ color: COAT, roughness: 0.86 });
+    const trousers = new THREE.MeshStandardMaterial({ color: TROUSERS, roughness: 0.9 });
+    const hat = new THREE.MeshStandardMaterial({ color: HAT, roughness: 0.92 });
+    this.materials = [skin, coat, trousers, hat];
+
+    // --- caderas y torso ---------------------------------------------
+    this.hips = new THREE.Group();
+    this.hips.position.y = 0.92;
+    this.root.add(this.hips);
+
+    this.torso = new THREE.Group();
+    this.hips.add(this.torso);
+    const chest = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.42, 4, 10), coat);
+    chest.position.y = 0.26;
+    chest.castShadow = true;
+    this.torso.add(chest);
+    this.chest = chest;
+
+    // --- cuello y cabeza ----------------------------------------------
+    this.neck = new THREE.Group();
+    this.neck.position.y = 0.55;
+    this.torso.add(this.neck);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.135, 14, 12), skin);
+    head.castShadow = true;
+    this.neck.add(head);
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.022, 14), hat);
+    brim.position.y = 0.075;
+    this.neck.add(brim);
+    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.128, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), hat);
+    crown.position.y = 0.078;
+    this.neck.add(crown);
+
+    // --- brazos --------------------------------------------------------
+    this.arms = {};
+    for (const side of ['L', 'R']) {
+      const sign = side === 'L' ? -1 : 1;
+      const shoulder = new THREE.Group();
+      shoulder.position.set(sign * 0.23, 0.44, 0);
+      this.torso.add(shoulder);
+      shoulder.add(limb(coat, 0.055, 0.26));
+
+      const elbow = new THREE.Group();
+      elbow.position.y = -0.33;
+      shoulder.add(elbow);
+      elbow.add(limb(skin, 0.048, 0.24));
+
+      this.arms[side] = { shoulder, elbow };
+    }
+
+    // --- caña en la mano derecha ---------------------------------------
+    // En tercera persona el modelo de primera persona se oculta, así que sin
+    // esto el pescador aparecía haciendo el gesto de sujetar la caña con las
+    // manos vacías.
+    this.heldRod = new THREE.Group();
+    this.heldRod.position.set(0, -0.3, 0.02);       // en el puño
+    this.heldRod.rotation.set(2.15, 0, -0.25);      // vertical, como se lleva al andar
+    const rodMat = new THREE.MeshStandardMaterial({ color: 0x23272c, roughness: 0.45 });
+    const blank = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.017, 2.15, 6), rodMat);
+    blank.position.y = 1.0;
+    blank.castShadow = true;
+    this.heldRod.add(blank);
+    const grip = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.021, 0.019, 0.22, 8),
+      new THREE.MeshStandardMaterial({ color: 0xb08b52, roughness: 0.85 })
+    );
+    grip.position.y = -0.06;
+    this.heldRod.add(grip);
+    const spool = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.045, 0.045, 0.05, 10),
+      new THREE.MeshStandardMaterial({ color: 0x8d939a, roughness: 0.4, metalness: 0.5 })
+    );
+    spool.rotation.z = Math.PI / 2;
+    spool.position.set(0.05, 0.07, 0);
+    this.heldRod.add(spool);
+    this.arms.R.elbow.add(this.heldRod);
+
+    // --- piernas -------------------------------------------------------
+    this.legs = {};
+    for (const side of ['L', 'R']) {
+      const sign = side === 'L' ? -1 : 1;
+      const hip = new THREE.Group();
+      hip.position.set(sign * 0.11, 0, 0);
+      this.hips.add(hip);
+      hip.add(limb(trousers, 0.075, 0.34));
+
+      const knee = new THREE.Group();
+      knee.position.y = -0.42;
+      hip.add(knee);
+      knee.add(limb(trousers, 0.062, 0.32));
+
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.06, 0.24), coat);
+      foot.position.set(0, -0.42, 0.05);
+      foot.castShadow = true;
+      knee.add(foot);
+
+      this.legs[side] = { hip, knee, foot };
+    }
+
+    this.phase = 0;
+    this.stride = 0;
+    this.crouch = 0;
+    this.breath = 0;
+    this.armPose = 0;      // 0 brazos sueltos, 1 sujetando la caña
+    this.lastFootDown = { L: false, R: false };
+  }
+
+  setVisible(value) { this.root.visible = value; }
+
+  /**
+   * @param state.speed      velocidad horizontal en m/s
+   * @param state.running    si va corriendo
+   * @param state.turnRate   giro en rad/s, para que el torso lidere
+   * @param state.crouch     0..1
+   * @param state.holdingRod 0..1, brazos en posición de caña
+   * @param state.onFoot     falso a bordo de la barca: no hay ciclo de marcha
+   * @returns {'L'|'R'|null} pie que acaba de apoyarse, para el sonido de paso
+   */
+  update(dt, state = {}) {
+    const {
+      speed = 0, running = false, turnRate = 0,
+      crouch = 0, holdingRod = 1, onFoot = true
+    } = state;
+
+    this.breath += dt;
+    this.crouch = damp(this.crouch, crouch, 8, dt);
+    this.armPose = damp(this.armPose, holdingRod, 6, dt);
+
+    // --- 1. ciclo de marcha --------------------------------------------
+    // La zancada crece con la velocidad; la cadencia, algo menos, para que
+    // correr sean pasos más largos y no sólo más rápidos.
+    const target = onFoot ? clamp(speed / 3.1, 0, 1.9) : 0;
+    this.stride = damp(this.stride, target, 9, dt);
+    const cadence = onFoot ? (1.9 + Math.sqrt(Math.max(speed, 0)) * 1.5) : 0;
+    this.phase += dt * cadence;
+
+    const swing = Math.sin(this.phase);
+    const swingB = Math.sin(this.phase + Math.PI);
+    const amp = this.stride * 0.52;
+
+    let stepped = null;
+    for (const [side, sign] of [['L', 1], ['R', -1]]) {
+      const s = sign > 0 ? swing : swingB;
+      const leg = this.legs[side];
+      leg.hip.rotation.x = s * amp - this.crouch * 0.5;
+      // La rodilla sólo dobla cuando la pierna va hacia atrás o al elevarla.
+      const bend = Math.max(0, -s) * amp * 1.5 + Math.max(0, Math.sin(this.phase * 2 + (sign > 0 ? 0 : Math.PI))) * amp * 0.35;
+      leg.knee.rotation.x = bend + this.crouch * 1.0;
+      leg.foot.rotation.x = -leg.hip.rotation.x * 0.4 - leg.knee.rotation.x * 0.5;
+
+      // Momento en que el pie toca el suelo: sirve para el sonido de paso.
+      const down = s < -0.85;
+      if (down && !this.lastFootDown[side] && this.stride > 0.25) stepped = side;
+      this.lastFootDown[side] = down;
+    }
+
+    // --- 2. postura -----------------------------------------------------
+    // Las caderas suben y bajan con cada paso y bajan al agacharse.
+    const bounce = Math.abs(Math.sin(this.phase)) * this.stride * 0.035;
+    this.hips.position.y = 0.92 - this.crouch * 0.32 - bounce;
+    this.hips.rotation.y = swing * this.stride * 0.09;      // la pelvis rota al andar
+    this.hips.rotation.z = clamp(-turnRate * 0.12, -0.12, 0.12);
+
+    // El torso contrarresta a la pelvis y se inclina hacia delante al correr.
+    this.torso.rotation.y = -this.hips.rotation.y * 0.7;
+    this.torso.rotation.x = this.stride * (running ? 0.14 : 0.06) + this.crouch * 0.35;
+    this.torso.rotation.z = clamp(turnRate * 0.16, -0.18, 0.18);
+
+    // --- 3. respiración y microbalanceo ---------------------------------
+    const idle = 1 - clamp(this.stride, 0, 1);
+    const breathe = Math.sin(this.breath * 1.25) * 0.02 * idle;
+    this.chest.scale.set(1 + breathe * 0.4, 1 + breathe, 1 + breathe * 0.4);
+    this.torso.rotation.x += breathe * 0.5 + Math.sin(this.breath * 0.43) * 0.012 * idle;
+    this.torso.rotation.z += Math.sin(this.breath * 0.37) * 0.016 * idle;
+    this.neck.rotation.x = -this.torso.rotation.x * 0.6 + Math.sin(this.breath * 0.6) * 0.02 * idle;
+
+    // --- 4. brazos --------------------------------------------------------
+    // Mezcla entre brazos sueltos (balanceo de marcha) y sujetando la caña.
+    const free = 1 - this.armPose;
+    const swingArm = swingB * amp * 0.75 * free;
+    const swingArmB = swing * amp * 0.75 * free;
+
+    // Mano derecha en la empuñadura, izquierda en el carrete.
+    this.arms.R.shoulder.rotation.set(-1.05 * this.armPose + swingArm, -0.32 * this.armPose, -0.3 * this.armPose);
+    this.arms.R.elbow.rotation.set(-1.15 * this.armPose - Math.max(0, swingArm) * 0.6, 0, 0);
+    this.arms.L.shoulder.rotation.set(-0.85 * this.armPose + swingArmB, 0.42 * this.armPose, 0.34 * this.armPose);
+    this.arms.L.elbow.rotation.set(-1.35 * this.armPose - Math.max(0, swingArmB) * 0.6, 0, 0);
+
+    // La caña aparece con la pose: guardada, la mano queda libre.
+    this.heldRod.visible = this.armPose > 0.08;
+    this.heldRod.scale.setScalar(clamp(this.armPose, 0.001, 1));
+
+    return stepped;
+  }
+
+  dispose() {
+    this.root.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
+    this.materials.forEach((m) => m.dispose());
   }
 }
 
@@ -4957,11 +5489,14 @@ class Player {
     this.bobPhase = 0;
     this.bobAmount = 0;
     this.surface = 'tierra';
-    this.mode = 'first';          // 'first' | 'third' (preparado, no expuesto aún)
+    this.mode = 'first';          // 'first' | 'third'
+    this.onModeChange = null;     // lo engancha Game para ocultar la caña de mano
     this.thirdPersonDistance = 3.4;
 
     this.platform = null;            // barca u otra plataforma móvil
-    this.body = this._buildBody();
+    this.crouch = 0;
+    this.bodyRig = new PlayerBody();
+    this.body = this.bodyRig.root;
     this.rig.add(this.body);
 
     this._raycaster = new THREE.Raycaster();
@@ -4974,39 +5509,6 @@ class Player {
   }
 
   get position() { return this.rig.position; }
-
-  /** Figura del pescador: sólo se ve en tercera persona. */
-  _buildBody() {
-    const body = new THREE.Group();
-    const coat = new THREE.MeshStandardMaterial({ color: 0x2c4a5e, roughness: 0.85 });
-    const skin = new THREE.MeshStandardMaterial({ color: 0xd7ab84, roughness: 0.75 });
-    const hat = new THREE.MeshStandardMaterial({ color: 0x7a6a3c, roughness: 0.9 });
-
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.58, 4, 10), coat);
-    torso.position.y = 1.05;
-    body.add(torso);
-    [-1, 1].forEach((side) => {
-      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.6, 4, 8), coat);
-      leg.position.set(side * 0.13, 0.42, 0);
-      body.add(leg);
-      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.5, 4, 8), coat);
-      arm.position.set(side * 0.31, 1.05, 0.05);
-      body.add(arm);
-    });
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), skin);
-    head.position.y = 1.55;
-    body.add(head);
-    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.03, 12), hat);
-    brim.position.y = 1.63;
-    body.add(brim);
-    const crown = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), hat);
-    crown.position.y = 1.63;
-    body.add(crown);
-
-    body.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-    body.visible = false;
-    return body;
-  }
 
   /** Sube o baja de una plataforma móvil (la barca). */
   setPlatform(platform) {
@@ -5040,6 +5542,8 @@ class Player {
     const forwardInput = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
     const strafeInput = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
     const running = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+    const crouching = input.isDown('ControlLeft') || input.isDown('KeyC');
+    this.crouch = damp(this.crouch, crouching ? 1 : 0, 9, dt);
 
     this._forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)).multiplyScalar(-1);
     this._right.set(this._forward.z, 0, -this._forward.x);
@@ -5052,7 +5556,8 @@ class Player {
     const depth = this.terrain.depthAt(this.rig.position.x, this.rig.position.z);
     // Andar dentro del agua cuesta; a partir de cierto calado no se avanza.
     const wadeFactor = depth > 0 ? clamp(1 - depth / WADE_DEPTH, 0.25, 1) : 1;
-    const speed = (running ? RUN_SPEED : WALK_SPEED) * wadeFactor;
+    // Agachado se anda despacio, pero se pesca sin espantar tanto al pez.
+    const speed = (running ? RUN_SPEED : WALK_SPEED) * wadeFactor * (1 - this.crouch * 0.55);
 
     this.velocity.x = damp(this.velocity.x, wish.x * speed, 12, dt);
     this.velocity.z = damp(this.velocity.z, wish.z * speed, 12, dt);
@@ -5094,14 +5599,49 @@ class Player {
 
     this.rig.rotation.y = this.yaw;
     this.camera.rotation.set(this.pitch, 0, bobX * 0.35 + this.lean);
+
+    let back = 0;
+    if (this.mode === 'third') {
+      // La cámara se acerca al jugador si el terreno se interpone, en vez de
+      // meterse dentro de la ladera.
+      back = this.thirdPersonDistance;
+      const behind = new THREE.Vector3(0, EYE_HEIGHT, back).applyAxisAngle(
+        new THREE.Vector3(0, 1, 0), this.yaw
+      ).add(this.rig.position);
+      const ground = this.terrain.heightAt(behind.x, behind.z) + 0.6;
+      if (behind.y < ground) {
+        const room = clamp((behind.y - this.rig.position.y) / Math.max(0.01, ground - this.rig.position.y), 0.25, 1);
+        back = this.thirdPersonDistance * room;
+      }
+      this.thirdPersonCurrent = damp(this.thirdPersonCurrent ?? back, back, 8, dt);
+      back = this.thirdPersonCurrent;
+    }
+
     this.camera.position.set(
       this.mode === 'third' ? 0 : bobX * 0.5,
-      EYE_HEIGHT + bobY,
-      this.mode === 'third' ? this.thirdPersonDistance : 0
+      EYE_HEIGHT - this.crouch * 0.45 + bobY,
+      back
     );
 
+    // El cuerpo se anima siempre: en primera persona está oculto, pero al
+    // cambiar de cámara ya está en la pose correcta en vez de arrancar de cero.
+    this.stepped = this.bodyRig.update(dt, {
+      speed: horizontalSpeed,
+      running,
+      turnRate: turnDelta / Math.max(dt, 1e-3),
+      crouch: this.crouch,
+      holdingRod: this.holdingRod ?? 1,
+      onFoot: !this.platform
+    });
+
     this.lookDelta.multiplyScalar(0.82);
-    return { speed: horizontalSpeed, surface: this.surface, depth: Math.max(0, depth) };
+    return {
+      speed: horizontalSpeed,
+      surface: this.surface,
+      depth: Math.max(0, depth),
+      stepped: this.stepped,
+      crouch: this.crouch
+    };
   }
 
   /** Embarcado: rema en vez de andar, y la vista sigue al asiento. */
@@ -5119,14 +5659,22 @@ class Player {
       this.mode === 'third' ? this.thirdPersonDistance : 0
     );
     this.surface = 'barca';
+    this.bodyRig.update(dt, {
+      speed: 0, running: false, turnRate: 0,
+      crouch: 0.55, holdingRod: this.holdingRod ?? 1, onFoot: false
+    });
     this.lookDelta.multiplyScalar(0.82);
-    return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0 };
+    return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0, stepped: null, crouch: 0.55 };
   }
 
   /** Alterna primera y tercera persona; el cuerpo sólo se ve en la segunda. */
   setCameraMode(mode) {
     this.mode = mode === 'third' ? 'third' : 'first';
-    this.body.visible = this.mode === 'third';
+    this.bodyRig.setVisible(this.mode === 'third');
+    // El modelo de primera persona y el cuerpo no pueden verse a la vez. Vivía
+    // en el manejador de teclas, así que cualquier otra vía de cambio de cámara
+    // dejaba las dos cañas en pantalla.
+    this.onModeChange?.(this.mode);
   }
 
   teleport(position) {
@@ -5467,6 +6015,14 @@ class UI {
       </div>
       <div class="sub">
         <div class="label"><span>Hilo fuera</span><b class="l-val">0 m</b></div>
+      </div>
+      <div class="sub fight-only">
+        <div class="label"><span>Pez agotado</span><b class="f-val">0 %</b></div>
+        <div class="sw-bar"><i class="f-fill" style="background:var(--good)"></i></div>
+      </div>
+      <div class="sub fight-only">
+        <div class="label"><span>Anzuelo</span><b class="h-val">100 %</b></div>
+        <div class="sw-bar"><i class="h-fill" style="background:var(--good)"></i></div>
       </div>`;
     this.root.appendChild(this.tensionBox);
 
@@ -5520,6 +6076,12 @@ class UI {
       <div class="row"><span>${equipment.lure.name}</span><span>${equipment.lure.workingDepth.toFixed(1)} m</span></div>`;
 
     const hud = fishing;
+    // El panel de tensión sólo importa con el aparejo fuera. En reposo estorba.
+    const relevante = hud.state !== FishingState.IDLE && hud.state !== FishingState.AIMING;
+    const quiere = relevante ? 'block' : 'none';
+    if (this.tensionBox.style.display !== quiere) this.tensionBox.style.display = quiere;
+    if (!relevante) { this._updatePrompt(hud); this._updateToast(hud.message); return; }
+
     const ratio = clamp(hud.tensionRatio, 0, 1);
     const fill = this.tensionBox.querySelector('.t-fill');
     fill.style.width = `${ratio * 100}%`;
@@ -5531,6 +6093,28 @@ class UI {
     this.tensionBox.querySelector('.d-val').textContent = `${hud.drag.toFixed(1)} kg`;
     this.tensionBox.querySelector('.l-val').textContent =
       `${hud.lineOut.toFixed(0)} / ${hud.capacity} m`;
+
+    // Durante la pelea el jugador necesita ver las dos cuentas atrás que
+    // deciden el desenlace: lo que le queda al pez y lo que le queda al
+    // anzuelo. Sin esto, perder una captura parece arbitrario.
+    const luchando = hud.state === FishingState.FIGHTING && hud.hooked;
+    const verPelea = luchando ? 'block' : 'none';
+    this.tensionBox.querySelectorAll('.fight-only').forEach((n) => {
+      if (n.style.display !== verPelea) n.style.display = verPelea;
+    });
+    if (luchando) {
+      const cansancio = clamp(1 - hud.hooked.stamina, 0, 1);
+      const fFill = this.tensionBox.querySelector('.f-fill');
+      fFill.style.width = `${cansancio * 100}%`;
+      fFill.style.background = cansancio > 0.7 ? 'var(--good)' : 'var(--warn)';
+      this.tensionBox.querySelector('.f-val').textContent = `${Math.round(cansancio * 100)} %`;
+
+      const hold = clamp(hud.hooked.hookHold ?? 1, 0, 1);
+      const hFill = this.tensionBox.querySelector('.h-fill');
+      hFill.style.width = `${hold * 100}%`;
+      hFill.style.background = hold < 0.35 ? 'var(--bad)' : hold < 0.65 ? 'var(--warn)' : 'var(--good)';
+      this.tensionBox.querySelector('.h-val').textContent = `${Math.round(hold * 100)} %`;
+    }
 
     this._updatePrompt(hud);
     this._updateToast(hud.message);
@@ -6171,6 +6755,14 @@ class Game {
     this._initProgress();
     this._initFishing();
     this.cameraFx = new CameraFx(this.camera, { baseFov: this.settings.fov });
+    // Una sola fuente de verdad para "qué caña se ve": la del modelo de primera
+    // persona o la que sujeta el cuerpo, nunca las dos.
+    this.player.onModeChange = (mode) => this.fishing.rod.setVisible(mode === 'first');
+
+    this.interaction = new InteractionSystem(this.camera);
+    // El mundo se construye antes que este sistema, así que la primera zona
+    // hay que registrarla aquí; los viajes posteriores lo hacen en _buildZone.
+    this._registerInteractables();
     this._initUI();
     this._initPerformance();
     this._bindInput();
@@ -6192,7 +6784,7 @@ class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     // El cielo de Preetham emite valores muy altos: con exposición 1 se
     // satura a blanco y el lago lo refleja como una lámina de leche.
-    this.renderer.toneMappingExposure = 0.34;
+    this.renderer.toneMappingExposure = 0.85;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(
@@ -6247,6 +6839,7 @@ class Game {
     this.fishManager = new FishManager(this.scene, this.terrain, {
       seed: zone.terrain.seed + 3, species: zone.species
     });
+    if (this.interaction) this._registerInteractables();
     this.ambient = new AmbientLife(this.scene, this.terrain, this.water, {
       seed: zone.terrain.seed + 7, audio: this.audio
     });
@@ -6274,7 +6867,9 @@ class Game {
   travelTo(zoneId) {
     const zone = zoneOf(zoneId);
     if (zone.id === this.zone?.id) return;
-    this.fishing.reelIn();
+    const busy = this._busyMessage('viajar');
+    if (busy) { this.fishing._say(busy, 'bad'); return; }
+    if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de viajar');
     if (this.player.platform) { this.boat.leave(); this.player.setPlatform(null); }
 
     this._buildZone(zone);
@@ -6442,16 +7037,15 @@ class Game {
         case 'KeyC': this._panel(() => this.ui.showRecords(this.economy)); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy)); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
-        case 'KeyE': {
-          if (this.ui.isPanelOpen) break;
-          const target = this._interactables()[0];
-          if (target) target.action();
+        case 'KeyE':
+          if (!this.ui.isPanelOpen) this.interaction.interact();
           break;
-        }
+        case 'KeyQ':
+          if (!this.ui.isPanelOpen) this.fishing.toggleRod();
+          break;
         case 'KeyZ': this._panel(() => this.ui.showZones(ZONES, this.economy, this.zone.id)); break;
         case 'KeyF':
           this.player.setCameraMode(this.player.mode === 'first' ? 'third' : 'first');
-          this.fishing.rod.setVisible(this.player.mode === 'first');
           break;
         default: break;
       }
@@ -6459,16 +7053,32 @@ class Game {
   }
 
   /** Sube o baja de la barca. Desembarcar exige tener orilla al lado. */
+  /**
+   * Todo lo que teletransporta al jugador o salta el reloj tiene que preguntar
+   * esto antes: con un pez enganchado la respuesta es que no.
+   */
+  _busyMessage(what) {
+    if (this.fishing.state === 'fighting') return `No puedes ${what} con un pez enganchado`;
+    return null;
+  }
+
   _toggleBoat() {
     if (this.player.platform) {
+      const busy = this._busyMessage('bajar de la barca');
+      if (busy) { this.fishing._say(busy, 'bad'); return; }
       const shore = this._findShoreNear(this.boat.position);
       if (!shore) { this.fishing._say('Acerca la barca a la orilla para bajar', 'bad'); return; }
+      // Bajar teletransporta al jugador hasta la orilla: con el sedal fuera,
+      // ese salto se traduciría en un tirón imposible.
+      if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de bajar');
       this.boat.leave();
       this.player.setPlatform(null);
       this.player.teleport(shore);
       this.fishing._say('Has desembarcado');
     } else if (this.boat.canBoard(this.player.position)) {
-      this.fishing.reelIn();
+      const busy = this._busyMessage('subir a la barca');
+      if (busy) { this.fishing._say(busy, 'bad'); return; }
+      if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de subir');
       this.player.setPlatform(this.boat);
       this.fishing._say('A bordo · W/S para bogar, A/D para virar, E para bajar');
     }
@@ -6674,6 +7284,8 @@ class Game {
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    if (!panelOpen) this.interaction.update(this.player.position);
+    this.player.holdingRod = this.fishing.rodStowed ? 0 : 1;
     this.cameraFx.update(dt);
 
     if (!headless) {
@@ -6708,6 +7320,56 @@ class Game {
     }
   }
 
+  /** Registra lo que se puede mirar e interactuar en la zona actual. */
+  _registerInteractables() {
+    const I = this.interaction;
+    I.clear();
+
+    I.register({
+      object: this.boat.group,
+      range: 4.5,
+      label: () => (this.player.platform ? 'E · desembarcar' : 'E · subir a la barca'),
+      enabled: () => this.player.platform === this.boat || this.boat.canBoard(this.player.position),
+      action: () => this._toggleBoat()
+    });
+    I.register({
+      object: this.props.camp,
+      range: 4,
+      label: () => `E · descansar hasta las ${String(Math.floor(this._nextFeedingHour())).padStart(2, '0')}:00`,
+      enabled: () => !this.player.platform,
+      action: () => this._rest(this._nextFeedingHour())
+    });
+    I.register({
+      object: this.props.sign,
+      range: 4,
+      label: () => `E · ${this.zone.name}: leer el cartel`,
+      enabled: () => !this.player.platform,
+      action: () => this.ui.showZones(ZONES, this.economy, this.zone.id)
+    });
+    I.register({
+      object: this.props.bucket,
+      range: 3,
+      label: 'E · mirar el cubo de cebo',
+      enabled: () => !this.player.platform,
+      action: () => this._inspectBait()
+    });
+  }
+
+  /** Examinar el cebo: consejo real según la hora y el tiempo que hace. */
+  _inspectBait() {
+    const hour = this.time.hour;
+    const band = hour < 6 || hour > 20 ? 'de noche'
+      : hour < 10 ? 'a primera hora'
+      : hour < 17 ? 'a pleno día' : 'al caer la tarde';
+    const consejo = hour < 6 || hour > 20
+      ? 'los peces de fondo están activos: prueba vinilo o boilie hondo'
+      : hour < 10 || hour > 17
+      ? 'es la mejor franja: cucharilla o popper en superficie'
+      : 'con el sol alto conviene bajar: cucharilla pesada o boilie';
+    this.audio.coin();
+    this.fishing._say(`El cubo huele fuerte. ${band.charAt(0).toUpperCase() + band.slice(1)} y ${this.weather.label.toLowerCase()}: ${consejo}`);
+  }
+
   /**
    * Puntos con los que se puede interactuar, en orden de prioridad.
    *
@@ -6737,7 +7399,8 @@ class Game {
   }
 
   _contextHint() {
-    return this._interactables()[0]?.label ?? '';
+    if (this.player.platform) return 'W/S bogar · A/D virar · E desembarcar';
+    return this.interaction?.label ?? '';
   }
 
   /** Siguiente hora punta de actividad: amanecer o atardecer. */
@@ -6748,7 +7411,11 @@ class Game {
 
   /** Descansar: salta a la siguiente franja buena, con fundido. */
   _rest(hour) {
-    if (this.fishing.state !== 'idle') { this.fishing.reelIn(); }
+    // Un pez enganchado no se abandona en silencio: se cobra o se pierde, pero
+    // nunca desaparece porque el jugador haya pulsado otra tecla.
+    const busy = this._busyMessage('descansar');
+    if (busy) { this.fishing._say(busy, 'bad'); return; }
+    if (this.fishing.state !== 'idle') this.fishing.reelIn('Recoges el sedal antes de descansar');
     this.input.releaseLock();
     this.ui.fadeThrough(() => {
       this.time.setHour(hour);
@@ -6813,13 +7480,9 @@ class Game {
       cloudiness: this.weather.cloudiness
     });
 
-    if (moving.speed > 0.8) {
-      this.footstepTimer -= dt * moving.speed;
-      if (this.footstepTimer <= 0) {
-        this.footstepTimer = 1.5;
-        this.audio.footstep(moving.surface);
-      }
-    }
+    // El paso suena cuando el pie toca de verdad, no cada N segundos: así el
+    // sonido va sincronizado con la animación por construcción.
+    if (moving.stepped) this.audio.footstep(moving.surface);
   }
 
   dispose() {

@@ -51,7 +51,8 @@ export class TimeOfDay {
 
   /** 0 de día, 1 de noche cerrada. */
   get nightFactor() {
-    return 1 - smoothstep(-0.12, 0.16, Math.sin(this.elevation));
+    // Banda ancha a propósito: el crepúsculo dura, no se apaga de golpe.
+    return 1 - smoothstep(-0.26, 0.22, Math.sin(this.elevation));
   }
 
   /** Los peces comen al amanecer y al atardecer: 1 en la mejor franja. */
@@ -70,8 +71,11 @@ export class TimeOfDay {
   }
 
   _update() {
-    // 6h amanece, 12h cenit, 18h anochece. Fuera de esa franja el sol está bajo el horizonte.
-    const dayAngle = ((this.hour - 6) / 12) * Math.PI;
+    // 6h amanece, 13:15 cenit, 20:30 anochece. Con un día de sólo doce horas el
+    // sol se ponía a las 18:00 y a las 19:00 era noche cerrada — justo la franja
+    // en la que los peces comen mejor. Un día más largo deja un ocaso de verdad
+    // en la mejor hora de pesca.
+    const dayAngle = ((this.hour - 6) / 14.5) * Math.PI;
     this.elevation = Math.sin(dayAngle) * MAX_ELEVATION;
     const azimuth = THREE.MathUtils.degToRad(-40) + (this.hour / 24) * Math.PI * 2;
 

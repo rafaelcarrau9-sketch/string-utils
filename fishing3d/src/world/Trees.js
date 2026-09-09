@@ -132,7 +132,7 @@ export class Trees {
       conifer: new THREE.InstancedMesh(canopyCone(rng), coniferMaterial, count)
     };
 
-    const billboardGeometry = crossPlanes(5.6, 6.4);
+    const billboardGeometry = crossPlanes(5.6, 6.4, 0.62);
     const billboardMaterial = new THREE.MeshStandardMaterial({
       map: textures.foliage(), alphaTest: 0.42, side: THREE.DoubleSide, roughness: 0.9
     });

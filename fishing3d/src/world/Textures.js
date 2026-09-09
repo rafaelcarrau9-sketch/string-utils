@@ -291,7 +291,7 @@ export class TextureLibrary {
       const y = size / 2 + Math.sin(a) * r;
       const rad = size * (0.04 + rng() * 0.07);
       const shade = 0.45 + rng() * 0.55;
-      ctx.fillStyle = `rgba(${Math.round(48 * shade)},${Math.round(84 * shade)},${Math.round(34 * shade)},0.95)`;
+      ctx.fillStyle = `rgba(${Math.round(88 * shade)},${Math.round(134 * shade)},${Math.round(60 * shade)},0.95)`;
       ctx.beginPath();
       ctx.ellipse(x, y, rad, rad * 0.72, a, 0, Math.PI * 2);
       ctx.fill();
