@@ -49,6 +49,7 @@ export class Rod {
     this.windUp = 0;          // carga suavizada: sin esto caía de golpe al soltar
     this.reelAngle = 0;
     this.pump = 0;
+    this.pumpKick = 0;        // sacudida al recuperar hilo bombeando
     this.twitch = 0;
     this.strikeKick = 0;
 
@@ -199,7 +200,9 @@ export class Rod {
       : 0;
     // Bombeo al recoger, más marcado cuanto más pesa el pez.
     this.pump = damp(this.pump, retrieve * (0.4 + tensionRatio), 8, dt);
-    const pumping = Math.sin(this.breath * 6.5) * this.pump * 0.045;
+    // La sacudida del bombeo se apaga sola: es un golpe, no un estado.
+    this.pumpKick = damp(this.pumpKick, 0, 6, dt);
+    const pumping = Math.sin(this.breath * 6.5) * this.pump * 0.045 + this.pumpKick * 0.09;
 
     this.group.position.set(
       this.current.pos.x + this.sway.x * 0.6 - sweep * 0.09,
@@ -257,6 +260,9 @@ export class Rod {
   worldTip(out = new THREE.Vector3()) {
     return this.tip.getWorldPosition(out);
   }
+
+  /** El blank se endereza de golpe al bombear: se ve y se siente. */
+  pumped(strength = 1) { this.pumpKick = clamp(this.pumpKick + strength, 0, 1.4); }
 
   setVisible(value) { this.group.visible = value; }
 

@@ -161,6 +161,8 @@ export class FishingSystem {
         this.fight = {
           lastDistance: this._rodTip.distanceTo(fish.position),
           hookHold: 1,
+          load: 0,
+          pumpLock: 0,
           warned: false,
           stamina: 1,
           burst: 0,
@@ -434,6 +436,31 @@ export class FishingSystem {
       this.tension = Math.min(this.tension, this.dragForce);
     }
     f.lastDistance = distance;
+    // --- bombeo ------------------------------------------------------------
+    // La técnica de verdad no es dar manivela: es cargar la caña tirando y,
+    // cuando el pez cede, bajarla recogiendo el hilo que suelta la puntera al
+    // enderezarse. Aquí se modela igual: soltar la recogida con la caña
+    // cargada devuelve de golpe el hilo que tenía almacenado el blank.
+    //
+    // Es lo que separa saber pescar de apretar el botón. Sin esto, recoger sin
+    // parar daba el mismo resultado con más tiempo y la pelea no tenía técnica.
+    const cargando = this.retrieveInput > 0.5 && this.tensionRatio > 0.42;
+    if (cargando) {
+      f.load = Math.min(1, (f.load ?? 0) + dt * 0.85);
+    } else if (this.retrieveInput < 0.12 && (f.load ?? 0) > 0.15 && (f.pumpLock ?? 0) <= 0) {
+      // La caña se endereza: ese hilo entra sin pelear contra el freno.
+      const recobro = f.load * stats.rodStrength * 0.12 * (1 + stats.retrieveSpeed * 0.3);
+      this.lineOut = Math.max(0.8, this.lineOut - recobro);
+      f.stamina = clamp(f.stamina - f.load * 0.035, 0, 1);   // y al pez le cuesta
+      f.pumpLock = 0.55;                                     // no se puede repetir a ciegas
+      f.load = 0;
+      this.rod.pumped(clamp(recobro * 1.6, 0.25, 1.2));
+      this.events?.onPump?.(recobro);
+    } else {
+      f.load = Math.max(0, (f.load ?? 0) - dt * 0.5);
+    }
+    f.pumpLock = Math.max(0, (f.pumpLock ?? 0) - dt);
+
     if (this.retrieveInput > 0.05) {
       // Cuanta más tensión, más cuesta recuperar hilo. Y mientras el freno
       // patina no se recupera nada: el carrete gira en vacío contra el
@@ -669,6 +696,8 @@ export class FishingSystem {
         weight: this.hooked.weight,
         stamina: this.fight?.stamina ?? 1,
         hookHold: this.fight?.hookHold ?? 1,
+        load: this.fight?.load ?? 0,
+        canPump: (this.fight?.load ?? 0) > 0.35 && (this.fight?.pumpLock ?? 0) <= 0,
         sidePressure: this.sidePressure,
         counterPressure: this.counterPressure
       } : null,

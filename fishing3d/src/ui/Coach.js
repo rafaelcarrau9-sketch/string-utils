@@ -22,6 +22,11 @@ const TIPS = [
     text: 'Recoge con clic derecho, pero suelta cuando la tensión suba. Ladea la caña a un costado del pez para cansarlo.'
   },
   {
+    id: 'bombeo',
+    when: (s) => s.canPump,
+    text: 'La caña está cargada: <b>suelta el clic derecho</b>. Al enderezarse te devuelve hilo gratis, sin pelear contra el freno. Cargar y soltar —bombear— cansa al pez mucho antes que dar manivela sin parar.'
+  },
+  {
     id: 'freno',
     when: (s) => s.lastEvent === 'lineBreak',
     text: 'La línea ha reventado: baja el freno con la rueda del ratón para que ceda hilo antes de romper.'

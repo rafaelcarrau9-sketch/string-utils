@@ -460,6 +460,13 @@ export class Game {
           this.cameraFx.addShake(0.18);
         },
         onRun: () => this.cameraFx.addShake(0.12),
+        onPump: (metros) => {
+          // Recuperar hilo bombeando se oye y se nota: es la recompensa de
+          // haber soltado en el momento justo.
+          this.audio.reelTick(1);
+          this.audio.dragSlip();
+          this.cameraFx.addFovKick(-1.4 - metros * 2);
+        },
         onLineBreak: () => {
           this.economy.stats.lineBreaks++; this.economy.stats.lost++;
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
@@ -944,6 +951,7 @@ export class Game {
         worldEvent: !!this.worldEvents.current,
         nearBoat: this.boat.canBoard(this.player.position),
         rig: this.fishing.lure.rig,
+        canPump: !!this.fishing.hud.hooked?.canPump,
         lureDepth: this.fishing.lure.isFishable
           ? this.terrain.depthAt(this.fishing.lure.position.x, this.fishing.lure.position.z)
           : null

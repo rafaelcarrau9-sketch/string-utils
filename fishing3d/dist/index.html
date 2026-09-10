@@ -6842,6 +6842,7 @@ class Rod {
     this.windUp = 0;          // carga suavizada: sin esto caía de golpe al soltar
     this.reelAngle = 0;
     this.pump = 0;
+    this.pumpKick = 0;        // sacudida al recuperar hilo bombeando
     this.twitch = 0;
     this.strikeKick = 0;
 
@@ -6992,7 +6993,9 @@ class Rod {
       : 0;
     // Bombeo al recoger, más marcado cuanto más pesa el pez.
     this.pump = damp(this.pump, retrieve * (0.4 + tensionRatio), 8, dt);
-    const pumping = Math.sin(this.breath * 6.5) * this.pump * 0.045;
+    // La sacudida del bombeo se apaga sola: es un golpe, no un estado.
+    this.pumpKick = damp(this.pumpKick, 0, 6, dt);
+    const pumping = Math.sin(this.breath * 6.5) * this.pump * 0.045 + this.pumpKick * 0.09;
 
     this.group.position.set(
       this.current.pos.x + this.sway.x * 0.6 - sweep * 0.09,
@@ -7050,6 +7053,9 @@ class Rod {
   worldTip(out = new THREE.Vector3()) {
     return this.tip.getWorldPosition(out);
   }
+
+  /** El blank se endereza de golpe al bombear: se ve y se siente. */
+  pumped(strength = 1) { this.pumpKick = clamp(this.pumpKick + strength, 0, 1.4); }
 
   setVisible(value) { this.group.visible = value; }
 
@@ -7217,6 +7223,8 @@ class FishingSystem {
         this.fight = {
           lastDistance: this._rodTip.distanceTo(fish.position),
           hookHold: 1,
+          load: 0,
+          pumpLock: 0,
           warned: false,
           stamina: 1,
           burst: 0,
@@ -7490,6 +7498,31 @@ class FishingSystem {
       this.tension = Math.min(this.tension, this.dragForce);
     }
     f.lastDistance = distance;
+    // --- bombeo ------------------------------------------------------------
+    // La técnica de verdad no es dar manivela: es cargar la caña tirando y,
+    // cuando el pez cede, bajarla recogiendo el hilo que suelta la puntera al
+    // enderezarse. Aquí se modela igual: soltar la recogida con la caña
+    // cargada devuelve de golpe el hilo que tenía almacenado el blank.
+    //
+    // Es lo que separa saber pescar de apretar el botón. Sin esto, recoger sin
+    // parar daba el mismo resultado con más tiempo y la pelea no tenía técnica.
+    const cargando = this.retrieveInput > 0.5 && this.tensionRatio > 0.42;
+    if (cargando) {
+      f.load = Math.min(1, (f.load ?? 0) + dt * 0.85);
+    } else if (this.retrieveInput < 0.12 && (f.load ?? 0) > 0.15 && (f.pumpLock ?? 0) <= 0) {
+      // La caña se endereza: ese hilo entra sin pelear contra el freno.
+      const recobro = f.load * stats.rodStrength * 0.12 * (1 + stats.retrieveSpeed * 0.3);
+      this.lineOut = Math.max(0.8, this.lineOut - recobro);
+      f.stamina = clamp(f.stamina - f.load * 0.035, 0, 1);   // y al pez le cuesta
+      f.pumpLock = 0.55;                                     // no se puede repetir a ciegas
+      f.load = 0;
+      this.rod.pumped(clamp(recobro * 1.6, 0.25, 1.2));
+      this.events?.onPump?.(recobro);
+    } else {
+      f.load = Math.max(0, (f.load ?? 0) - dt * 0.5);
+    }
+    f.pumpLock = Math.max(0, (f.pumpLock ?? 0) - dt);
+
     if (this.retrieveInput > 0.05) {
       // Cuanta más tensión, más cuesta recuperar hilo. Y mientras el freno
       // patina no se recupera nada: el carrete gira en vacío contra el
@@ -7725,6 +7758,8 @@ class FishingSystem {
         weight: this.hooked.weight,
         stamina: this.fight?.stamina ?? 1,
         hookHold: this.fight?.hookHold ?? 1,
+        load: this.fight?.load ?? 0,
+        canPump: (this.fight?.load ?? 0) > 0.35 && (this.fight?.pumpLock ?? 0) <= 0,
         sidePressure: this.sidePressure,
         counterPressure: this.counterPressure
       } : null,
@@ -8273,6 +8308,11 @@ const TIPS = [
     text: 'Recoge con clic derecho, pero suelta cuando la tensión suba. Ladea la caña a un costado del pez para cansarlo.'
   },
   {
+    id: 'bombeo',
+    when: (s) => s.canPump,
+    text: 'La caña está cargada: <b>suelta el clic derecho</b>. Al enderezarse te devuelve hilo gratis, sin pelear contra el freno. Cargar y soltar —bombear— cansa al pez mucho antes que dar manivela sin parar.'
+  },
+  {
     id: 'freno',
     when: (s) => s.lastEvent === 'lineBreak',
     text: 'La línea ha reventado: baja el freno con la rueda del ratón para que ceda hilo antes de romper.'
@@ -8422,6 +8462,10 @@ const CSS = `
 .sw-bar i { display: block; height: 100%; width: 0; background: var(--good); transition: width .06s linear, background .2s; }
 .sw-bar .mark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: rgba(255,255,255,.8); }
 .sw-tension .sub { margin-top: 9px; }
+.sw-tension .pump { min-height: 15px; }
+.sw-tension .p-val { font-size: 11.5px; color: var(--dim); letter-spacing: .01em; }
+.sw-tension .p-val.listo { color: var(--accent); font-weight: 650;
+  animation: swpulse .4s ease-in-out infinite alternate; display: inline-block; }
 
 .sw-prompt { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); text-align: center; width: 460px; }
 .sw-prompt .big { font-size: 26px; font-weight: 700; letter-spacing: .01em; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
@@ -8680,7 +8724,8 @@ class UI {
       <div class="sub fight-only">
         <div class="label"><span>Anzuelo</span><b class="h-val">100 %</b></div>
         <div class="sw-bar"><i class="h-fill" style="background:var(--good)"></i></div>
-      </div>`;
+      </div>
+      <div class="sub fight-only pump"><span class="p-val"></span></div>`;
     this.root.appendChild(this.tensionBox);
 
     this.prompt = el('div', 'sw-prompt');
@@ -8783,6 +8828,15 @@ class UI {
       fFill.style.width = `${cansancio * 100}%`;
       fFill.style.background = cansancio > 0.7 ? 'var(--good)' : 'var(--warn)';
       this.tensionBox.querySelector('.f-val').textContent = `${Math.round(cansancio * 100)} %`;
+
+      // El aviso de bombeo: la caña está cargada y toca soltar.
+      const pumpNode = this.tensionBox.querySelector('.p-val');
+      const listo = hud.hooked.canPump;
+      const carga = clamp(hud.hooked.load ?? 0, 0, 1);
+      const texto = listo ? '▲ Suelta ahora: la caña devuelve hilo'
+        : carga > 0.12 ? 'Cargando la caña…' : '';
+      if (pumpNode.textContent !== texto) pumpNode.textContent = texto;
+      pumpNode.className = `p-val${listo ? ' listo' : ''}`;
 
       const hold = clamp(hud.hooked.hookHold ?? 1, 0, 1);
       const hFill = this.tensionBox.querySelector('.h-fill');
@@ -10524,6 +10578,13 @@ class Game {
           this.cameraFx.addShake(0.18);
         },
         onRun: () => this.cameraFx.addShake(0.12),
+        onPump: (metros) => {
+          // Recuperar hilo bombeando se oye y se nota: es la recompensa de
+          // haber soltado en el momento justo.
+          this.audio.reelTick(1);
+          this.audio.dragSlip();
+          this.cameraFx.addFovKick(-1.4 - metros * 2);
+        },
         onLineBreak: () => {
           this.economy.stats.lineBreaks++; this.economy.stats.lost++;
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
@@ -11008,6 +11069,7 @@ class Game {
         worldEvent: !!this.worldEvents.current,
         nearBoat: this.boat.canBoard(this.player.position),
         rig: this.fishing.lure.rig,
+        canPump: !!this.fishing.hud.hooked?.canPump,
         lureDepth: this.fishing.lure.isFishable
           ? this.terrain.depthAt(this.fishing.lure.position.x, this.fishing.lure.position.z)
           : null

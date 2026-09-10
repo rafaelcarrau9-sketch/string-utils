@@ -46,6 +46,10 @@ const CSS = `
 .sw-bar i { display: block; height: 100%; width: 0; background: var(--good); transition: width .06s linear, background .2s; }
 .sw-bar .mark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: rgba(255,255,255,.8); }
 .sw-tension .sub { margin-top: 9px; }
+.sw-tension .pump { min-height: 15px; }
+.sw-tension .p-val { font-size: 11.5px; color: var(--dim); letter-spacing: .01em; }
+.sw-tension .p-val.listo { color: var(--accent); font-weight: 650;
+  animation: swpulse .4s ease-in-out infinite alternate; display: inline-block; }
 
 .sw-prompt { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); text-align: center; width: 460px; }
 .sw-prompt .big { font-size: 26px; font-weight: 700; letter-spacing: .01em; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
@@ -304,7 +308,8 @@ export class UI {
       <div class="sub fight-only">
         <div class="label"><span>Anzuelo</span><b class="h-val">100 %</b></div>
         <div class="sw-bar"><i class="h-fill" style="background:var(--good)"></i></div>
-      </div>`;
+      </div>
+      <div class="sub fight-only pump"><span class="p-val"></span></div>`;
     this.root.appendChild(this.tensionBox);
 
     this.prompt = el('div', 'sw-prompt');
@@ -407,6 +412,15 @@ export class UI {
       fFill.style.width = `${cansancio * 100}%`;
       fFill.style.background = cansancio > 0.7 ? 'var(--good)' : 'var(--warn)';
       this.tensionBox.querySelector('.f-val').textContent = `${Math.round(cansancio * 100)} %`;
+
+      // El aviso de bombeo: la caña está cargada y toca soltar.
+      const pumpNode = this.tensionBox.querySelector('.p-val');
+      const listo = hud.hooked.canPump;
+      const carga = clamp(hud.hooked.load ?? 0, 0, 1);
+      const texto = listo ? '▲ Suelta ahora: la caña devuelve hilo'
+        : carga > 0.12 ? 'Cargando la caña…' : '';
+      if (pumpNode.textContent !== texto) pumpNode.textContent = texto;
+      pumpNode.className = `p-val${listo ? ' listo' : ''}`;
 
       const hold = clamp(hud.hooked.hookHold ?? 1, 0, 1);
       const hFill = this.tensionBox.querySelector('.h-fill');
