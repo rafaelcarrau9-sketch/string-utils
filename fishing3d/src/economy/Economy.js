@@ -32,6 +32,8 @@ export class Economy {
     this.xp = data?.xp ?? 0;
     this.earned = data?.earned ?? 0;
     this.zonesVisited = new Set(data?.zonesVisited ?? ['lago_niebla']);
+    // Puestos encontrados, con la clave "zona:nombre".
+    this.spots = new Set(data?.spots ?? []);
     this.records = data?.records ?? {};      // id → { count, bestLength, bestWeight }
     this.stats = {
       casts: 0, hooked: 0, landed: 0, lost: 0, lineBreaks: 0, totalWeight: 0,
@@ -58,6 +60,18 @@ export class Economy {
     const before = this.level;
     this.xp += Math.max(0, Math.round(amount));
     return this.level > before ? this.level : 0;
+  }
+
+  /** Marca un puesto como encontrado. Devuelve si era nuevo. */
+  findSpot(zoneId, name) {
+    const key = `${zoneId}:${name}`;
+    if (this.spots.has(key)) return false;
+    this.spots.add(key);
+    return true;
+  }
+
+  spotsIn(zoneId) {
+    return [...this.spots].filter((k) => k.startsWith(`${zoneId}:`)).map((k) => k.split(':')[1]);
   }
 
   visit(zoneId) {
@@ -116,6 +130,7 @@ export class Economy {
       xp: this.xp,
       earned: this.earned,
       zonesVisited: [...this.zonesVisited],
+      spots: [...this.spots],
       records: this.records,
       stats: this.stats,
       unlockedZones: this.unlockedZones,

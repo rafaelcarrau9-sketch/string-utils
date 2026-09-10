@@ -53,6 +53,7 @@ MODULES = [
     "src/story/StoryData.js",
     "src/story/QuestSystem.js",
     "src/story/Events.js",
+    "src/story/Tournament.js",
     "src/fishing/Line.js",
     "src/fishing/Lure.js",
     "src/fishing/Rod.js",
@@ -157,6 +158,8 @@ def build(local=False):
   <div class="spinner"></div>
   <h1>Aguas de Valdés</h1>
   <p id="loading-text">Cargando el lago…</p>
+  <div class="track"><i id="loading-bar"></i></div>
+  <p class="sub">Cuenca de Valdés</p>
 </div>
 
 <script type="importmap">

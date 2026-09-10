@@ -26,8 +26,9 @@ const MIN_PER_SPECIES = { comun: 5, raro: 3, legendario: 1 };
 
 export class FishManager {
   constructor(scene, terrain, {
-    population = 72, seed = 71, species = null, allowGated = () => true
+    population = 72, seed = 71, species = null, allowGated = () => true, anchor = null
   } = {}) {
+    this.anchor = anchor;         // el puesto principal: allí debe haber pesca
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
@@ -39,6 +40,91 @@ export class FishManager {
     scene.add(this.group);
 
     this._populate(population);
+    this._buildShoals();
+  }
+
+  /**
+   * Cardúmenes.
+   *
+   * Las especies gregarias no nadan cada una por su lado: se mueven alrededor
+   * de un centro que va derivando despacio por el agua. Es la forma barata de
+   * que el lago parezca poblado en vez de sembrado, y tiene consecuencia de
+   * juego: encontrar el banco es encontrar diez peces, no uno.
+   *
+   * Los solitarios —lucio, siluro, esturión— no tienen banco, y eso también es
+   * verdad de los de verdad.
+   */
+  _buildShoals() {
+    this.shoals = new Map();
+    const gregarias = this.speciesPool.filter((s) => s.schooling);
+    for (const s of gregarias) {
+      const spot = this._randomSpotFor(s);
+      if (!spot) continue;
+      this.shoals.set(s.id, { center: spot.clone(), target: spot.clone(), timer: 0 });
+    }
+    // Al menos un banco empieza al alcance del puesto principal. Un muelle
+    // existe porque allí hay pesca: llegar y encontrar el agua vacía porque el
+    // sorteo mandó los peces al otro extremo es una mala primera impresión.
+    if (this.anchor && gregarias.length) {
+      // Un puñado, no un acuario: bastantes para que el primer lance valga la
+      // pena y pocos para que la elección de señuelo siga decidiendo algo.
+      const cerca = this._spotNear(this.anchor, gregarias[0], 30, 12);
+      if (cerca) {
+        const shoal = this.shoals.get(gregarias[0].id);
+        if (shoal) { shoal.center.copy(cerca); shoal.target.copy(cerca); shoal.timer = 30; }
+        let movidos = 0;
+        for (const fish of this.fishes) {
+          if (fish.species.id !== gregarias[0].id || movidos >= 4) continue;
+          const p = this._spotNear(cerca, gregarias[0], 18);
+          if (p) { fish.position.copy(p); movidos++; }
+        }
+      }
+    }
+  }
+
+  /** Punto de agua válido para una especie entre `minRadius` y `radius`. */
+  _spotNear(origin, species, radius, minRadius = 0) {
+    const table = this._waterTable();
+    let mejor = null, mejorD = Infinity;
+    for (let i = 0; i < 220; i++) {
+      const p = table[Math.floor(this.rng() * table.length)];
+      const d = Math.hypot(p.x - origin.x, p.z - origin.z);
+      if (d > radius || d < minRadius || d >= mejorD) continue;
+      if (p.depth < species.depth[0] * 0.7 || p.depth > species.depth[1] * 1.6) continue;
+      const y = this.terrain.waterLevel - clamp(
+        species.depth[0] + this.rng() * (species.depth[1] - species.depth[0]), 0.4, p.depth - 0.25
+      );
+      mejor = new THREE.Vector3(p.x, y, p.z);
+      mejorD = d;
+    }
+    return mejor;
+  }
+
+  /** Los bancos derivan buscando siempre agua con el calado de su especie. */
+  _updateShoals(dt) {
+    if (!this.shoals) return;
+    for (const [id, shoal] of this.shoals) {
+      shoal.timer -= dt;
+      if (shoal.timer <= 0) {
+        shoal.timer = 18 + this.rng() * 26;
+        const species = this.speciesPool.find((s) => s.id === id);
+        if (species) {
+          // Se eligen tres destinos posibles y se va al más cercano: así el
+          // banco recorre el agua en vez de saltar de una punta a la otra, y el
+          // pescador que lo ha localizado puede seguirlo.
+          let mejor = null, mejorD = Infinity;
+          for (let i = 0; i < 3; i++) {
+            const cand = this._randomSpotFor(species);
+            if (!cand) continue;
+            const d = cand.distanceToSquared(shoal.center);
+            if (d < mejorD) { mejorD = d; mejor = cand; }
+          }
+          if (mejor) shoal.target.copy(mejor);
+        }
+      }
+      // Deriva lenta: un banco no se teletransporta al otro lado del lago.
+      shoal.center.lerp(shoal.target, 1 - Math.exp(-0.06 * dt));
+    }
   }
 
   /**
@@ -191,8 +277,10 @@ export class FishManager {
   }
 
   update(dt, context) {
+    this._updateShoals(dt);
     const camera = context.cameraPosition;
     for (const fish of this.fishes) {
+      fish.shoal = this.shoals?.get(fish.species.id)?.center ?? null;
       fish.update(dt, context);
       // Sólo se dibujan los peces cercanos: el resto sigue simulándose barato.
       fish.mesh.visible = !!camera && fish.position.distanceTo(camera) < MAX_VISIBLE_DISTANCE;

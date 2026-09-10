@@ -33,6 +33,7 @@ import { Economy } from '../economy/Economy.js';
 
 import { QuestSystem } from '../story/QuestSystem.js';
 import { EventSystem } from '../story/Events.js';
+import { Tournament } from '../story/Tournament.js';
 import { STORY } from '../story/StoryData.js';
 import { SPECIES, SPECIES_BY_ID, RARITY_LABEL } from '../fish/FishData.js';
 import { findItem } from '../gear/GearData.js';
@@ -206,7 +207,8 @@ export class Game {
       species: zone.species,
       // La Sombra no está en el agua hasta que la historia la pone ahí: si el
       // jugador la pescase de casualidad, el final perdería todo su sentido.
-      allowGated: (id) => id !== 'sombra_valdes' || !!this.quests?.accepted?.has('cap5_sombra')
+      allowGated: (id) => id !== 'sombra_valdes' || !!this.quests?.accepted?.has('cap5_sombra'),
+      anchor: this.props.fishingSpots[0]?.position ?? null
     });
     this.crew = new NpcCrew(
       this.scene,
@@ -310,6 +312,7 @@ export class Game {
     this.equipment = new Equipment(this.inventory);
     this.economy = new Economy();
     this.quests = new QuestSystem(null, this._questEvents());
+    this.tournament = new Tournament(null, this._tournamentEvents());
     this.worldEvents = new EventSystem({
       onStart: (e) => {
         this.ui?.note(`${e.title} — ${e.text}`, 'gold');
@@ -344,6 +347,46 @@ export class Game {
       },
       onComplete: (quest, reward) => this._grantReward(quest, reward)
     };
+  }
+
+  _tournamentEvents() {
+    return {
+      onStart: (t) => {
+        this.ui?.note(
+          `Concurso abierto en ${t.zoneName}. Cinco minutos para batir ${t.target.toFixed(2)} kg.`, 'gold');
+        this.audio?.worldEvent();
+        this._celebrate(4);
+      },
+      onLead: (t) => {
+        this.ui?.note(`Nueva marca tuya: ${t.best.species} de ${t.best.weight.toFixed(2)} kg`, 'good');
+        this.audio?.objective();
+      },
+      onFinish: (r) => this._closeTournament(r)
+    };
+  }
+
+  /** Fin del concurso: se paga, se cuenta y se guarda. */
+  _closeTournament(r) {
+    if (r.pago > 0) {
+      this.economy.sell(r.pago);
+      this.economy.addXp(Math.round(r.pago * 0.25));
+      this.audio?.questDone();
+      this._celebrate(9);
+    } else {
+      this.audio?.lineBreak();
+    }
+    const marca = r.best
+      ? `${r.best.species} de ${r.best.weight.toFixed(2)} kg (marca: ${r.target.toFixed(2)} kg)`
+      : `sin captura (marca: ${r.target.toFixed(2)} kg)`;
+    this.ui?.note(
+      `Concurso terminado · ${marca} · ${r.veredicto}${r.pago ? ` · ${r.pago} monedas` : ''}`,
+      r.pago ? 'gold' : ''
+    );
+    if (r.recordDeZona && r.best) {
+      this.ui?.note(`Récord del concurso en ${r.zoneName}: ${r.best.weight.toFixed(2)} kg`, 'good');
+    }
+    this.quests.notify('tournament', { value: this.tournament.wins });
+    this._persist();
   }
 
   /** Aplica la recompensa de una misión y lo cuenta por pantalla. */
@@ -536,7 +579,10 @@ export class Game {
         case 'KeyC': this._panel(() => this._openJournal()); break;
         case 'KeyJ': this._panel(() => this._openQuests()); break;
         case 'KeyG': this._panel(() => this.ui.showStats(this.economy, {
-          totalQuests: STORY.QUESTS.length, totalSpecies: SPECIES.length, totalZones: ZONES.length
+          totalQuests: STORY.QUESTS.length, totalSpecies: SPECIES.length, totalZones: ZONES.length,
+          tourneysPlayed: this.tournament.played,
+          tourneysWon: this.tournament.wins,
+          bestTourney: Math.max(0, ...Object.values(this.tournament.records)) || 0
         })); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
@@ -671,6 +717,7 @@ export class Game {
     };
     this.quests.notify('catch', hecho);
     this.quests.notify('catchAny', hecho);
+    this.tournament.submit(fish, this.zone.id);
     if (nuevaEspecie) {
       this.quests.notify('discover', { value: this.economy.discovered });
       this.ui.note(`Especie nueva en la enciclopedia: ${fish.species.name}`, 'good');
@@ -714,6 +761,7 @@ export class Game {
       economy: this.economy.toJSON(),
       world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
       quests: this.quests?.toJSON() ?? null,
+      tournament: this.tournament?.toJSON() ?? null,
       coach: this.coach?.toJSON() ?? []
     });
   }
@@ -725,6 +773,7 @@ export class Game {
     this.equipment = Equipment.fromJSON(this.inventory, data.equipment);
     this.economy = new Economy(data.economy);
     this.quests = new QuestSystem(data.quests, this._questEvents());
+    this.tournament = new Tournament(data.tournament, this._tournamentEvents());
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
@@ -843,6 +892,7 @@ export class Game {
     };
 
     if (!panelOpen && !talking) {
+      this.tournament.update(dt);
       this.worldEvents.update(dt, {
         hour: this.time.hour,
         rain: this.weather.rainAmount,
@@ -857,6 +907,7 @@ export class Game {
       this.ambient.update(dt, { player: this.player.position, time: this.time, weather: this.weather });
       this._updateFeedback(dt, moving);
     }
+    if (!panelOpen) this._checkHotspots();
     // Repaso periódico de los objetivos comprobables: barato y evita que un
     // aviso perdido deje una misión encallada.
     this._questSync = (this._questSync ?? 0) - dt;
@@ -902,7 +953,10 @@ export class Game {
       this.lastEvent = null;
 
       this.ui.setLevel(this.economy.level, this.economy.title, this.economy.levelProgress);
-      this.ui.setWorldEvent(this.worldEvents.label);
+      // El concurso manda sobre el suceso ambiental: si estás compitiendo, eso
+      // es lo que necesitas ver.
+      this.ui.setWorldEvent(this.tournament.label || this.worldEvents.label,
+        this.tournament.running ? this.tournament.progress : null);
       this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name);
       this.ui.update({
         fishing: this.fishing.hud,
@@ -916,6 +970,29 @@ export class Game {
       });
       this.autosaveTimer += dt;
       if (this.autosaveTimer > 30) { this.autosaveTimer = 0; this._persist(); }
+    }
+  }
+
+  /**
+   * Encontrar un puesto es llegar hasta él: no hay que pulsar nada. Al pisarlo
+   * por primera vez se anota en el mapa, se explica por qué es bueno y se
+   * cobra la exploración.
+   */
+  _checkHotspots() {
+    const spots = this.props?.hotspots;
+    if (!spots?.length) return;
+    const P = this.player.position;
+    for (const spot of spots) {
+      const dx = P.x - spot.position.x, dz = P.z - spot.position.z;
+      if (dx * dx + dz * dz > 81) continue;             // 9 m
+      if (!this.economy.findSpot(this.zone.id, spot.name)) continue;
+      this.economy.addXp(35);
+      this.audio?.objective();
+      this.ui?.note(
+        `Puesto encontrado · ${spot.name} (${spot.depth.toFixed(1)} m de calado): ${spot.description}`, 'good');
+      this.quests.notify('spot', { zone: this.zone.id, name: spot.name });
+      this.quests.notify('spots', { value: this.economy.spotsIn(this.zone.id).length });
+      this._persist();
     }
   }
 
@@ -944,9 +1021,9 @@ export class Game {
       object: this.props.sign,
       anchorHeight: 1.1,
       range: 4,
-      label: () => `E · ${this.zone.name}: leer el cartel`,
+      label: () => `E · ${this.zone.name}: leer el tablón`,
       enabled: () => !this.player.platform,
-      action: () => this.ui.showZones(ZONES, this.economy, this.zone.id)
+      action: () => this._openNotice()
     });
     I.register({
       object: this.props.bucket,
@@ -1029,7 +1106,9 @@ export class Game {
       pages: this.quests.pages.length,
       visited: this.economy.zonesVisited,
       met: this.quests.metNpcs,
-      owns: (category, id) => this.inventory.has(category, id)
+      owns: (category, id) => this.inventory.has(category, id),
+      spots: (zoneId) => this.economy.spotsIn(zoneId ?? this.zone.id).length,
+      tourneyWins: this.tournament?.wins ?? 0
     };
   }
 
@@ -1058,6 +1137,35 @@ export class Game {
         label: 'Ver la tienda',
         action: () => this._panelFromDialogue(() => this.ui.showShop(this.inventory, this.economy))
       });
+    }
+    if (npc.shop) {
+      const t = Tournament.terms(this.zone, SPECIES_BY_ID, this.economy.level);
+      if (this.tournament.running) {
+        options.push({
+          label: 'Retirarse del concurso',
+          action: () => this.tournament.abandon()
+        });
+      } else if (this.tournament.available) {
+        options.push({
+          label: `Concurso · ${t.entry} monedas`,
+          action: () => {
+            const ok = this.tournament.enter(this.zone, t, (precio) => {
+              if (!this.economy.canAfford(precio)) {
+                this.fishing._say(`El concurso cuesta ${precio} monedas y no las tienes`, 'bad');
+                return false;
+              }
+              this.economy.money -= precio;
+              return true;
+            });
+            if (ok) this.audio?.coin();
+          }
+        });
+      } else {
+        options.push({
+          label: `Concurso (en ${Math.ceil(this.tournament.cooldown / 60)} min)`,
+          action: () => this.fishing._say('El próximo concurso todavía no está abierto')
+        });
+      }
     }
     if (npc.sellsPermits) {
       options.push({
@@ -1136,11 +1244,37 @@ export class Game {
     });
   }
 
+  /** El tablón de la zona: fauna, puestos y concurso. */
+  _openNotice() {
+    const terms = Tournament.terms(this.zone, SPECIES_BY_ID, this.economy.level);
+    const conocidos = new Set(this.economy.spotsIn(this.zone.id));
+    this.ui.showNotice(this.zone, {
+      species: this.zone.species.map((id) => SPECIES_BY_ID[id]).filter(Boolean),
+      known: new Set(Object.keys(this.economy.records).filter((id) => this.economy.records[id].count)),
+      spots: (this.props.hotspots ?? []).filter((h) => conocidos.has(h.name)),
+      tournament: this.tournament,
+      terms,
+      money: this.economy.money,
+      record: this.tournament.records[this.zone.id],
+      onEnter: () => this.tournament.enter(this.zone, terms, (precio) => {
+        if (!this.economy.canAfford(precio)) {
+          this.fishing._say(`El concurso cuesta ${precio} monedas y no las tienes`, 'bad');
+          return false;
+        }
+        this.economy.money -= precio;
+        this.audio?.coin();
+        return true;
+      }),
+      onAbandon: () => this.tournament.abandon()
+    });
+  }
+
   _openMap() {
     this.ui.showZones(ZONES, this.economy, this.zone.id, {
       quests: this.quests,
       lockReason,
-      speciesKnown: (zone) => zone.species.filter((id) => this.economy.records[id]?.count).length
+      speciesKnown: (zone) => zone.species.filter((id) => this.economy.records[id]?.count).length,
+      spotsKnown: (zone) => this.economy.spotsIn(zone.id)
     });
   }
 

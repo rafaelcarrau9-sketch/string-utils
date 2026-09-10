@@ -207,6 +207,22 @@ export const QUESTS = [
     ]
   },
   {
+    id: 'sec_puestos',
+    chapter: 1, type: 'exploracion',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap1_primera'],
+    title: 'Conocer el lago',
+    summary: 'Tomé dice que quien sólo pesca desde el muelle no conoce el lago. Encuentra sus tres puestos.',
+    objectives: [{ kind: 'spots', zone: 'lago_niebla', count: 3, label: 'Puestos del lago encontrados' }],
+    reward: { money: 260, xp: 70, item: { category: 'lures', id: 'cucharilla_pesada' } },
+    hint: 'Recorre la orilla: la hoya, el escalón y el juncal se marcan solos al llegar a ellos.',
+    complete: [
+      '—La hoya, el escalón y el juncal. Ya sabes dónde está el pescado en este lago.',
+      'Rebusca en un cajón y saca una cucharilla del tamaño de un dedo.',
+      '—Para la hoya. Baja rápido, que es lo que hace falta ahí.'
+    ]
+  },
+  {
     id: 'sec_coleccion1',
     chapter: 1, type: 'coleccion',
     npc: 'sabela', turnIn: 'sabela',
@@ -247,6 +263,21 @@ export const QUESTS = [
       '—Sube. Todavía sube. —Se sienta en la grava sin soltar el pez.',
       'Te da la segunda hoja, esta doblada en cuatro dentro de un sobre.',
       '«Página 2 · Donde el río se estrecha, el agua corre. Donde se ensancha, el agua piensa. Los peces grandes están siempre en la segunda.»'
+    ]
+  },
+  {
+    id: 'sec_concurso',
+    chapter: 2, type: 'secundaria',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['sec_puestos'],
+    title: 'El concurso del embarcadero',
+    summary: 'Tomé organiza concursos en el tablón. Gana uno.',
+    objectives: [{ kind: 'tournament', count: 1, label: 'Concursos ganados' }],
+    reward: { money: 350, xp: 100 },
+    hint: 'Léelo en el tablón de cualquier zona: cinco minutos para batir la marca con un solo pez.',
+    complete: [
+      '—Ya te has llevado uno. Aquí se comenta durante semanas, avisado quedas.',
+      '—Se abre uno cada rato y en cada agua tiene su marca. Cuanto más honda, más gorda.'
     ]
   },
   {

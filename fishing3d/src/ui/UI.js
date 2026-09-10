@@ -173,6 +173,9 @@ const CSS = `
   background: var(--panel); border: 1px solid var(--warn); border-radius: 99px;
   padding: 5px 15px; font-size: 12px; letter-spacing: .01em; backdrop-filter: blur(8px);
   color: #ffe6ab; }
+.sw-event.compite { border-color: var(--accent); color: #d7f6f1; border-radius: 10px; }
+.sw-tbar { height: 3px; border-radius: 99px; background: rgba(255,255,255,.15); margin-top: 5px; overflow: hidden; }
+.sw-tbar i { display: block; height: 100%; background: var(--accent); transition: width .25s; }
 .sw-level .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .sw-xpbar { height: 4px; border-radius: 99px; background: rgba(255,255,255,.13); overflow: hidden; }
 .sw-xpbar i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
@@ -215,6 +218,8 @@ const CSS = `
 .sw-fish .r.comun { color: var(--dim); }
 .sw-fish .r.raro { color: var(--accent); }
 .sw-fish .r.legendario { color: var(--warn); }
+.sw-fish .sil { margin: 8px 0 2px; }
+.sw-fish .sil.oculta svg path, .sw-fish .sil.oculta svg circle { fill: #2b3238 !important; }
 .sw-fish .g { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11.5px;
   margin-top: 8px; color: var(--dim); }
 .sw-fish .g b { color: #eef4f6; font-weight: 550; font-variant-numeric: tabular-nums; }
@@ -693,6 +698,11 @@ export class UI {
         ['Líneas rotas', s.lineBreaks],
         ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
       ]],
+      ['Concursos', [
+        ['Disputados', extras.tourneysPlayed ?? 0],
+        ['Ganados', extras.tourneysWon ?? 0],
+        ['Mejor marca', extras.bestTourney ? `${extras.bestTourney.toFixed(2)} kg` : '—']
+      ]],
       ['Récords', [
         ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
         ['Mayor captura', `${s.biggest.toFixed(2)} kg`],
@@ -718,7 +728,7 @@ export class UI {
    * historia. Una zona cerrada por historia no se compra: se cuenta qué falta.
    */
   showZones(zones, economy, currentId, extras = {}) {
-    const { quests = null, lockReason = () => null, speciesKnown = () => 0 } = extras;
+    const { quests = null, lockReason = () => null, speciesKnown = () => 0, spotsKnown = () => [] } = extras;
     const body = el('div');
     const render = () => {
       body.innerHTML = '';
@@ -737,9 +747,11 @@ export class UI {
         const detalle = visited
           ? `${conocidas}/${zone.species.length} especies registradas · hasta ${zone.terrain.maxDepth} m`
           : `${zone.species.length} especies · hasta ${zone.terrain.maxDepth} m de calado`;
+        const puestos = spotsKnown(zone);
         row.innerHTML = `<div><div class="t">${zone.name}</div>
           <div class="d">${zone.description}</div>
-          <div class="stats">${detalle}</div></div>`;
+          <div class="stats">${detalle}</div>
+          ${puestos.length ? `<div class="stats" style="color:var(--warn)">Puestos: ${puestos.join(' · ')}</div>` : ''}</div>`;
         const act = el('div', 'act');
         if (here) {
           act.appendChild(el('span', 'sw-tag', 'Estás aquí'));
@@ -872,10 +884,15 @@ export class UI {
 
   /** Recuadro de seguimiento de la misión en curso. */
   /** Aviso del suceso en curso. Vacío lo esconde. */
-  setWorldEvent(text) {
+  setWorldEvent(text, progress = null) {
     const quiere = text && !this._hudHidden ? 'block' : 'none';
     if (this.eventBox.style.display !== quiere) this.eventBox.style.display = quiere;
-    if (text && this.eventBox.textContent !== text) this.eventBox.textContent = text;
+    if (!text) return;
+    const html = progress === null
+      ? text
+      : `${text}<div class="sw-tbar"><i style="width:${Math.min(100, progress * 100).toFixed(0)}%"></i></div>`;
+    if (this.eventBox.innerHTML !== html) this.eventBox.innerHTML = html;
+    this.eventBox.classList.toggle('compite', progress !== null);
   }
 
   setTrackedQuest(quest, quests, zoneName) {
@@ -896,6 +913,69 @@ export class UI {
       ${quest.hint ? `<div class="where">${quest.hint}</div>` : ''}`;
     if (this.trackBox.innerHTML !== html) this.trackBox.innerHTML = html;
     if (this.trackBox.style.display !== 'block') this.trackBox.style.display = 'block';
+  }
+
+  /**
+   * Tablón del embarcadero.
+   *
+   * Lo que un pescador leería al llegar a un agua: qué hay, qué se ha visto ya,
+   * qué puestos se conocen y si hay concurso abierto. Es también el sitio desde
+   * el que se apunta uno, para que competir no dependa de que en esa zona viva
+   * un tendero.
+   */
+  showNotice(zone, data) {
+    const { species, known, spots, tournament, terms, money, onEnter, onAbandon, record } = data;
+    const body = el('div');
+    const render = () => {
+      body.innerHTML = '';
+      body.appendChild(el('div', 'sw-hint', `<em>${zone.ambientNote ?? ''}</em><br>${zone.description}`));
+      body.lastChild.style.marginBottom = '14px';
+
+      body.appendChild(el('div', 'sw-chaptitle', 'Lo que vive en esta agua'));
+      const grid = el('div', 'sw-grid');
+      grid.style.gridTemplateColumns = 'repeat(auto-fill,minmax(150px,1fr))';
+      for (const sp of species) {
+        const visto = known.has(sp.id);
+        const card = el('div', `sw-card${visto ? '' : ' unknown'}`);
+        card.innerHTML = `<div class="t">${visto ? sp.name : '· · ·'}</div>
+          <div class="m">${visto ? `${sp.depth[0]}–${sp.depth[1]} m` : 'sin registrar'}</div>`;
+        grid.appendChild(card);
+      }
+      body.appendChild(grid);
+
+      body.appendChild(el('div', 'sw-chaptitle', 'Puestos'));
+      body.appendChild(el('div', 'sw-hint', spots.length
+        ? spots.map((p) => `<b>${p.name}</b> · ${p.depth.toFixed(1)} m — ${p.description}`).join('<br>')
+        : 'Todavía no has encontrado ninguno. Recorre la orilla: se marcan solos al llegar.'));
+
+      body.appendChild(el('div', 'sw-chaptitle', 'Concurso'));
+      const box = el('div', 'sw-quest');
+      if (tournament.running) {
+        box.innerHTML = `<div class="t">Concurso en marcha</div>
+          <div class="d">Marca a batir: <b>${tournament.target.toFixed(2)} kg</b> ·
+          tu mejor: <b>${tournament.best ? tournament.best.weight.toFixed(2) + ' kg' : 'sin captura'}</b></div>`;
+        const b = el('button', 'sw-btn ghost', 'Retirarse');
+        b.style.marginTop = '9px';
+        b.addEventListener('click', () => { onAbandon(); render(); });
+        box.appendChild(b);
+      } else if (tournament.cooldown > 0) {
+        box.innerHTML = `<div class="t">Cerrado</div>
+          <div class="d">El siguiente abre en ${Math.ceil(tournament.cooldown / 60)} min.</div>`;
+      } else {
+        box.innerHTML = `<div class="t">Abierto · inscripción ${terms.entry} monedas</div>
+          <div class="d">Cinco minutos para batir <b>${terms.target.toFixed(2)} kg</b> con un solo ejemplar.
+          Premio base <b>${terms.prize}</b>, el doble si te pasas de largo.</div>
+          ${record ? `<div class="rw">Tu récord aquí: ${record.toFixed(2)} kg</div>` : ''}`;
+        const b = el('button', 'sw-btn', `Apuntarse · ${terms.entry}`);
+        b.style.marginTop = '9px';
+        b.disabled = money < terms.entry;
+        b.addEventListener('click', () => { if (onEnter()) { this.closePanel(); } });
+        box.appendChild(b);
+      }
+      body.appendChild(box);
+    };
+    render();
+    this._overlay(zone.name, body);
   }
 
   /** Diario de misiones, agrupado por capítulo. */
@@ -969,6 +1049,51 @@ export class UI {
    * Enciclopedia de peces. Lo que no se ha capturado sale en gris y sin datos:
    * la ficha es la recompensa de haberlo pescado.
    */
+  /**
+   * Silueta de la especie, dibujada con el mismo perfil que usa el modelo 3D:
+   * el mismo `weightPerLength` decide si sale alargada como un lucio o alta y
+   * comprimida como una carpa, y la proporción entre especies es la real.
+   * Una ficha sin dibujo obliga a imaginarse el pez; con él, se reconoce.
+   */
+  _fishSilhouette(sp, { width = 168, height = 62 } = {}) {
+    const chunk = clamp((sp.weightPerLength - 0.0000073) / (0.000027 - 0.0000073), 0, 1);
+    const bodyH = 0.42 + chunk * 0.34;
+    const color = `#${sp.color.toString(16).padStart(6, '0')}`;
+
+    // Contorno: de la cola al morro por el lomo, y de vuelta por el vientre.
+    const pts = [];
+    const N = 26;
+    for (let i = 0; i <= N; i++) {
+      const t = -1 + (i / N) * 2;                       // -1 cola … +1 morro
+      const taper = Math.pow(1 - Math.abs(t) * 0.92, 0.55) *
+        (1 - Math.pow(Math.max(0, -t), 2.4) * 0.55);
+      const back = t > 0 ? 1 + t * 0.12 : 1;
+      pts.push([t, bodyH * taper * back]);
+    }
+    const sx = (t) => 6 + ((t + 1) / 2) * (width - 30);
+    const sy = (y) => height / 2 - y * (height * 0.62);
+    const lomo = pts.map(([t, y]) => `${sx(t).toFixed(1)},${sy(y).toFixed(1)}`).join(' L');
+    // El vientre es algo más lleno que el lomo, como en un pez de verdad.
+    const vientre = [...pts].reverse()
+      .map(([t, y]) => `${sx(t).toFixed(1)},${sy(-y * 0.86).toFixed(1)}`).join(' L');
+
+    const cy = height / 2;
+    const cauda = `M${sx(-1).toFixed(1)},${cy} L${(sx(-1) - 13).toFixed(1)},${(cy - bodyH * height * 0.72).toFixed(1)}` +
+      ` L${(sx(-1) - 7).toFixed(1)},${cy} L${(sx(-1) - 13).toFixed(1)},${(cy + bodyH * height * 0.72).toFixed(1)} Z`;
+    const dorsal = `M${sx(0.15).toFixed(1)},${sy(bodyH * 0.86).toFixed(1)}` +
+      ` L${sx(-0.1).toFixed(1)},${(sy(bodyH * 0.86) - height * 0.26).toFixed(1)}` +
+      ` L${sx(-0.45).toFixed(1)},${sy(bodyH * 0.7).toFixed(1)} Z`;
+    const ojo = `<circle cx="${sx(0.72).toFixed(1)}" cy="${(cy - height * 0.07).toFixed(1)}" r="2.4" fill="#0b0e10"/>`;
+
+    return `<svg class="sw-sil" viewBox="0 0 ${width} ${height}" width="100%" height="${height}"
+      preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <path d="M${lomo} L${vientre} Z" fill="${color}" fill-opacity="0.92"/>
+      <path d="${cauda}" fill="${color}" fill-opacity="0.75"/>
+      <path d="${dorsal}" fill="${color}" fill-opacity="0.6"/>
+      ${ojo}
+    </svg>`;
+  }
+
   showJournal(economy, species, extras = {}) {
     const { RARITY_LABEL = {}, zonesOf = () => [], lureName = (x) => x } = extras;
     const body = el('div');
@@ -989,6 +1114,7 @@ export class UI {
       if (!known) {
         card.innerHTML = `<div class="t"><span class="sw-swatch" style="background:#3a4148"></span>
           <span>Sin descubrir</span><span class="r ${sp.rarity}">${RARITY_LABEL[sp.rarity] ?? sp.rarity}</span></div>
+          <div class="sil oculta">${this._fishSilhouette(sp)}</div>
           <div class="lat">Cóbrala una vez para abrir su ficha</div>`;
         grid.appendChild(card);
         return;
@@ -1002,6 +1128,7 @@ export class UI {
           <span class="sw-swatch" style="background:#${sp.color.toString(16).padStart(6, '0')}"></span>
           <span>${sp.name}</span><span class="r ${sp.rarity}">${RARITY_LABEL[sp.rarity] ?? sp.rarity}</span></div>
         <div class="lat">${sp.latin}</div>
+        <div class="sil">${this._fishSilhouette(sp)}</div>
         <div class="g">
           <span>Talla</span><b>${sp.lengthRange[0]}–${sp.lengthRange[1]} cm</b>
           <span>Calado</span><b>${sp.depth[0]}–${sp.depth[1]} m</b>

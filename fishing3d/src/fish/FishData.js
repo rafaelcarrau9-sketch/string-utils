@@ -14,6 +14,7 @@
 export const SPECIES = [
   {
     id: 'perca_negra',
+    schooling: true,          // anda en grupo
     name: 'Perca negra',
     latin: 'Micropterus salmoides',
     rarity: 'comun',
@@ -33,6 +34,7 @@ export const SPECIES = [
   },
   {
     id: 'trucha_arcoiris',
+    schooling: true,          // anda en grupo
     name: 'Trucha arcoíris',
     latin: 'Oncorhynchus mykiss',
     rarity: 'comun',
@@ -52,6 +54,7 @@ export const SPECIES = [
   },
   {
     id: 'carpa_comun',
+    schooling: true,          // anda en grupo
     name: 'Carpa común',
     latin: 'Cyprinus carpio',
     rarity: 'comun',
@@ -109,6 +112,7 @@ export const SPECIES = [
   },
   {
     id: 'tenca',
+    schooling: true,          // anda en grupo
     name: 'Tenca',
     latin: 'Tinca tinca',
     rarity: 'comun',
@@ -128,6 +132,7 @@ export const SPECIES = [
   },
   {
     id: 'barbo',
+    schooling: true,          // anda en grupo
     name: 'Barbo de río',
     latin: 'Barbus barbus',
     rarity: 'comun',
@@ -148,6 +153,7 @@ export const SPECIES = [
   },
   {
     id: 'salmon',
+    schooling: true,          // anda en grupo
     name: 'Salmón atlántico',
     latin: 'Salmo salar',
     rarity: 'raro',
@@ -264,6 +270,7 @@ export const SPECIES = [
   },
   {
     id: 'trucha_comun',
+    schooling: true,          // anda en grupo
     name: 'Trucha común',
     latin: 'Salmo trutta',
     rarity: 'comun',

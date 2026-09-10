@@ -352,8 +352,18 @@ export class Fish {
       this.wanderTimer = 3 + this.rng() * 6;
       const s = this.species;
       const preferredDepth = lerp(s.depth[0], s.depth[1], this.rng());
-      const angle = this.heading + (this.rng() - 0.5) * 2.2;
-      const dist = 6 + this.rng() * 16;
+      let angle = this.heading + (this.rng() - 0.5) * 2.2;
+      let dist = 6 + this.rng() * 16;
+      // Si es de banco y se ha quedado descolgado, tira hacia los suyos.
+      if (this.shoal) {
+        const dx = this.shoal.x - this.position.x;
+        const dz = this.shoal.z - this.position.z;
+        const lejos = Math.hypot(dx, dz);
+        if (lejos > 16) {
+          angle = Math.atan2(dz, dx) + (this.rng() - 0.5) * 0.9;
+          dist = Math.min(lejos, 10 + this.rng() * 14);
+        }
+      }
       const nx = this.position.x + Math.cos(angle) * dist;
       const nz = this.position.z + Math.sin(angle) * dist;
       const depthThere = terrain.depthAt(nx, nz);

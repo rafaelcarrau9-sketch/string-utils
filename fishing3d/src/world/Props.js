@@ -18,6 +18,7 @@ export class Props {
     scene.add(this.group);
     this.rng = createRandom(909);
     this.fishingSpots = [];
+    this.hotspots = [];
 
     const wood = textures.material('madera', { repeat: 2 });
     const plank = textures.material('madera', { repeat: 1 });
@@ -41,6 +42,85 @@ export class Props {
     this._buildSign(wood, preset);
     this._buildBucket(preset);
     this._placeNpcAnchors();
+    this._findHotspots();
+  }
+
+  /**
+   * Puestos de pesca del agua.
+   *
+   * No son marcas puestas a mano: se buscan sobre el relieve real. La hoya es
+   * el punto más hondo al alcance de un lance desde la orilla; el escalón, el
+   * sitio donde el fondo cae de golpe —donde se colocan los peces grandes—; y
+   * el juncal, un bajío tranquilo. Encontrarlos es la recompensa de explorar
+   * una orilla en vez de lanzar siempre desde el muelle.
+   */
+  _findHotspots() {
+    const T = this.terrain;
+    const R = T.field.lakeRadius * 1.05;
+    const paso = Math.max(4, R / 26);
+    const candidatos = [];
+    for (let x = -R; x <= R; x += paso) {
+      for (let z = -R; z <= R; z += paso) {
+        const depth = T.depthAt(x, z);
+        if (depth < 0.5) continue;
+        // Sólo cuentan los puntos con una orilla firme a tiro de caña.
+        const orilla = this._shoreWithin(x, z, 34);
+        if (!orilla) continue;
+        // Cuánto cae el fondo alrededor: el escalón.
+        const salto = Math.max(
+          Math.abs(depth - T.depthAt(x + 9, z)), Math.abs(depth - T.depthAt(x - 9, z)),
+          Math.abs(depth - T.depthAt(x, z + 9)), Math.abs(depth - T.depthAt(x, z - 9))
+        );
+        candidatos.push({ x, z, depth, salto, orilla });
+      }
+    }
+    if (!candidatos.length) return;
+
+    const lejos = (a, b, min) => Math.hypot(a.x - b.x, a.z - b.z) > min;
+    const elegir = (puntúa) => {
+      let mejor = null, mejorP = -Infinity;
+      for (const c of candidatos) {
+        if (this.hotspots.some((h) => !lejos(c, h.position, 45))) continue;
+        const p = puntúa(c);
+        if (p > mejorP) { mejorP = p; mejor = c; }
+      }
+      return mejor;
+    };
+
+    this.hotspots = [];
+    const recetas = [
+      ['La hoya', 'Lo más hondo al alcance de un lance. Aquí se refugia lo grande cuando aprieta el sol.',
+        (c) => c.depth],
+      ['El escalón', 'El fondo cae de golpe. Los peces patrullan el borde esperando lo que baja.',
+        (c) => c.salto * 3 + Math.min(c.depth, 5)],
+      ['El juncal', 'Bajío tranquilo entre la vegetación. Refugio de los peces que buscan cobertura.',
+        (c) => -Math.abs(c.depth - 1.4) * 2 - c.salto]
+    ];
+    for (const [name, description, puntúa] of recetas) {
+      const c = elegir(puntúa);
+      if (!c) continue;
+      const position = new THREE.Vector3(c.orilla.x, c.orilla.y, c.orilla.z);
+      this.hotspots.push({
+        name, description, position,
+        water: new THREE.Vector3(c.x, this.terrain.waterLevel, c.z),
+        depth: c.depth
+      });
+      this.fishingSpots.push({ name, position: position.clone() });
+    }
+  }
+
+  /** Orilla firme más cercana a un punto de agua, o null si está a desmano. */
+  _shoreWithin(x, z, maxRadius) {
+    for (let r = 6; r <= maxRadius; r += 4) {
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2;
+        const sx = x + Math.cos(a) * r;
+        const sz = z + Math.sin(a) * r;
+        const h = this.terrain.heightAt(sx, sz);
+        if (h > 0.35 && h < 6) return { x: sx, y: h, z: sz };
+      }
+    }
+    return null;
   }
 
   /**

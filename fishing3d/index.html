@@ -17,6 +17,9 @@
     .spinner { width: 26px; height: 26px; border: 2px solid #223039;
       border-top-color: #6fd3c7; border-radius: 50%; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    #loading .track { width: 280px; height: 3px; border-radius: 99px; background: #1a232b; overflow: hidden; }
+    #loading-bar { display: block; height: 100%; width: 0; background: #6fd3c7; transition: width .35s ease; }
+    #loading .sub { color: #5d707d; font-size: 11.5px; letter-spacing: .12em; text-transform: uppercase; }
   </style>
   <script type="importmap">
   {
@@ -33,6 +36,8 @@
     <div class="spinner"></div>
     <h1>Aguas de Valdés</h1>
     <p id="loading-text">Cargando…</p>
+    <div class="track"><i id="loading-bar"></i></div>
+    <p class="sub">Cuenca de Valdés</p>
   </div>
   <script type="module" src="./src/main.js"></script>
 </body>

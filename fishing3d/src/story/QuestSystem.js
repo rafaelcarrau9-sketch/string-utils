@@ -228,6 +228,8 @@ export class QuestSystem {
         return p.npc === objective.npc;
       case 'own':
         return p.category === objective.category && p.item === objective.item;
+      case 'tournament':
+      case 'spots':
       case 'discover':
       case 'level':
       case 'money':
@@ -277,6 +279,8 @@ function creditFor(objective, snap) {
     case 'level': return snap.level ?? 0;
     case 'money': return snap.money ?? 0;
     case 'deliver': return snap.pages ?? 0;
+    case 'spots': return snap.spots?.(objective.zone) ?? 0;
+    case 'tournament': return snap.tourneyWins ?? 0;
     case 'own': return snap.owns?.(objective.category, objective.item) ? 1 : 0;
     case 'visit': return snap.visited?.has?.(objective.zone) ? 1 : 0;
     case 'talk': return snap.met?.has?.(objective.npc) ? 1 : 0;
@@ -285,10 +289,10 @@ function creditFor(objective, snap) {
 }
 
 /** Objetivos que se pueden recalcular mirando el estado, no el historial. */
-const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit']);
+const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit', 'spots', 'tournament']);
 
 /** Objetivos cuyo contador es un valor alcanzado, no un recuento de sucesos. */
-const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver']);
+const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver', 'spots', 'tournament']);
 
 /** Nombre legible de un personaje, para la interfaz. */
 export function npcName(id) { return NPCS[id]?.name ?? id; }
