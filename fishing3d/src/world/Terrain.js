@@ -20,6 +20,88 @@ const COLORS = {
   roca:   new THREE.Color(0x8b8880)
 };
 
+/**
+ * Proyección triplanar para el terreno.
+ *
+ * El mapeado plano del PlaneGeometry estira la textura hasta lo absurdo en las
+ * paredes verticales: en el cañón, un metro de roca ocupaba lo mismo que
+ * veinte de llano. La triplanar proyecta desde los tres ejes y mezcla según la
+ * normal, así que la piedra tiene el mismo grano mire hacia donde mire.
+ *
+ * Se hace sobre el material estándar con `onBeforeCompile` para no perder la
+ * iluminación, las sombras ni los colores por vértice que ya funcionan.
+ */
+function addTriplanar(material, worldScale) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTriScale = { value: 1 / Math.max(0.001, worldScale) };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        varying vec3 vTriPos;
+        varying vec3 vTriNormal;
+      `)
+      .replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        vTriPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vTriNormal = normalize(mat3(modelMatrix) * objectNormal);
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `
+        #include <common>
+        uniform float uTriScale;
+        varying vec3 vTriPos;
+        varying vec3 vTriNormal;
+
+        // Pesos de mezcla: la cara que más mira a cada eje manda.
+        vec3 triWeights(vec3 n) {
+          vec3 w = pow(abs(n), vec3(5.0));
+          return w / max(1e-4, w.x + w.y + w.z);
+        }
+
+        vec4 triSample(sampler2D tex, vec3 p, vec3 n, float scale) {
+          vec3 w = triWeights(n);
+          vec4 x = texture2D(tex, p.zy * scale);
+          vec4 y = texture2D(tex, p.xz * scale);
+          vec4 z = texture2D(tex, p.xy * scale);
+          return x * w.x + y * w.y + z * w.z;
+        }
+      `);
+
+    // El mapa de color, el de rugosidad y el de normales pasan por la
+    // proyección; el resto del shader estándar sigue intacto.
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      `
+      #ifdef USE_MAP
+        vec4 sampledDiffuseColor = triSample(map, vTriPos, vTriNormal, uTriScale);
+        diffuseColor *= sampledDiffuseColor;
+      #endif
+      `
+    ).replace(
+      '#include <roughnessmap_fragment>',
+      `
+      float roughnessFactor = roughness;
+      #ifdef USE_ROUGHNESSMAP
+        roughnessFactor *= triSample(roughnessMap, vTriPos, vTriNormal, uTriScale).g;
+      #endif
+      `
+    ).replace(
+      '#include <normal_fragment_maps>',
+      `
+      #ifdef USE_NORMALMAP
+        vec3 triMapN = triSample(normalMap, vTriPos, vTriNormal, uTriScale).xyz * 2.0 - 1.0;
+        triMapN.xy *= normalScale;
+        normal = normalize(normal + triMapN * 0.6);
+      #endif
+      `
+    );
+  };
+  // Clave propia: si no, three reutiliza el programa del material sin parchear.
+  material.customProgramCacheKey = () => 'terrenoTriplanar';
+  material.needsUpdate = true;
+}
+
 export class Terrain {
   constructor(textures, options = {}) {
     this.field = createHeightField(options);
@@ -71,6 +153,7 @@ export class Terrain {
 
     const material = textures.material('suelo', { repeat: 90 });
     material.vertexColors = true;
+    addTriplanar(material, this.field.size / 90);
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.receiveShadow = true;

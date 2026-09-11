@@ -139,6 +139,27 @@ export class AudioSystem {
   objective() { this._tone(1046, 0.1, { type: 'sine', gain: 0.1 }); this._tone(1568, 0.12, { type: 'sine', gain: 0.08, delay: 0.07 }); }
   /** Empieza un suceso en el agua: nota grave que llama la atención. */
   worldEvent() { this._tone(196, 0.5, { type: 'sine', gain: 0.13, slideTo: 262 }); this._tone(392, 0.4, { type: 'triangle', gain: 0.07, delay: 0.14 }); }
+  /**
+   * Trueno. De cerca es un chasquido seco con cola; de lejos, un retumbo
+   * grave y largo. La diferencia la hace el filtro, no el volumen.
+   */
+  thunder(closeness = 0.5) {
+    if (!this.ready || this.muted) return;
+    const cerca = clamp(closeness, 0, 1);
+    // El chasquido inicial sólo existe si cae cerca.
+    if (cerca > 0.55) {
+      this._burst(0.22, { gain: 0.3 * cerca, from: 5200, to: 900, type: 'highpass' });
+    }
+    // El retumbo: ruido filtrado bajo, largo, que se va apagando.
+    this._burst(1.6 + (1 - cerca) * 2.2, {
+      gain: 0.1 + cerca * 0.26,
+      from: 260 + cerca * 340,
+      to: 45,
+      type: 'lowpass'
+    });
+    this._tone(38 + cerca * 26, 1.9, { type: 'sine', gain: 0.05 + cerca * 0.12, slideTo: 24, attack: 0.12 });
+  }
+
   /** Página del cuaderno encontrada. */
   page() { [659, 880, 1175].forEach((f, i) => this._tone(f, 0.34, { type: 'sine', gain: 0.1, delay: i * 0.11 })); }
   /** Chapoteo lejano: se atenúa y se apaga de agudos con la distancia. */

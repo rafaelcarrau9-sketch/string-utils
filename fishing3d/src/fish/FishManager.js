@@ -26,9 +26,14 @@ const MIN_PER_SPECIES = { comun: 5, raro: 3, legendario: 1 };
 
 export class FishManager {
   constructor(scene, terrain, {
-    population = 72, seed = 71, species = null, allowGated = () => true, anchor = null
+    population = 72, seed = 71, species = null, allowGated = () => true,
+    anchor = null, hotspots = null
   } = {}) {
     this.anchor = anchor;         // el puesto principal: allí debe haber pesca
+    // Hoyas, escalones y juncales: la estructura del fondo. Los peces se
+    // agrupan ahí, igual que en un agua de verdad, y por eso encontrar un
+    // puesto vale algo.
+    this.hotspots = hotspots ?? [];
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
@@ -100,6 +105,22 @@ export class FishManager {
     return mejor;
   }
 
+  /**
+   * Destino de un banco: casi siempre un puesto con estructura, porque es
+   * donde se juntan los peces. Sin este sesgo los bancos vagaban al azar y
+   * encontrar una hoya no servía de nada cinco minutos después.
+   */
+  _shoalDestination(species) {
+    const buenos = this.hotspots.filter((h) =>
+      h.depth >= species.depth[0] * 0.6 && h.depth <= species.depth[1] * 1.7);
+    if (buenos.length && this.rng() < 0.7) {
+      const h = buenos[Math.floor(this.rng() * buenos.length)];
+      const p = this._spotNear(h.water, species, 22);
+      if (p) return p;
+    }
+    return null;
+  }
+
   /** Los bancos derivan buscando siempre agua con el calado de su especie. */
   _updateShoals(dt) {
     if (!this.shoals) return;
@@ -108,7 +129,10 @@ export class FishManager {
       if (shoal.timer <= 0) {
         shoal.timer = 18 + this.rng() * 26;
         const species = this.speciesPool.find((s) => s.id === id);
-        if (species) {
+        const estructura = species && this._shoalDestination(species);
+        if (estructura) {
+          shoal.target.copy(estructura);
+        } else if (species) {
           // Se eligen tres destinos posibles y se va al más cercano: así el
           // banco recorre el agua en vez de saltar de una punta a la otra, y el
           // pescador que lo ha localizado puede seguirlo.
@@ -185,6 +209,13 @@ export class FishManager {
     // Busca un punto con la profundidad que esa especie prefiere.
     const table = this._waterTable();
     if (!table.length) return null;
+    // Un tercio de las veces se prueba primero junto a un puesto: también los
+    // solitarios patrullan los escalones y las hoyas.
+    if (this.hotspots.length && this.rng() < 0.34) {
+      const h = this.hotspots[Math.floor(this.rng() * this.hotspots.length)];
+      const cerca = this._spotNear(h.water, species, 24);
+      if (cerca) return cerca;
+    }
     for (let attempt = 0; attempt < 60; attempt++) {
       const p = table[Math.floor(this.rng() * table.length)];
       // Un poco de dispersión para que no se coloquen en la rejilla.
@@ -220,6 +251,42 @@ export class FishManager {
     return fish;
   }
 
+  /**
+   * Presión de pesca.
+   *
+   * Machacar el mismo punto deja de dar resultado: los peces de ahí se
+   * escaman y los demás se apartan. Se guarda por celdas de veinte metros y se
+   * olvida sola en unos minutos, así que rotar entre puestos —que es lo que
+   * hace un pescador— es la jugada correcta y no una manía del diseño.
+   */
+  addPressure(x, z, amount = 1) {
+    this.pressure ??= new Map();
+    const key = `${Math.round(x / 20)},${Math.round(z / 20)}`;
+    this.pressure.set(key, Math.min(4, (this.pressure.get(key) ?? 0) + amount));
+  }
+
+  pressureAt(x, z) {
+    if (!this.pressure) return 0;
+    return this.pressure.get(`${Math.round(x / 20)},${Math.round(z / 20)}`) ?? 0;
+  }
+
+  _decayPressure(dt) {
+    if (!this.pressure?.size) return;
+    for (const [key, v] of this.pressure) {
+      const n = v - dt * 0.012;
+      if (n <= 0.02) this.pressure.delete(key); else this.pressure.set(key, n);
+    }
+  }
+
+  /** Escama a los peces de alrededor: el pez que se suelta avisa a los demás. */
+  spookAround(position, radius = 12, amount = 0.5, lureId = null) {
+    for (const fish of this.fishes) {
+      const d = fish.position.distanceTo(position);
+      if (d > radius) continue;
+      fish.spook(amount * (1 - d / radius), lureId);
+    }
+  }
+
   /** Pez que está mordiendo ahora mismo, si lo hay. */
   get biting() {
     return this.fishes.find((f) => f.state === FishState.BITING) || null;
@@ -253,6 +320,8 @@ export class FishManager {
       }
 
       let appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
+      // Un sitio muy castigado da menos: los peces ya han visto ese señuelo.
+      appetite /= 1 + this.pressureAt(lurePosition.x, lurePosition.z) * 0.8;
       if (worldEvent) appetite *= worldEvent.appetiteFor(fish.species, lure, depth);
       // Un pez colocado donde le gusta el agua come mejor.
       if (this.terrain.field.hasCurrent) {
@@ -278,6 +347,7 @@ export class FishManager {
 
   update(dt, context) {
     this._updateShoals(dt);
+    this._decayPressure(dt);
     const camera = context.cameraPosition;
     for (const fish of this.fishes) {
       fish.shoal = this.shoals?.get(fish.species.id)?.center ?? null;

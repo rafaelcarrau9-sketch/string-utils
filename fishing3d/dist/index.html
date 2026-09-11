@@ -1236,6 +1236,88 @@ const COLORS = {
   roca:   new THREE.Color(0x8b8880)
 };
 
+/**
+ * Proyección triplanar para el terreno.
+ *
+ * El mapeado plano del PlaneGeometry estira la textura hasta lo absurdo en las
+ * paredes verticales: en el cañón, un metro de roca ocupaba lo mismo que
+ * veinte de llano. La triplanar proyecta desde los tres ejes y mezcla según la
+ * normal, así que la piedra tiene el mismo grano mire hacia donde mire.
+ *
+ * Se hace sobre el material estándar con `onBeforeCompile` para no perder la
+ * iluminación, las sombras ni los colores por vértice que ya funcionan.
+ */
+function addTriplanar(material, worldScale) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTriScale = { value: 1 / Math.max(0.001, worldScale) };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        varying vec3 vTriPos;
+        varying vec3 vTriNormal;
+      `)
+      .replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        vTriPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vTriNormal = normalize(mat3(modelMatrix) * objectNormal);
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `
+        #include <common>
+        uniform float uTriScale;
+        varying vec3 vTriPos;
+        varying vec3 vTriNormal;
+
+        // Pesos de mezcla: la cara que más mira a cada eje manda.
+        vec3 triWeights(vec3 n) {
+          vec3 w = pow(abs(n), vec3(5.0));
+          return w / max(1e-4, w.x + w.y + w.z);
+        }
+
+        vec4 triSample(sampler2D tex, vec3 p, vec3 n, float scale) {
+          vec3 w = triWeights(n);
+          vec4 x = texture2D(tex, p.zy * scale);
+          vec4 y = texture2D(tex, p.xz * scale);
+          vec4 z = texture2D(tex, p.xy * scale);
+          return x * w.x + y * w.y + z * w.z;
+        }
+      `);
+
+    // El mapa de color, el de rugosidad y el de normales pasan por la
+    // proyección; el resto del shader estándar sigue intacto.
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      `
+      #ifdef USE_MAP
+        vec4 sampledDiffuseColor = triSample(map, vTriPos, vTriNormal, uTriScale);
+        diffuseColor *= sampledDiffuseColor;
+      #endif
+      `
+    ).replace(
+      '#include <roughnessmap_fragment>',
+      `
+      float roughnessFactor = roughness;
+      #ifdef USE_ROUGHNESSMAP
+        roughnessFactor *= triSample(roughnessMap, vTriPos, vTriNormal, uTriScale).g;
+      #endif
+      `
+    ).replace(
+      '#include <normal_fragment_maps>',
+      `
+      #ifdef USE_NORMALMAP
+        vec3 triMapN = triSample(normalMap, vTriPos, vTriNormal, uTriScale).xyz * 2.0 - 1.0;
+        triMapN.xy *= normalScale;
+        normal = normalize(normal + triMapN * 0.6);
+      #endif
+      `
+    );
+  };
+  // Clave propia: si no, three reutiliza el programa del material sin parchear.
+  material.customProgramCacheKey = () => 'terrenoTriplanar';
+  material.needsUpdate = true;
+}
+
 class Terrain {
   constructor(textures, options = {}) {
     this.field = createHeightField(options);
@@ -1287,6 +1369,7 @@ class Terrain {
 
     const material = textures.material('suelo', { repeat: 90 });
     material.vertexColors = true;
+    addTriplanar(material, this.field.size / 90);
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.receiveShadow = true;
@@ -1495,6 +1578,8 @@ class WaterBody {
  */
 
 const SKY_SCALE = 3000;
+/** Color del fogonazo: blanco frío, no la luz cálida del sol. */
+const RAYO_COLOR = new THREE.Color(0xdfe9ff);
 // Cuánto se atenúa el cielo para poder exponer el resto de la escena.
 const SKY_DIM = 0.40;
 
@@ -1632,16 +1717,27 @@ class SkyDome {
     } else {
       this.sun.position.copy(sunDir).multiplyScalar(140);
     }
+    // Un relámpago blanquea la escena entera durante una décima: no es una luz
+    // nueva, es la que ya hay subida de golpe y virada a blanco azulado.
+    const rayo = weather.lightning ?? 0;
     this.sun.color.copy(time.sunColor);
-    this.sun.intensity = time.sunIntensity * overcast * zl.sun;
+    if (rayo > 0.01) this.sun.color.lerp(RAYO_COLOR, Math.min(1, rayo));
+    this.sun.intensity = time.sunIntensity * overcast * zl.sun + rayo * 9;
     this.sun.visible = this.sun.intensity > 0.01;
+    // Con un relámpago de noche el sol está bajo el horizonte: la luz tiene
+    // que venir de arriba o no iluminaría nada.
+    if (rayo > 0.05 && focus) {
+      this._boltTarget ??= new THREE.Vector3();
+      this.sun.position.copy(focus).add(this._boltTarget.set(40, 180, -60));
+    }
 
     this.moon.position.copy(focus || new THREE.Vector3()).addScaledVector(time.moonDirection, 140);
     this.moon.intensity = time.nightFactor * 0.5 * overcast;
     this.moon.visible = this.moon.intensity > 0.01;
 
     this.hemi.color.copy(time.skyColor);
-    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast * zl.hemi;
+    if (rayo > 0.01) this.hemi.color.lerp(RAYO_COLOR, Math.min(1, rayo * 0.8));
+    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast * zl.hemi + rayo * 5;
     this.ambient.color.copy(time.ambientColor);
     this.ambient.intensity = lerp(1.2, 1.15, daylight) * zl.ambient;
 
@@ -3146,8 +3242,12 @@ class Props {
       for (let z = -R; z <= R; z += paso) {
         const depth = T.depthAt(x, z);
         if (depth < 0.5) continue;
-        // Sólo cuentan los puntos con una orilla firme a tiro de caña.
-        const orilla = this._shoreWithin(x, z, 34);
+        // Hace falta una orilla firme desde la que pescarlo. El radio es
+        // generoso a propósito: en un lago de orilla tendida, lo hondo está
+        // lejos de tierra y sólo se alcanza con caña larga o desde la barca.
+        // El puesto se encuentra pronto y se aprovecha después — eso es
+        // progresión, no un fallo.
+        const orilla = this._shoreWithin(x, z, 28);
         if (!orilla) continue;
         // Cuánto cae el fondo alrededor: el escalón.
         const salto = Math.max(
@@ -3186,7 +3286,8 @@ class Props {
       this.hotspots.push({
         name, description, position,
         water: new THREE.Vector3(c.x, this.terrain.waterLevel, c.z),
-        depth: c.depth
+        depth: c.depth,
+        cast: Math.hypot(c.x - position.x, c.z - position.z)
       });
       this.fishingSpots.push({ name, position: position.clone() });
     }
@@ -3797,6 +3898,12 @@ class Weather {
     this.cloudiness = this.target.cloudiness;
     this.fogDensity = this.target.fogDensity;
     this.rainAmount = this.target.rain;
+    // Relámpagos: sólo en tormenta, y con el trueno llegando después según la
+    // distancia, como en el mundo. Es lo que convierte «llueve mucho» en una
+    // tormenta de verdad.
+    this.flash = 0;                 // 0..1, el fogonazo que ilumina la escena
+    this._boltTimer = 12 + this.rng() * 20;
+    this._thunderQueue = [];
     this.windSpeed = this.target.wind;
     this.windDirection = new THREE.Vector2(1, 0.35).normalize();
     this.timeToChange = 120 + this.rng() * 180;
@@ -3855,7 +3962,48 @@ class Weather {
   /** Cuánto pica la superficie del agua: alimenta el shader del lago. */
   get choppiness() { return clamp(0.5 + this.windSpeed / 9, 0.5, 2.4); }
 
-  update(dt, playerPosition, fogColor) {
+  /** Intensidad del fogonazo ahora mismo, para que la iluminación lo use. */
+  get lightning() { return this.flash; }
+
+  /**
+   * Relámpagos. El fogonazo es un pico que decae rápido; el trueno se encola
+   * con el retardo que corresponde a la distancia, y cuanto más lejos, más
+   * sordo suena.
+   */
+  _updateLightning(dt, audio) {
+    // El fogonazo se apaga en unas décimas.
+    this.flash = Math.max(0, this.flash - dt * 5.5);
+
+    for (let i = this._thunderQueue.length - 1; i >= 0; i--) {
+      const t = this._thunderQueue[i];
+      t.delay -= dt;
+      if (t.delay > 0) continue;
+      audio?.thunder?.(t.closeness);
+      this._thunderQueue.splice(i, 1);
+    }
+
+    // Sólo hay aparato eléctrico con tormenta declarada.
+    const tormenta = this.target.rain > 0.85 && this.rainAmount > 0.5;
+    if (!tormenta) { this._boltTimer = 8 + this.rng() * 14; return; }
+
+    this._boltTimer -= dt;
+    if (this._boltTimer > 0) return;
+    this._boltTimer = 7 + this.rng() * 22;
+
+    // Cerca o lejos: lo cerca decide el brillo, el retardo y el tipo de trueno.
+    const closeness = Math.pow(this.rng(), 1.6);       // lo muy cercano es raro
+    this.flash = 0.35 + closeness * 0.9;
+    this._thunderQueue.push({ delay: 0.4 + (1 - closeness) * 7, closeness });
+    this.onBolt?.(closeness);
+    // Algunos relámpagos vienen en ráfaga doble.
+    if (this.rng() < 0.35) {
+      this._thunderQueue.push({ delay: 0.55 + (1 - closeness) * 7, closeness: closeness * 0.8 });
+    }
+    return closeness;
+  }
+
+  update(dt, playerPosition, fogColor, audio = null) {
+    this._updateLightning(dt, audio);
     this.timeToChange -= dt;
     if (this.timeToChange <= 0) {
       // Transición a un estado vecino: nunca se pasa de despejado a tormenta de golpe.
@@ -4429,6 +4577,12 @@ class Fish {
     this.state = FishState.SWIMMING;
     this.stateTime = 0;
     this.interest = 0;
+    // Desconfianza aprendida: sube cuando el pez se acerca a un señuelo y no
+    // le convence, y mucho más si lo han enganchado y se ha soltado. Decae con
+    // el tiempo. Es lo que hace que insistir con el mismo montaje en el mismo
+    // sitio deje de funcionar.
+    this.wariness = 0;
+    this.wariesOf = null;          // qué señuelo le escamó
     this.energy = 1;
 
     this.position = position.clone();
@@ -4478,13 +4632,28 @@ class Fish {
     ) * 0.75;
     // Los ejemplares grandes son más desconfiados.
     const caution = 1 - this.trophy * 0.35;
-    return affinity * band * depthFit * caution * weatherModifier * lure.attraction;
+    // Y uno escamado lo es todavía más, sobre todo con el señuelo que ya le
+    // falló: cambiar de montaje es media solución.
+    const mismo = this.wariesOf === lure.id ? 1 : 0.45;
+    const shy = 1 - clamp(this.wariness, 0, 1) * (0.72 * mismo + 0.12);
+    return affinity * band * depthFit * caution * shy * weatherModifier * lure.attraction;
+  }
+
+  /** Se ha desconfiado de algo. `amount` 0..1 según lo grave que fuera. */
+  spook(amount, lureId = null) {
+    this.wariness = clamp(this.wariness + amount, 0, 1);
+    if (lureId) this.wariesOf = lureId;
   }
 
   update(dt, context) {
     // Cobrado: la malla la coloca quien lo está mostrando, no el pez.
     if (this.state === FishState.CAUGHT) return;
     this.stateTime += dt;
+    // La desconfianza se olvida despacio: unos minutos de calma la borran.
+    if (this.wariness > 0) {
+      this.wariness = Math.max(0, this.wariness - dt * 0.0055);
+      if (this.wariness === 0) this.wariesOf = null;
+    }
     // El reloj del aleteo corre más deprisa cuanto más rápido nada.
     this.material.userData.uniforms.uTime.value +=
       dt * (0.55 + this.velocity.length() / Math.max(0.6, this.species.speed) * 0.9);
@@ -4513,6 +4682,12 @@ class Fish {
         this.velocity.z += (dz / near) * push * dt * 6;
         if (this.state !== FishState.ESCAPING && near < radius * 0.6) {
           this.interest = 0;
+    // Desconfianza aprendida: sube cuando el pez se acerca a un señuelo y no
+    // le convence, y mucho más si lo han enganchado y se ha soltado. Decae con
+    // el tiempo. Es lo que hace que insistir con el mismo montaje en el mismo
+    // sitio deje de funcionar.
+    this.wariness = 0;
+    this.wariesOf = null;          // qué señuelo le escamó
           this.setState(FishState.ESCAPING);
         }
       }
@@ -4661,6 +4836,8 @@ class Fish {
       this.biteStrength = clamp(0.35 + this.interest * 0.5 + this.trophy * 0.4, 0.25, 1.6);
       context.onBite?.(this);
     } else if (this.stateTime > 6 + this.interest * 5) {
+      // Lo ha mirado de cerca y no le ha gustado: a partir de ahora, menos.
+      this.spook(0.3, context.lure?.id ?? null);
       this.setState(FishState.ESCAPING);
     }
   }
@@ -4720,9 +4897,14 @@ const MIN_PER_SPECIES = { comun: 5, raro: 3, legendario: 1 };
 
 class FishManager {
   constructor(scene, terrain, {
-    population = 72, seed = 71, species = null, allowGated = () => true, anchor = null
+    population = 72, seed = 71, species = null, allowGated = () => true,
+    anchor = null, hotspots = null
   } = {}) {
     this.anchor = anchor;         // el puesto principal: allí debe haber pesca
+    // Hoyas, escalones y juncales: la estructura del fondo. Los peces se
+    // agrupan ahí, igual que en un agua de verdad, y por eso encontrar un
+    // puesto vale algo.
+    this.hotspots = hotspots ?? [];
     this.scene = scene;
     this.terrain = terrain;
     this.rng = createRandom(seed);
@@ -4794,6 +4976,22 @@ class FishManager {
     return mejor;
   }
 
+  /**
+   * Destino de un banco: casi siempre un puesto con estructura, porque es
+   * donde se juntan los peces. Sin este sesgo los bancos vagaban al azar y
+   * encontrar una hoya no servía de nada cinco minutos después.
+   */
+  _shoalDestination(species) {
+    const buenos = this.hotspots.filter((h) =>
+      h.depth >= species.depth[0] * 0.6 && h.depth <= species.depth[1] * 1.7);
+    if (buenos.length && this.rng() < 0.7) {
+      const h = buenos[Math.floor(this.rng() * buenos.length)];
+      const p = this._spotNear(h.water, species, 22);
+      if (p) return p;
+    }
+    return null;
+  }
+
   /** Los bancos derivan buscando siempre agua con el calado de su especie. */
   _updateShoals(dt) {
     if (!this.shoals) return;
@@ -4802,7 +5000,10 @@ class FishManager {
       if (shoal.timer <= 0) {
         shoal.timer = 18 + this.rng() * 26;
         const species = this.speciesPool.find((s) => s.id === id);
-        if (species) {
+        const estructura = species && this._shoalDestination(species);
+        if (estructura) {
+          shoal.target.copy(estructura);
+        } else if (species) {
           // Se eligen tres destinos posibles y se va al más cercano: así el
           // banco recorre el agua en vez de saltar de una punta a la otra, y el
           // pescador que lo ha localizado puede seguirlo.
@@ -4879,6 +5080,13 @@ class FishManager {
     // Busca un punto con la profundidad que esa especie prefiere.
     const table = this._waterTable();
     if (!table.length) return null;
+    // Un tercio de las veces se prueba primero junto a un puesto: también los
+    // solitarios patrullan los escalones y las hoyas.
+    if (this.hotspots.length && this.rng() < 0.34) {
+      const h = this.hotspots[Math.floor(this.rng() * this.hotspots.length)];
+      const cerca = this._spotNear(h.water, species, 24);
+      if (cerca) return cerca;
+    }
     for (let attempt = 0; attempt < 60; attempt++) {
       const p = table[Math.floor(this.rng() * table.length)];
       // Un poco de dispersión para que no se coloquen en la rejilla.
@@ -4914,6 +5122,42 @@ class FishManager {
     return fish;
   }
 
+  /**
+   * Presión de pesca.
+   *
+   * Machacar el mismo punto deja de dar resultado: los peces de ahí se
+   * escaman y los demás se apartan. Se guarda por celdas de veinte metros y se
+   * olvida sola en unos minutos, así que rotar entre puestos —que es lo que
+   * hace un pescador— es la jugada correcta y no una manía del diseño.
+   */
+  addPressure(x, z, amount = 1) {
+    this.pressure ??= new Map();
+    const key = `${Math.round(x / 20)},${Math.round(z / 20)}`;
+    this.pressure.set(key, Math.min(4, (this.pressure.get(key) ?? 0) + amount));
+  }
+
+  pressureAt(x, z) {
+    if (!this.pressure) return 0;
+    return this.pressure.get(`${Math.round(x / 20)},${Math.round(z / 20)}`) ?? 0;
+  }
+
+  _decayPressure(dt) {
+    if (!this.pressure?.size) return;
+    for (const [key, v] of this.pressure) {
+      const n = v - dt * 0.012;
+      if (n <= 0.02) this.pressure.delete(key); else this.pressure.set(key, n);
+    }
+  }
+
+  /** Escama a los peces de alrededor: el pez que se suelta avisa a los demás. */
+  spookAround(position, radius = 12, amount = 0.5, lureId = null) {
+    for (const fish of this.fishes) {
+      const d = fish.position.distanceTo(position);
+      if (d > radius) continue;
+      fish.spook(amount * (1 - d / radius), lureId);
+    }
+  }
+
   /** Pez que está mordiendo ahora mismo, si lo hay. */
   get biting() {
     return this.fishes.find((f) => f.state === FishState.BITING) || null;
@@ -4947,6 +5191,8 @@ class FishManager {
       }
 
       let appetite = fish.appetite(lure, hour, weatherModifier, depth) * feeding;
+      // Un sitio muy castigado da menos: los peces ya han visto ese señuelo.
+      appetite /= 1 + this.pressureAt(lurePosition.x, lurePosition.z) * 0.8;
       if (worldEvent) appetite *= worldEvent.appetiteFor(fish.species, lure, depth);
       // Un pez colocado donde le gusta el agua come mejor.
       if (this.terrain.field.hasCurrent) {
@@ -4972,6 +5218,7 @@ class FishManager {
 
   update(dt, context) {
     this._updateShoals(dt);
+    this._decayPressure(dt);
     const camera = context.cameraPosition;
     for (const fish of this.fishes) {
       fish.shoal = this.shoals?.get(fish.species.id)?.center ?? null;
@@ -5503,7 +5750,8 @@ const CHAPTERS = [
   { id: 2, title: 'Aguas que corren', subtitle: 'Río Trenzado' },
   { id: 3, title: 'Lo que la niebla tapa', subtitle: 'Marisma de Argán' },
   { id: 4, title: 'El agua fría', subtitle: 'Embalse Alto' },
-  { id: 5, title: 'La Garganta', subtitle: 'El final del cuaderno' }
+  { id: 5, title: 'La Garganta', subtitle: 'El final del cuaderno' },
+  { id: 6, title: 'Lo que queda después', subtitle: 'La cuenca entera' }
 ];
 
 const QUESTS = [
@@ -5803,6 +6051,97 @@ const QUESTS = [
       '«Página 5 · No la pesques para enseñarla. Pésca la para saber que sigue ahí. Luego devuélvela.»'
     ]
   },
+  // ---------------------------------------------------------- capítulo 6
+  {
+    id: 'cap6_censo',
+    chapter: 6, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap5_sombra'],
+    title: 'El expediente',
+    summary: 'Para que la cuenca se declare protegida hace falta el censo completo: trece especies documentadas.',
+    objectives: [{ kind: 'discover', count: 13, label: 'Especies documentadas' }],
+    reward: { money: 2200, xp: 420 },
+    hint: 'Cada agua tiene especies que no hay en las demás. Mira el mapa: dice cuántas llevas de cada una.',
+    complete: [
+      'Ordena las fichas en la mesa, una por una, y las cuenta dos veces.',
+      '—Trece. Con esto y el esturión, el expediente se sostiene solo.',
+      '—Tu abuela tardó cuarenta años en juntar la mitad. Tú lo has hecho en una temporada porque ella dejó el camino hecho.'
+    ]
+  },
+  {
+    id: 'cap6_vuelta',
+    chapter: 6, type: 'historia',
+    npc: 'nuno', turnIn: 'nuno',
+    requires: ['cap6_censo'],
+    title: 'Una vuelta a la cuenca',
+    summary: 'Nuno quiere una captura de cada una de las cinco aguas, fechadas el mismo día, para el acta.',
+    objectives: [
+      { kind: 'catchAny', count: 1, zone: 'lago_niebla', label: 'Captura en el Lago de la Niebla' },
+      { kind: 'catchAny', count: 1, zone: 'rio_trenzado', label: 'Captura en el Río Trenzado' },
+      { kind: 'catchAny', count: 1, zone: 'marisma_argan', label: 'Captura en la Marisma de Argán' },
+      { kind: 'catchAny', count: 1, zone: 'embalse_alto', label: 'Captura en el Embalse Alto' },
+      { kind: 'catchAny', count: 1, zone: 'garganta', label: 'Captura en La Garganta' }
+    ],
+    reward: { money: 1800, xp: 380, item: { category: 'boats', id: 'lancha_motor' } },
+    complete: [
+      'Firma el acta, la sella y te tiende una copia.',
+      '—Cuenca de Valdés, régimen de protección. La compuerta se queda abierta y el caudal vuelve a su sitio.',
+      '—La lancha del servicio ya no hace falta para vigilar. Quédatela: tú vas a estar más en el agua que yo.'
+    ]
+  },
+  {
+    id: 'cap6_cabana',
+    chapter: 6, type: 'historia',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap6_vuelta'],
+    title: 'La cabaña',
+    summary: 'Tomé ha estado guardando algo desde el primer día. Ve a verlo.',
+    objectives: [{ kind: 'talk', npc: 'tome', label: 'Hablar con Tomé' }],
+    reward: { money: 600, xp: 300 },
+    complete: [
+      'Saca de debajo del mostrador una caja de latón con el nombre de Remedios rayado en la tapa.',
+      '—Me la dejó hace seis años. Dijo: «cuando alguien de mi sangre sepa leer el agua, dásela».',
+      'Dentro hay una cucharilla vieja, gastada de tanto rozar piedra, y una nota de dos líneas:',
+      '«El agua no era el misterio. El misterio era si a alguien le iba a importar. Gracias por venir.»',
+      '—Yo creo que ya está. Lo demás es pescar, que tampoco es poco.'
+    ]
+  },
+  {
+    id: 'sec_encargos',
+    chapter: 6, type: 'secundaria',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap2_barbo'],
+    title: 'Trabajo del tablón',
+    summary: 'Cumple cinco encargos del tablón. Es lo que da de comer entre aventura y aventura.',
+    objectives: [{ kind: 'commission', count: 5, label: 'Encargos entregados' }],
+    reward: { money: 700, xp: 180 },
+    hint: 'Los encargos están en el tablón de cada agua, junto al concurso. Se renuevan cada diez minutos.',
+    complete: ['—Cinco encargos servidos sin fallar uno. Por aquí eso vale más que cualquier trofeo.']
+  },
+  {
+    id: 'sec_maestro',
+    chapter: 6, type: 'secundaria',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['sec_concurso'],
+    title: 'Tres de tres',
+    summary: 'Gana tres concursos. Tomé dice que uno es suerte.',
+    objectives: [{ kind: 'tournament', count: 3, label: 'Concursos ganados' }],
+    reward: { money: 900, xp: 240 },
+    complete: ['—Tres. Ya no es suerte. Voy a tener que subir la marca por tu culpa.']
+  },
+  {
+    id: 'sec_trofeos',
+    chapter: 6, type: 'coleccion',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap4_lacustre'],
+    title: 'Ejemplares de talla',
+    summary: 'Cinco ejemplares en la franja alta de su especie. Sirven para medir si la cuenca se recupera.',
+    objectives: [{ kind: 'trophy', count: 5, label: 'Ejemplares de trofeo cobrados' }],
+    reward: { money: 1100, xp: 260 },
+    hint: 'Un ejemplar de trofeo es de los grandes de su especie. Pescar de noche y en las hoyas ayuda.',
+    complete: ['—Cinco ejemplares en la franja alta. Eso significa que hay comida y que llevan años sin molestarlos. Buena señal.']
+  },
+
   {
     id: 'sec_explorador',
     chapter: 5, type: 'exploracion',
@@ -6073,12 +6412,15 @@ class QuestSystem {
         return true;
       case 'catchAny':
         return !objective.zone || p.zone === objective.zone;
+      case 'trophy':
+        return (p.trophy ?? 0) >= (objective.minTrophy ?? 0.85);
       case 'visit':
         return p.zone === objective.zone;
       case 'talk':
         return p.npc === objective.npc;
       case 'own':
         return p.category === objective.category && p.item === objective.item;
+      case 'commission':
       case 'tournament':
       case 'spots':
       case 'discover':
@@ -6132,6 +6474,7 @@ function creditFor(objective, snap) {
     case 'deliver': return snap.pages ?? 0;
     case 'spots': return snap.spots?.(objective.zone) ?? 0;
     case 'tournament': return snap.tourneyWins ?? 0;
+    case 'commission': return snap.commissions ?? 0;
     case 'own': return snap.owns?.(objective.category, objective.item) ? 1 : 0;
     case 'visit': return snap.visited?.has?.(objective.zone) ? 1 : 0;
     case 'talk': return snap.met?.has?.(objective.npc) ? 1 : 0;
@@ -6140,10 +6483,10 @@ function creditFor(objective, snap) {
 }
 
 /** Objetivos que se pueden recalcular mirando el estado, no el historial. */
-const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit', 'spots', 'tournament']);
+const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit', 'spots', 'tournament', 'commission']);
 
 /** Objetivos cuyo contador es un valor alcanzado, no un recuento de sucesos. */
-const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver', 'spots', 'tournament']);
+const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver', 'spots', 'tournament', 'commission']);
 
 /** Nombre legible de un personaje, para la interfaz. */
 function npcName(id) { return NPCS[id]?.name ?? id; }
@@ -6444,6 +6787,166 @@ class Tournament {
   get progress() { return this.best ? clamp(this.best.weight / Math.max(0.01, this.target), 0, 1.6) : 0; }
 
   toJSON() { return { wins: this.wins, played: this.played, records: this.records }; }
+}
+
+/* ===== src/story/Commissions.js ===== */
+/**
+ * Encargos del tablón.
+ *
+ * Lo que sostiene el juego cuando la historia se acaba: tres peticiones por
+ * agua, generadas con lo que de verdad vive ahí, que se renuevan solas. No son
+ * misiones de la campaña —no tienen diálogo ni consecuencias— sino trabajo:
+ * alguien quiere un pez concreto y paga por él.
+ *
+ * La dificultad y el pago salen de los mismos datos que usa el resto del
+ * juego: rareza de la especie, talla pedida y calado al que vive. Así un
+ * encargo del cañón vale lo que cuesta y uno del lago también.
+ */
+
+const REFRESH = 600;             // segundos hasta renovar la tabla
+
+const CLIENTES = [
+  'el restaurante del puerto', 'un coleccionista de la capital', 'la cofradía',
+  'el hostal del cruce', 'un aficionado del pueblo', 'la asociación de pesca',
+  'la escuela del valle', 'un fotógrafo de naturaleza'
+];
+
+const PLANTILLAS = [
+  {
+    id: 'cantidad',
+    peso: 1.0,
+    build: (sp, rng) => {
+      const n = 2 + Math.floor(rng() * 3);
+      return {
+        kind: 'cantidad', count: n, species: sp.id,
+        text: `${n} ejemplares de ${sp.name.toLowerCase()}`,
+        dificultad: n * (sp.rarity === 'comun' ? 1 : sp.rarity === 'raro' ? 2.1 : 4)
+      };
+    }
+  },
+  {
+    id: 'talla',
+    peso: 0.9,
+    build: (sp, rng) => {
+      const frac = 0.62 + rng() * 0.26;
+      const cm = Math.round(sp.lengthRange[0] + (sp.lengthRange[1] - sp.lengthRange[0]) * frac);
+      return {
+        kind: 'talla', count: 1, species: sp.id, minLength: cm,
+        text: `una ${sp.name.toLowerCase()} de ${cm} cm o más`,
+        dificultad: 2.2 + frac * 4 + (sp.rarity === 'comun' ? 0 : 2)
+      };
+    }
+  },
+  {
+    id: 'noche',
+    peso: 0.55,
+    build: (sp, rng) => {
+      const n = 1 + Math.floor(rng() * 2);
+      // El plural de «carpa espejo» no es «carpa espejos»: con más de uno se
+      // dice «ejemplares de», que funciona con cualquier nombre compuesto.
+      const cuerpo = n > 1
+        ? `${n} ejemplares de ${sp.name.toLowerCase()} pescados de noche`
+        : `un ejemplar de ${sp.name.toLowerCase()} pescado de noche`;
+      return {
+        kind: 'noche', count: n, species: sp.id, night: true,
+        text: cuerpo,
+        dificultad: 3 + n * 1.8 + (sp.activity.noche > 1 ? 0 : 2.5)
+      };
+    }
+  }
+];
+
+class Commissions {
+  constructor(data = null) {
+    this.done = data?.done ?? 0;
+    this.earned = data?.earned ?? 0;
+    this.accepted = data?.accepted ?? null;    // { zone, ...oferta, progreso }
+    this.tables = data?.tables ?? {};          // zona → { seed, offers, age }
+  }
+
+  /** Tabla de encargos de una zona; se regenera cuando caduca. */
+  offersFor(zone, speciesById, level = 1) {
+    const t = this.tables[zone.id];
+    if (t && t.age < REFRESH && t.offers?.length) return t.offers;
+
+    const seed = Math.floor(Math.random() * 1e9);
+    const rng = createRandom(seed);
+    const pool = zone.species
+      .map((id) => speciesById[id])
+      .filter((sp) => sp && sp.rarity !== 'legendario');
+    const offers = [];
+    const usadas = new Set();
+    for (let i = 0; i < 3 && pool.length; i++) {
+      // Sin repetir especie: tres encargos del mismo pez no son tres encargos.
+      let sp = null;
+      for (let intento = 0; intento < 12; intento++) {
+        const cand = pool[Math.floor(rng() * pool.length)];
+        if (!usadas.has(cand.id)) { sp = cand; break; }
+      }
+      if (!sp) break;
+      usadas.add(sp.id);
+
+      const total = PLANTILLAS.reduce((n, p) => n + p.peso, 0);
+      let r = rng() * total;
+      let plantilla = PLANTILLAS[0];
+      for (const p of PLANTILLAS) { r -= p.peso; if (r <= 0) { plantilla = p; break; } }
+
+      const base = plantilla.build(sp, rng);
+      offers.push({
+        ...base,
+        id: `${zone.id}:${i}:${seed}`,
+        zone: zone.id,
+        client: CLIENTES[Math.floor(rng() * CLIENTES.length)],
+        reward: Math.round(base.dificultad * (34 + level * 6)),
+        xp: Math.round(base.dificultad * 7)
+      });
+    }
+    this.tables[zone.id] = { seed, offers, age: 0 };
+    return offers;
+  }
+
+  /** Segundos hasta que se renueve la tabla de una zona. */
+  refreshIn(zoneId) {
+    const t = this.tables[zoneId];
+    return t ? Math.max(0, REFRESH - t.age) : 0;
+  }
+
+  accept(offer) {
+    if (this.accepted) return false;
+    this.accepted = { ...offer, progreso: 0 };
+    return true;
+  }
+
+  abandon() { this.accepted = null; }
+
+  /**
+   * Una captura. Devuelve `null` si no cuenta, `{ done:false }` si suma o
+   * `{ done:true, reward, xp }` si completa el encargo.
+   */
+  submit(fish, zoneId, night) {
+    const a = this.accepted;
+    if (!a || a.zone !== zoneId) return null;
+    if (fish.species.id !== a.species) return null;
+    if (a.minLength && fish.length < a.minLength) return null;
+    if (a.night && !night) return null;
+    a.progreso += 1;
+    if (a.progreso < a.count) return { done: false, progreso: a.progreso, total: a.count };
+    const premio = { done: true, reward: a.reward, xp: a.xp, text: a.text, client: a.client };
+    this.done += 1;
+    this.earned += a.reward;
+    this.accepted = null;
+    // La tabla de esa zona se renueva: el encargo cumplido ya no está.
+    delete this.tables[zoneId];
+    return premio;
+  }
+
+  update(dt) {
+    for (const t of Object.values(this.tables)) t.age += dt;
+  }
+
+  toJSON() {
+    return { done: this.done, earned: this.earned, accepted: this.accepted, tables: this.tables };
+  }
 }
 
 /* ===== src/fishing/Line.js ===== */
@@ -9128,10 +9631,12 @@ class UI {
         ['Líneas rotas', s.lineBreaks],
         ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
       ]],
-      ['Concursos', [
-        ['Disputados', extras.tourneysPlayed ?? 0],
-        ['Ganados', extras.tourneysWon ?? 0],
-        ['Mejor marca', extras.bestTourney ? `${extras.bestTourney.toFixed(2)} kg` : '—']
+      ['Concursos y encargos', [
+        ['Concursos disputados', extras.tourneysPlayed ?? 0],
+        ['Concursos ganados', extras.tourneysWon ?? 0],
+        ['Mejor marca', extras.bestTourney ? `${extras.bestTourney.toFixed(2)} kg` : '—'],
+        ['Encargos entregados', extras.commissionsDone ?? 0],
+        ['Cobrado en encargos', extras.commissionsEarned ?? 0]
       ]],
       ['Récords', [
         ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
@@ -9325,9 +9830,19 @@ class UI {
     this.eventBox.classList.toggle('compite', progress !== null);
   }
 
-  setTrackedQuest(quest, quests, zoneName) {
-    if (!quest || this._hudHidden) {
+  setTrackedQuest(quest, quests, zoneName, commission = null) {
+    if ((!quest && !commission) || this._hudHidden) {
       if (this.trackBox.style.display !== 'none') this.trackBox.style.display = 'none';
+      return;
+    }
+    // Sin misión pero con encargo, el recuadro muestra el encargo: siempre hay
+    // algo que el jugador está intentando conseguir.
+    if (!quest) {
+      const html = `<div class="k">Encargo</div>
+        <div class="t">${commission.text}</div>
+        <div class="o"><span>Para ${commission.client}</span><b>${commission.progreso}/${commission.count}</b></div>`;
+      if (this.trackBox.innerHTML !== html) this.trackBox.innerHTML = html;
+      if (this.trackBox.style.display !== 'block') this.trackBox.style.display = 'block';
       return;
     }
     const counters = quests.counters(quest.id);
@@ -9338,9 +9853,12 @@ class UI {
       const cifra = need > 1 ? `<b>${have}/${need}</b>` : (done ? '<b>✓</b>' : '');
       return `<div class="o${done ? ' done' : ''}"><span>${o.label}</span>${cifra}</div>`;
     }).join('');
+    const encargo = commission
+      ? `<div class="o"><span>Encargo: ${commission.text}</span><b>${commission.progreso}/${commission.count}</b></div>`
+      : '';
     const html = `<div class="k">Misión en curso</div>
       <div class="t">${quest.title}</div>${objetivos}
-      ${quest.hint ? `<div class="where">${quest.hint}</div>` : ''}`;
+      ${quest.hint ? `<div class="where">${quest.hint}</div>` : ''}${encargo}`;
     if (this.trackBox.innerHTML !== html) this.trackBox.innerHTML = html;
     if (this.trackBox.style.display !== 'block') this.trackBox.style.display = 'block';
   }
@@ -9354,7 +9872,11 @@ class UI {
    * un tendero.
    */
   showNotice(zone, data) {
-    const { species, known, spots, tournament, terms, money, onEnter, onAbandon, record } = data;
+    const {
+      species, known, spots, tournament, terms, money, onEnter, onAbandon, record,
+      commissions = [], accepted = null, refreshIn = 0,
+      onAcceptCommission = () => false, onAbandonCommission = () => {}
+    } = data;
     const body = el('div');
     const render = () => {
       body.innerHTML = '';
@@ -9375,8 +9897,40 @@ class UI {
 
       body.appendChild(el('div', 'sw-chaptitle', 'Puestos'));
       body.appendChild(el('div', 'sw-hint', spots.length
-        ? spots.map((p) => `<b>${p.name}</b> · ${p.depth.toFixed(1)} m — ${p.description}`).join('<br>')
+        ? spots.map((p) => `<b>${p.name}</b> · ${p.depth.toFixed(1)} m de calado a ${p.cast.toFixed(0)} m de lance — ${p.description}`).join('<br>')
         : 'Todavía no has encontrado ninguno. Recorre la orilla: se marcan solos al llegar.'));
+
+      // --- encargos ---
+      body.appendChild(el('div', 'sw-chaptitle', 'Encargos'));
+      if (accepted) {
+        const act = el('div', 'sw-quest tracked');
+        const mismaAgua = accepted.zone === zone.id;
+        act.innerHTML = `<div class="t">${accepted.text}</div>
+          <div class="d">Para ${accepted.client}${mismaAgua ? '' : ' · el encargo es de otra agua'} ·
+          <b>${accepted.progreso}/${accepted.count}</b></div>
+          <div class="rw">${accepted.reward} monedas · ${accepted.xp} XP</div>`;
+        const b = el('button', 'sw-btn ghost', 'Renunciar');
+        b.style.marginTop = '9px';
+        b.addEventListener('click', () => { onAbandonCommission(); render(); });
+        act.appendChild(b);
+        body.appendChild(act);
+      } else if (!commissions.length) {
+        body.appendChild(el('div', 'sw-hint', 'El tablón está vacío ahora mismo.'));
+      } else {
+        body.appendChild(el('div', 'sw-hint',
+          `Se renuevan en ${Math.ceil(refreshIn / 60)} min. Sólo puedes llevar uno a la vez.`));
+        for (const o of commissions) {
+          const card = el('div', 'sw-quest');
+          card.innerHTML = `<div class="t">${o.text}</div>
+            <div class="d">Para ${o.client}</div>
+            <div class="rw">${o.reward} monedas · ${o.xp} XP</div>`;
+          const b = el('button', 'sw-btn', 'Aceptar');
+          b.style.marginTop = '9px';
+          b.addEventListener('click', () => { if (onAcceptCommission(o)) render(); });
+          card.appendChild(b);
+          body.appendChild(card);
+        }
+      }
 
       body.appendChild(el('div', 'sw-chaptitle', 'Concurso'));
       const box = el('div', 'sw-quest');
@@ -9572,6 +10126,50 @@ class UI {
     });
     body.appendChild(grid);
     this._overlay('Enciclopedia de peces', body);
+  }
+
+  /**
+   * Cierre de la campaña.
+   *
+   * No es una pantalla de «fin»: es el recuento de la temporada y un empujón
+   * para seguir. El juego continúa después, con todo abierto, los concursos y
+   * los encargos; eso hay que decirlo, o parece que se ha acabado.
+   */
+  showEpilogue(stats, onClose) {
+    const body = el('div');
+    body.innerHTML = `<div class="sw-prologue" style="max-width:none;text-align:left">
+      <p style="margin-bottom:14px">La Cuenca de Valdés queda declarada en régimen de protección.
+      La compuerta vieja se queda abierta y el caudal vuelve a su sitio.</p>
+      <p style="margin-bottom:18px;color:var(--dim)">El cuaderno de Remedios está completo. Lo que venga
+      a partir de ahora ya no es un misterio que resolver: es pescar, que tampoco es poco.</p>
+    </div>`;
+    const grid = el('div', 'sw-stats');
+    [
+      ['Nivel alcanzado', `${stats.level} · ${stats.title}`],
+      ['Peces cobrados', stats.landed],
+      ['Especies', `${stats.species} / ${stats.totalSpecies}`],
+      ['Mayor captura', stats.biggest > 0 ? `${stats.biggest.toFixed(2)} kg` : '—'],
+      ['Misiones', `${stats.quests} / ${stats.totalQuests}`],
+      ['Monedas ganadas', stats.earned]
+    ].forEach(([k, v]) => {
+      const st = el('div', 'sw-stat');
+      st.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
+      grid.appendChild(st);
+    });
+    body.appendChild(grid);
+
+    const cola = el('div', 'sw-hint');
+    cola.style.marginTop = '16px';
+    cola.innerHTML = `La partida sigue: quedan especies que registrar, concursos que ganar,
+      encargos en los tablones y récords que batir en las cinco aguas.`;
+    body.appendChild(cola);
+
+    const b = el('button', 'sw-btn sw-cta', 'Seguir pescando');
+    b.style.marginTop = '18px';
+    b.addEventListener('click', () => { this.closePanel(); onClose?.(); });
+    body.appendChild(b);
+
+    this._overlay('Aguas de Valdés', body, { onClose });
   }
 
   /** Menú principal. `save` es null en partida nueva. */
@@ -10052,6 +10650,27 @@ class AudioSystem {
   objective() { this._tone(1046, 0.1, { type: 'sine', gain: 0.1 }); this._tone(1568, 0.12, { type: 'sine', gain: 0.08, delay: 0.07 }); }
   /** Empieza un suceso en el agua: nota grave que llama la atención. */
   worldEvent() { this._tone(196, 0.5, { type: 'sine', gain: 0.13, slideTo: 262 }); this._tone(392, 0.4, { type: 'triangle', gain: 0.07, delay: 0.14 }); }
+  /**
+   * Trueno. De cerca es un chasquido seco con cola; de lejos, un retumbo
+   * grave y largo. La diferencia la hace el filtro, no el volumen.
+   */
+  thunder(closeness = 0.5) {
+    if (!this.ready || this.muted) return;
+    const cerca = clamp(closeness, 0, 1);
+    // El chasquido inicial sólo existe si cae cerca.
+    if (cerca > 0.55) {
+      this._burst(0.22, { gain: 0.3 * cerca, from: 5200, to: 900, type: 'highpass' });
+    }
+    // El retumbo: ruido filtrado bajo, largo, que se va apagando.
+    this._burst(1.6 + (1 - cerca) * 2.2, {
+      gain: 0.1 + cerca * 0.26,
+      from: 260 + cerca * 340,
+      to: 45,
+      type: 'lowpass'
+    });
+    this._tone(38 + cerca * 26, 1.9, { type: 'sine', gain: 0.05 + cerca * 0.12, slideTo: 24, attack: 0.12 });
+  }
+
   /** Página del cuaderno encontrada. */
   page() { [659, 880, 1175].forEach((f, i) => this._tone(f, 0.34, { type: 'sine', gain: 0.1, delay: i * 0.11 })); }
   /** Chapoteo lejano: se atenúa y se apaga de agudos con la distancia. */
@@ -10277,6 +10896,15 @@ class Game {
     this.time = new TimeOfDay({ hour: 9.4 });
     this.sky = new SkyDome(this.scene, this.textures, this.preset);
     this.weather = new Weather(this.scene, this.textures, this.preset);
+    // Un rayo cercano se siente: sacude la vista y, si estás en mitad del agua
+    // con una barca de madera, el juego te lo dice.
+    this.weather.onBolt = (closeness) => {
+      if (closeness < 0.55) return;
+      this.cameraFx?.addShake(0.25 + closeness * 0.7);
+      if (closeness > 0.75 && this.player?.platform === this.boat) {
+        this.fishing?._say('Ha caído cerca. Con esta tormenta, en el agua no se está bien', 'bad');
+      }
+    };
     this._buildZone(zoneOf('lago_niebla'));
     this.sky.setZoneLighting(this.zone.lighting);
   }
@@ -10326,7 +10954,8 @@ class Game {
       // La Sombra no está en el agua hasta que la historia la pone ahí: si el
       // jugador la pescase de casualidad, el final perdería todo su sentido.
       allowGated: (id) => id !== 'sombra_valdes' || !!this.quests?.accepted?.has('cap5_sombra'),
-      anchor: this.props.fishingSpots[0]?.position ?? null
+      anchor: this.props.fishingSpots[0]?.position ?? null,
+      hotspots: this.props.hotspots ?? []
     });
     this.crew = new NpcCrew(
       this.scene,
@@ -10431,6 +11060,7 @@ class Game {
     this.economy = new Economy();
     this.quests = new QuestSystem(null, this._questEvents());
     this.tournament = new Tournament(null, this._tournamentEvents());
+    this.commissions = new Commissions();
     this.worldEvents = new EventSystem({
       onStart: (e) => {
         this.ui?.note(`${e.title} — ${e.text}`, 'gold');
@@ -10465,6 +11095,25 @@ class Game {
       },
       onComplete: (quest, reward) => this._grantReward(quest, reward)
     };
+  }
+
+  /** Una captura contra el encargo aceptado, si encaja. */
+  _submitCommission(fish, night) {
+    const r = this.commissions.submit(fish, this.zone.id, night);
+    if (!r) return;
+    if (!r.done) {
+      this.ui?.note(`Encargo: ${r.progreso}/${r.total}`, 'good');
+      this.audio?.objective();
+      return;
+    }
+    this.economy.sell(r.reward);
+    const subida = this.economy.addXp(r.xp);
+    if (subida) this._onLevelUp(subida);
+    this.audio?.questDone();
+    this._celebrate(6);
+    this.ui?.note(`Encargo entregado a ${r.client}: ${r.text} · ${r.reward} monedas`, 'gold');
+    this.quests.notify('commission', { value: this.commissions.done });
+    this._persist();
   }
 
   _tournamentEvents() {
@@ -10533,6 +11182,28 @@ class Game {
     this.ui?.note(`Misión completada: ${quest.title}${partes.length ? ' · ' + partes.join(' · ') : ''}`, 'gold');
     this.quests.notify('deliver', { value: this.quests.pages.length });
     this._persist();
+    if (quest.id === 'cap6_cabana') this._showEpilogue();
+  }
+
+  /** Recuento de la temporada al cerrar la campaña. */
+  _showEpilogue() {
+    this._celebrate(30);
+    this.input.releaseLock();
+    // Se espera a que el diálogo se cierre para no encadenar dos pantallas.
+    setTimeout(() => {
+      this.ui.closeDialogue();
+      this.ui.showEpilogue({
+        level: this.economy.level,
+        title: this.economy.title,
+        landed: this.economy.stats.landed,
+        species: this.economy.discovered,
+        totalSpecies: SPECIES.length,
+        biggest: this.economy.stats.biggest,
+        quests: this.economy.stats.questsDone ?? 0,
+        totalQuests: STORY.QUESTS.length,
+        earned: this.economy.earned
+      }, () => this.input.requestLock());
+    }, 400);
   }
 
   /** Un momento importante: la música se aparta y luego celebra. */
@@ -10563,7 +11234,11 @@ class Game {
           this.audio.cast();
           this.cameraFx.addFovKick(2.5 + power * 3.5);
         },
-        onSplash: (p) => this.audio.splash(0.9),
+        onSplash: (p) => {
+          this.audio.splash(0.9);
+          // Cada caída del señuelo castiga un poco ese rincón del agua.
+          this.fishManager.addPressure(p.x, p.z, 0.35);
+        },
         onBite: () => this.audio.bite(),
         onHookSet: () => {
           this.economy.stats.hooked++;
@@ -10585,14 +11260,26 @@ class Game {
           this.audio.dragSlip();
           this.cameraFx.addFovKick(-1.4 - metros * 2);
         },
-        onLineBreak: () => {
+        onLineBreak: (fish) => {
           this.economy.stats.lineBreaks++; this.economy.stats.lost++;
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
           this.cameraFx.addShake(0.9);
+          // Un pez que se suelta con el anzuelo puesto no vuelve a caer, y
+          // pone nerviosos a los de alrededor.
+          if (fish) {
+            fish.spook(1, this.equipment.lure.id);
+            this.fishManager.spookAround(fish.position, 14, 0.55, this.equipment.lure.id);
+            this.fishManager.addPressure(fish.position.x, fish.position.z, 0.9);
+          }
         },
         onFishLost: (fish, reason) => {
           this.economy.stats.lost++;
           this.lastEvent = 'fishLost';
+          if (fish) {
+            fish.spook(0.85, this.equipment.lure.id);
+            this.fishManager.spookAround(fish.position, 12, 0.45, this.equipment.lure.id);
+            this.fishManager.addPressure(fish.position.x, fish.position.z, 0.7);
+          }
           // Perder por el anzuelo es siempre lo mismo: el pez es más grande de
           // lo que aguanta el aparejo. Merece decirse con todas las letras.
           if (/anzuelo/.test(reason ?? '')) this.lastEvent = 'hookPull';
@@ -10707,7 +11394,9 @@ class Game {
           totalQuests: STORY.QUESTS.length, totalSpecies: SPECIES.length, totalZones: ZONES.length,
           tourneysPlayed: this.tournament.played,
           tourneysWon: this.tournament.wins,
-          bestTourney: Math.max(0, ...Object.values(this.tournament.records)) || 0
+          bestTourney: Math.max(0, ...Object.values(this.tournament.records)) || 0,
+          commissionsDone: this.commissions.done,
+          commissionsEarned: this.commissions.earned
         })); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
@@ -10824,6 +11513,8 @@ class Game {
   _onLanded(fish) {
     this.audio.landed();
     this.audio.duckMusic(4);
+    this.fishManager.spookAround(fish.position, 10, 0.3, this.equipment.lure.id);
+    this.fishManager.addPressure(fish.position.x, fish.position.z, 0.6);
     const nuevaEspecie = !this.economy.records[fish.species.id]?.count;
     const result = this.economy.registerCatch(fish);
 
@@ -10838,11 +11529,14 @@ class Game {
       length: fish.length,
       weight: fish.weight,
       zone: this.zone.id,
+      trophy: fish.trophy ?? 0,
       night: this.time.nightFactor > 0.55
     };
     this.quests.notify('catch', hecho);
     this.quests.notify('catchAny', hecho);
+    this.quests.notify('trophy', hecho);
     this.tournament.submit(fish, this.zone.id);
+    this._submitCommission(fish, hecho.night);
     if (nuevaEspecie) {
       this.quests.notify('discover', { value: this.economy.discovered });
       this.ui.note(`Especie nueva en la enciclopedia: ${fish.species.name}`, 'good');
@@ -10887,6 +11581,7 @@ class Game {
       world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
       quests: this.quests?.toJSON() ?? null,
       tournament: this.tournament?.toJSON() ?? null,
+      commissions: this.commissions?.toJSON() ?? null,
       coach: this.coach?.toJSON() ?? []
     });
   }
@@ -10899,6 +11594,7 @@ class Game {
     this.economy = new Economy(data.economy);
     this.quests = new QuestSystem(data.quests, this._questEvents());
     this.tournament = new Tournament(data.tournament, this._tournamentEvents());
+    this.commissions = new Commissions(data.commissions);
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
@@ -10959,7 +11655,8 @@ class Game {
       : { speed: 0, surface: this.player.surface, depth: 0 };
 
     this.time.update(panelOpen || talking ? 0 : dt);
-    this.weather.update(dt, this.player.position, this.time.fogColor);
+    this.weather.update(dt, this.player.position, this.time.fogColor,
+      headless ? null : this.audio);
     this.sky.update(this.time, this.weather, dt, this.player.position);
 
     // El viento base más la racha en curso: la vegetación se mueve a rachas,
@@ -11008,6 +11705,9 @@ class Game {
       playerNoise: clamp((moving.speed / 5.6) * (moving.surface === 'agua' ? 1.4 : 0.35), 0, 1.4),
       lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
       lureAction: this.fishing.lure.action,
+      // El pez necesita saber con qué le están intentando engañar para poder
+      // desconfiar de ese montaje en concreto.
+      lure: this.equipment.lure,
       // Función, no vector: cada pez consulta la corriente de su propio sitio.
       flowAt: this.terrain.field.hasCurrent
         ? (x, z, out) => this.terrain.field.flowAt(x, z, out)
@@ -11018,6 +11718,7 @@ class Game {
 
     if (!panelOpen && !talking) {
       this.tournament.update(dt);
+      this.commissions.update(dt);
       this.worldEvents.update(dt, {
         hour: this.time.hour,
         rain: this.weather.rainAmount,
@@ -11083,7 +11784,8 @@ class Game {
       // es lo que necesitas ver.
       this.ui.setWorldEvent(this.tournament.label || this.worldEvents.label,
         this.tournament.running ? this.tournament.progress : null);
-      this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name);
+      this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name,
+        this.commissions.accepted);
       this.ui.update({
         fishing: this.fishing.hud,
         time: this.time,
@@ -11114,8 +11816,13 @@ class Game {
       if (!this.economy.findSpot(this.zone.id, spot.name)) continue;
       this.economy.addXp(35);
       this.audio?.objective();
+      const alcance = this.equipment.stats.castDistance;
+      const aviso = spot.cast > alcance + 2
+        ? ` Necesitas lanzar ${spot.cast.toFixed(0)} m y tu caña llega a ${alcance.toFixed(0)}: vuelve con más equipo o en barca.`
+        : '';
       this.ui?.note(
-        `Puesto encontrado · ${spot.name} (${spot.depth.toFixed(1)} m de calado): ${spot.description}`, 'good');
+        `Puesto encontrado · ${spot.name} (${spot.depth.toFixed(1)} m de calado, ${spot.cast.toFixed(0)} m de lance): ` +
+        `${spot.description}${aviso}`, 'good');
       this.quests.notify('spot', { zone: this.zone.id, name: spot.name });
       this.quests.notify('spots', { value: this.economy.spotsIn(this.zone.id).length });
       this._persist();
@@ -11203,6 +11910,10 @@ class Game {
     this.audio?.duckMusic(4);
     this.input.releaseLock();
 
+    // Antes de mirar qué tiene que decirnos, se pone al día el diario: si el
+    // jugador ya cumple un objetivo comprobable, el personaje tiene que
+    // saberlo en ese mismo instante y no hasta segundo y medio después.
+    this.quests.reconcile(this._questSnapshot());
     const primera = !this.quests.metNpcs.has(npcId);
     this.quests.meet(npcId);
     const { offer, turnIn, inProgress } = this.quests.forNpc(npcId);
@@ -11234,7 +11945,8 @@ class Game {
       met: this.quests.metNpcs,
       owns: (category, id) => this.inventory.has(category, id),
       spots: (zoneId) => this.economy.spotsIn(zoneId ?? this.zone.id).length,
-      tourneyWins: this.tournament?.wins ?? 0
+      tourneyWins: this.tournament?.wins ?? 0,
+      commissions: this.commissions?.done ?? 0
     };
   }
 
@@ -11380,6 +12092,17 @@ class Game {
       spots: (this.props.hotspots ?? []).filter((h) => conocidos.has(h.name)),
       tournament: this.tournament,
       terms,
+      commissions: this.commissions.offersFor(this.zone, SPECIES_BY_ID, this.economy.level),
+      accepted: this.commissions.accepted,
+      refreshIn: this.commissions.refreshIn(this.zone.id),
+      onAcceptCommission: (offer) => {
+        if (!this.commissions.accept(offer)) return false;
+        this.audio?.questAccept();
+        this.ui?.note(`Encargo aceptado: ${offer.text}`, 'gold');
+        this._persist();
+        return true;
+      },
+      onAbandonCommission: () => { this.commissions.abandon(); this._persist(); },
       money: this.economy.money,
       record: this.tournament.records[this.zone.id],
       onEnter: () => this.tournament.enter(this.zone, terms, (precio) => {

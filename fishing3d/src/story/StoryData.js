@@ -141,7 +141,8 @@ export const CHAPTERS = [
   { id: 2, title: 'Aguas que corren', subtitle: 'Río Trenzado' },
   { id: 3, title: 'Lo que la niebla tapa', subtitle: 'Marisma de Argán' },
   { id: 4, title: 'El agua fría', subtitle: 'Embalse Alto' },
-  { id: 5, title: 'La Garganta', subtitle: 'El final del cuaderno' }
+  { id: 5, title: 'La Garganta', subtitle: 'El final del cuaderno' },
+  { id: 6, title: 'Lo que queda después', subtitle: 'La cuenca entera' }
 ];
 
 export const QUESTS = [
@@ -441,6 +442,97 @@ export const QUESTS = [
       '«Página 5 · No la pesques para enseñarla. Pésca la para saber que sigue ahí. Luego devuélvela.»'
     ]
   },
+  // ---------------------------------------------------------- capítulo 6
+  {
+    id: 'cap6_censo',
+    chapter: 6, type: 'historia',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap5_sombra'],
+    title: 'El expediente',
+    summary: 'Para que la cuenca se declare protegida hace falta el censo completo: trece especies documentadas.',
+    objectives: [{ kind: 'discover', count: 13, label: 'Especies documentadas' }],
+    reward: { money: 2200, xp: 420 },
+    hint: 'Cada agua tiene especies que no hay en las demás. Mira el mapa: dice cuántas llevas de cada una.',
+    complete: [
+      'Ordena las fichas en la mesa, una por una, y las cuenta dos veces.',
+      '—Trece. Con esto y el esturión, el expediente se sostiene solo.',
+      '—Tu abuela tardó cuarenta años en juntar la mitad. Tú lo has hecho en una temporada porque ella dejó el camino hecho.'
+    ]
+  },
+  {
+    id: 'cap6_vuelta',
+    chapter: 6, type: 'historia',
+    npc: 'nuno', turnIn: 'nuno',
+    requires: ['cap6_censo'],
+    title: 'Una vuelta a la cuenca',
+    summary: 'Nuno quiere una captura de cada una de las cinco aguas, fechadas el mismo día, para el acta.',
+    objectives: [
+      { kind: 'catchAny', count: 1, zone: 'lago_niebla', label: 'Captura en el Lago de la Niebla' },
+      { kind: 'catchAny', count: 1, zone: 'rio_trenzado', label: 'Captura en el Río Trenzado' },
+      { kind: 'catchAny', count: 1, zone: 'marisma_argan', label: 'Captura en la Marisma de Argán' },
+      { kind: 'catchAny', count: 1, zone: 'embalse_alto', label: 'Captura en el Embalse Alto' },
+      { kind: 'catchAny', count: 1, zone: 'garganta', label: 'Captura en La Garganta' }
+    ],
+    reward: { money: 1800, xp: 380, item: { category: 'boats', id: 'lancha_motor' } },
+    complete: [
+      'Firma el acta, la sella y te tiende una copia.',
+      '—Cuenca de Valdés, régimen de protección. La compuerta se queda abierta y el caudal vuelve a su sitio.',
+      '—La lancha del servicio ya no hace falta para vigilar. Quédatela: tú vas a estar más en el agua que yo.'
+    ]
+  },
+  {
+    id: 'cap6_cabana',
+    chapter: 6, type: 'historia',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap6_vuelta'],
+    title: 'La cabaña',
+    summary: 'Tomé ha estado guardando algo desde el primer día. Ve a verlo.',
+    objectives: [{ kind: 'talk', npc: 'tome', label: 'Hablar con Tomé' }],
+    reward: { money: 600, xp: 300 },
+    complete: [
+      'Saca de debajo del mostrador una caja de latón con el nombre de Remedios rayado en la tapa.',
+      '—Me la dejó hace seis años. Dijo: «cuando alguien de mi sangre sepa leer el agua, dásela».',
+      'Dentro hay una cucharilla vieja, gastada de tanto rozar piedra, y una nota de dos líneas:',
+      '«El agua no era el misterio. El misterio era si a alguien le iba a importar. Gracias por venir.»',
+      '—Yo creo que ya está. Lo demás es pescar, que tampoco es poco.'
+    ]
+  },
+  {
+    id: 'sec_encargos',
+    chapter: 6, type: 'secundaria',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['cap2_barbo'],
+    title: 'Trabajo del tablón',
+    summary: 'Cumple cinco encargos del tablón. Es lo que da de comer entre aventura y aventura.',
+    objectives: [{ kind: 'commission', count: 5, label: 'Encargos entregados' }],
+    reward: { money: 700, xp: 180 },
+    hint: 'Los encargos están en el tablón de cada agua, junto al concurso. Se renuevan cada diez minutos.',
+    complete: ['—Cinco encargos servidos sin fallar uno. Por aquí eso vale más que cualquier trofeo.']
+  },
+  {
+    id: 'sec_maestro',
+    chapter: 6, type: 'secundaria',
+    npc: 'tome', turnIn: 'tome',
+    requires: ['sec_concurso'],
+    title: 'Tres de tres',
+    summary: 'Gana tres concursos. Tomé dice que uno es suerte.',
+    objectives: [{ kind: 'tournament', count: 3, label: 'Concursos ganados' }],
+    reward: { money: 900, xp: 240 },
+    complete: ['—Tres. Ya no es suerte. Voy a tener que subir la marca por tu culpa.']
+  },
+  {
+    id: 'sec_trofeos',
+    chapter: 6, type: 'coleccion',
+    npc: 'sabela', turnIn: 'sabela',
+    requires: ['cap4_lacustre'],
+    title: 'Ejemplares de talla',
+    summary: 'Cinco ejemplares en la franja alta de su especie. Sirven para medir si la cuenca se recupera.',
+    objectives: [{ kind: 'trophy', count: 5, label: 'Ejemplares de trofeo cobrados' }],
+    reward: { money: 1100, xp: 260 },
+    hint: 'Un ejemplar de trofeo es de los grandes de su especie. Pescar de noche y en las hoyas ayuda.',
+    complete: ['—Cinco ejemplares en la franja alta. Eso significa que hay comida y que llevan años sin molestarlos. Buena señal.']
+  },
+
   {
     id: 'sec_explorador',
     chapter: 5, type: 'exploracion',

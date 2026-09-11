@@ -174,6 +174,12 @@ export class Fish {
     this.state = FishState.SWIMMING;
     this.stateTime = 0;
     this.interest = 0;
+    // Desconfianza aprendida: sube cuando el pez se acerca a un señuelo y no
+    // le convence, y mucho más si lo han enganchado y se ha soltado. Decae con
+    // el tiempo. Es lo que hace que insistir con el mismo montaje en el mismo
+    // sitio deje de funcionar.
+    this.wariness = 0;
+    this.wariesOf = null;          // qué señuelo le escamó
     this.energy = 1;
 
     this.position = position.clone();
@@ -223,13 +229,28 @@ export class Fish {
     ) * 0.75;
     // Los ejemplares grandes son más desconfiados.
     const caution = 1 - this.trophy * 0.35;
-    return affinity * band * depthFit * caution * weatherModifier * lure.attraction;
+    // Y uno escamado lo es todavía más, sobre todo con el señuelo que ya le
+    // falló: cambiar de montaje es media solución.
+    const mismo = this.wariesOf === lure.id ? 1 : 0.45;
+    const shy = 1 - clamp(this.wariness, 0, 1) * (0.72 * mismo + 0.12);
+    return affinity * band * depthFit * caution * shy * weatherModifier * lure.attraction;
+  }
+
+  /** Se ha desconfiado de algo. `amount` 0..1 según lo grave que fuera. */
+  spook(amount, lureId = null) {
+    this.wariness = clamp(this.wariness + amount, 0, 1);
+    if (lureId) this.wariesOf = lureId;
   }
 
   update(dt, context) {
     // Cobrado: la malla la coloca quien lo está mostrando, no el pez.
     if (this.state === FishState.CAUGHT) return;
     this.stateTime += dt;
+    // La desconfianza se olvida despacio: unos minutos de calma la borran.
+    if (this.wariness > 0) {
+      this.wariness = Math.max(0, this.wariness - dt * 0.0055);
+      if (this.wariness === 0) this.wariesOf = null;
+    }
     // El reloj del aleteo corre más deprisa cuanto más rápido nada.
     this.material.userData.uniforms.uTime.value +=
       dt * (0.55 + this.velocity.length() / Math.max(0.6, this.species.speed) * 0.9);
@@ -258,6 +279,12 @@ export class Fish {
         this.velocity.z += (dz / near) * push * dt * 6;
         if (this.state !== FishState.ESCAPING && near < radius * 0.6) {
           this.interest = 0;
+    // Desconfianza aprendida: sube cuando el pez se acerca a un señuelo y no
+    // le convence, y mucho más si lo han enganchado y se ha soltado. Decae con
+    // el tiempo. Es lo que hace que insistir con el mismo montaje en el mismo
+    // sitio deje de funcionar.
+    this.wariness = 0;
+    this.wariesOf = null;          // qué señuelo le escamó
           this.setState(FishState.ESCAPING);
         }
       }
@@ -406,6 +433,8 @@ export class Fish {
       this.biteStrength = clamp(0.35 + this.interest * 0.5 + this.trophy * 0.4, 0.25, 1.6);
       context.onBite?.(this);
     } else if (this.stateTime > 6 + this.interest * 5) {
+      // Lo ha mirado de cerca y no le ha gustado: a partir de ahora, menos.
+      this.spook(0.3, context.lure?.id ?? null);
       this.setState(FishState.ESCAPING);
     }
   }

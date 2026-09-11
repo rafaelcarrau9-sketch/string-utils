@@ -34,6 +34,7 @@ import { Economy } from '../economy/Economy.js';
 import { QuestSystem } from '../story/QuestSystem.js';
 import { EventSystem } from '../story/Events.js';
 import { Tournament } from '../story/Tournament.js';
+import { Commissions } from '../story/Commissions.js';
 import { STORY } from '../story/StoryData.js';
 import { SPECIES, SPECIES_BY_ID, RARITY_LABEL } from '../fish/FishData.js';
 import { findItem } from '../gear/GearData.js';
@@ -159,6 +160,15 @@ export class Game {
     this.time = new TimeOfDay({ hour: 9.4 });
     this.sky = new SkyDome(this.scene, this.textures, this.preset);
     this.weather = new Weather(this.scene, this.textures, this.preset);
+    // Un rayo cercano se siente: sacude la vista y, si estás en mitad del agua
+    // con una barca de madera, el juego te lo dice.
+    this.weather.onBolt = (closeness) => {
+      if (closeness < 0.55) return;
+      this.cameraFx?.addShake(0.25 + closeness * 0.7);
+      if (closeness > 0.75 && this.player?.platform === this.boat) {
+        this.fishing?._say('Ha caído cerca. Con esta tormenta, en el agua no se está bien', 'bad');
+      }
+    };
     this._buildZone(zoneOf('lago_niebla'));
     this.sky.setZoneLighting(this.zone.lighting);
   }
@@ -208,7 +218,8 @@ export class Game {
       // La Sombra no está en el agua hasta que la historia la pone ahí: si el
       // jugador la pescase de casualidad, el final perdería todo su sentido.
       allowGated: (id) => id !== 'sombra_valdes' || !!this.quests?.accepted?.has('cap5_sombra'),
-      anchor: this.props.fishingSpots[0]?.position ?? null
+      anchor: this.props.fishingSpots[0]?.position ?? null,
+      hotspots: this.props.hotspots ?? []
     });
     this.crew = new NpcCrew(
       this.scene,
@@ -313,6 +324,7 @@ export class Game {
     this.economy = new Economy();
     this.quests = new QuestSystem(null, this._questEvents());
     this.tournament = new Tournament(null, this._tournamentEvents());
+    this.commissions = new Commissions();
     this.worldEvents = new EventSystem({
       onStart: (e) => {
         this.ui?.note(`${e.title} — ${e.text}`, 'gold');
@@ -347,6 +359,25 @@ export class Game {
       },
       onComplete: (quest, reward) => this._grantReward(quest, reward)
     };
+  }
+
+  /** Una captura contra el encargo aceptado, si encaja. */
+  _submitCommission(fish, night) {
+    const r = this.commissions.submit(fish, this.zone.id, night);
+    if (!r) return;
+    if (!r.done) {
+      this.ui?.note(`Encargo: ${r.progreso}/${r.total}`, 'good');
+      this.audio?.objective();
+      return;
+    }
+    this.economy.sell(r.reward);
+    const subida = this.economy.addXp(r.xp);
+    if (subida) this._onLevelUp(subida);
+    this.audio?.questDone();
+    this._celebrate(6);
+    this.ui?.note(`Encargo entregado a ${r.client}: ${r.text} · ${r.reward} monedas`, 'gold');
+    this.quests.notify('commission', { value: this.commissions.done });
+    this._persist();
   }
 
   _tournamentEvents() {
@@ -415,6 +446,28 @@ export class Game {
     this.ui?.note(`Misión completada: ${quest.title}${partes.length ? ' · ' + partes.join(' · ') : ''}`, 'gold');
     this.quests.notify('deliver', { value: this.quests.pages.length });
     this._persist();
+    if (quest.id === 'cap6_cabana') this._showEpilogue();
+  }
+
+  /** Recuento de la temporada al cerrar la campaña. */
+  _showEpilogue() {
+    this._celebrate(30);
+    this.input.releaseLock();
+    // Se espera a que el diálogo se cierre para no encadenar dos pantallas.
+    setTimeout(() => {
+      this.ui.closeDialogue();
+      this.ui.showEpilogue({
+        level: this.economy.level,
+        title: this.economy.title,
+        landed: this.economy.stats.landed,
+        species: this.economy.discovered,
+        totalSpecies: SPECIES.length,
+        biggest: this.economy.stats.biggest,
+        quests: this.economy.stats.questsDone ?? 0,
+        totalQuests: STORY.QUESTS.length,
+        earned: this.economy.earned
+      }, () => this.input.requestLock());
+    }, 400);
   }
 
   /** Un momento importante: la música se aparta y luego celebra. */
@@ -445,7 +498,11 @@ export class Game {
           this.audio.cast();
           this.cameraFx.addFovKick(2.5 + power * 3.5);
         },
-        onSplash: (p) => this.audio.splash(0.9),
+        onSplash: (p) => {
+          this.audio.splash(0.9);
+          // Cada caída del señuelo castiga un poco ese rincón del agua.
+          this.fishManager.addPressure(p.x, p.z, 0.35);
+        },
         onBite: () => this.audio.bite(),
         onHookSet: () => {
           this.economy.stats.hooked++;
@@ -467,14 +524,26 @@ export class Game {
           this.audio.dragSlip();
           this.cameraFx.addFovKick(-1.4 - metros * 2);
         },
-        onLineBreak: () => {
+        onLineBreak: (fish) => {
           this.economy.stats.lineBreaks++; this.economy.stats.lost++;
           this.lastEvent = 'lineBreak'; this.audio.lineBreak();
           this.cameraFx.addShake(0.9);
+          // Un pez que se suelta con el anzuelo puesto no vuelve a caer, y
+          // pone nerviosos a los de alrededor.
+          if (fish) {
+            fish.spook(1, this.equipment.lure.id);
+            this.fishManager.spookAround(fish.position, 14, 0.55, this.equipment.lure.id);
+            this.fishManager.addPressure(fish.position.x, fish.position.z, 0.9);
+          }
         },
         onFishLost: (fish, reason) => {
           this.economy.stats.lost++;
           this.lastEvent = 'fishLost';
+          if (fish) {
+            fish.spook(0.85, this.equipment.lure.id);
+            this.fishManager.spookAround(fish.position, 12, 0.45, this.equipment.lure.id);
+            this.fishManager.addPressure(fish.position.x, fish.position.z, 0.7);
+          }
           // Perder por el anzuelo es siempre lo mismo: el pez es más grande de
           // lo que aguanta el aparejo. Merece decirse con todas las letras.
           if (/anzuelo/.test(reason ?? '')) this.lastEvent = 'hookPull';
@@ -589,7 +658,9 @@ export class Game {
           totalQuests: STORY.QUESTS.length, totalSpecies: SPECIES.length, totalZones: ZONES.length,
           tourneysPlayed: this.tournament.played,
           tourneysWon: this.tournament.wins,
-          bestTourney: Math.max(0, ...Object.values(this.tournament.records)) || 0
+          bestTourney: Math.max(0, ...Object.values(this.tournament.records)) || 0,
+          commissionsDone: this.commissions.done,
+          commissionsEarned: this.commissions.earned
         })); break;
         case 'KeyR': if (!this.ui.isPanelOpen) this.fishing.reelIn(); break;
         case 'KeyE':
@@ -706,6 +777,8 @@ export class Game {
   _onLanded(fish) {
     this.audio.landed();
     this.audio.duckMusic(4);
+    this.fishManager.spookAround(fish.position, 10, 0.3, this.equipment.lure.id);
+    this.fishManager.addPressure(fish.position.x, fish.position.z, 0.6);
     const nuevaEspecie = !this.economy.records[fish.species.id]?.count;
     const result = this.economy.registerCatch(fish);
 
@@ -720,11 +793,14 @@ export class Game {
       length: fish.length,
       weight: fish.weight,
       zone: this.zone.id,
+      trophy: fish.trophy ?? 0,
       night: this.time.nightFactor > 0.55
     };
     this.quests.notify('catch', hecho);
     this.quests.notify('catchAny', hecho);
+    this.quests.notify('trophy', hecho);
     this.tournament.submit(fish, this.zone.id);
+    this._submitCommission(fish, hecho.night);
     if (nuevaEspecie) {
       this.quests.notify('discover', { value: this.economy.discovered });
       this.ui.note(`Especie nueva en la enciclopedia: ${fish.species.name}`, 'good');
@@ -769,6 +845,7 @@ export class Game {
       world: { hour: this.time.hour, weather: this.weather.current, zone: this.zone?.id },
       quests: this.quests?.toJSON() ?? null,
       tournament: this.tournament?.toJSON() ?? null,
+      commissions: this.commissions?.toJSON() ?? null,
       coach: this.coach?.toJSON() ?? []
     });
   }
@@ -781,6 +858,7 @@ export class Game {
     this.economy = new Economy(data.economy);
     this.quests = new QuestSystem(data.quests, this._questEvents());
     this.tournament = new Tournament(data.tournament, this._tournamentEvents());
+    this.commissions = new Commissions(data.commissions);
     this.fishing.equipment = this.equipment;
     if (data.world?.hour !== undefined) this.time.setHour(data.world.hour);
     if (data.world?.weather) this.weather.setWeather(data.world.weather);
@@ -841,7 +919,8 @@ export class Game {
       : { speed: 0, surface: this.player.surface, depth: 0 };
 
     this.time.update(panelOpen || talking ? 0 : dt);
-    this.weather.update(dt, this.player.position, this.time.fogColor);
+    this.weather.update(dt, this.player.position, this.time.fogColor,
+      headless ? null : this.audio);
     this.sky.update(this.time, this.weather, dt, this.player.position);
 
     // El viento base más la racha en curso: la vegetación se mueve a rachas,
@@ -890,6 +969,9 @@ export class Game {
       playerNoise: clamp((moving.speed / 5.6) * (moving.surface === 'agua' ? 1.4 : 0.35), 0, 1.4),
       lurePosition: this.fishing.lure.isFishable ? this.fishing.lure.position : null,
       lureAction: this.fishing.lure.action,
+      // El pez necesita saber con qué le están intentando engañar para poder
+      // desconfiar de ese montaje en concreto.
+      lure: this.equipment.lure,
       // Función, no vector: cada pez consulta la corriente de su propio sitio.
       flowAt: this.terrain.field.hasCurrent
         ? (x, z, out) => this.terrain.field.flowAt(x, z, out)
@@ -900,6 +982,7 @@ export class Game {
 
     if (!panelOpen && !talking) {
       this.tournament.update(dt);
+      this.commissions.update(dt);
       this.worldEvents.update(dt, {
         hour: this.time.hour,
         rain: this.weather.rainAmount,
@@ -965,7 +1048,8 @@ export class Game {
       // es lo que necesitas ver.
       this.ui.setWorldEvent(this.tournament.label || this.worldEvents.label,
         this.tournament.running ? this.tournament.progress : null);
-      this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name);
+      this.ui.setTrackedQuest(this.quests.trackedQuest, this.quests, this.zone.name,
+        this.commissions.accepted);
       this.ui.update({
         fishing: this.fishing.hud,
         time: this.time,
@@ -996,8 +1080,13 @@ export class Game {
       if (!this.economy.findSpot(this.zone.id, spot.name)) continue;
       this.economy.addXp(35);
       this.audio?.objective();
+      const alcance = this.equipment.stats.castDistance;
+      const aviso = spot.cast > alcance + 2
+        ? ` Necesitas lanzar ${spot.cast.toFixed(0)} m y tu caña llega a ${alcance.toFixed(0)}: vuelve con más equipo o en barca.`
+        : '';
       this.ui?.note(
-        `Puesto encontrado · ${spot.name} (${spot.depth.toFixed(1)} m de calado): ${spot.description}`, 'good');
+        `Puesto encontrado · ${spot.name} (${spot.depth.toFixed(1)} m de calado, ${spot.cast.toFixed(0)} m de lance): ` +
+        `${spot.description}${aviso}`, 'good');
       this.quests.notify('spot', { zone: this.zone.id, name: spot.name });
       this.quests.notify('spots', { value: this.economy.spotsIn(this.zone.id).length });
       this._persist();
@@ -1085,6 +1174,10 @@ export class Game {
     this.audio?.duckMusic(4);
     this.input.releaseLock();
 
+    // Antes de mirar qué tiene que decirnos, se pone al día el diario: si el
+    // jugador ya cumple un objetivo comprobable, el personaje tiene que
+    // saberlo en ese mismo instante y no hasta segundo y medio después.
+    this.quests.reconcile(this._questSnapshot());
     const primera = !this.quests.metNpcs.has(npcId);
     this.quests.meet(npcId);
     const { offer, turnIn, inProgress } = this.quests.forNpc(npcId);
@@ -1116,7 +1209,8 @@ export class Game {
       met: this.quests.metNpcs,
       owns: (category, id) => this.inventory.has(category, id),
       spots: (zoneId) => this.economy.spotsIn(zoneId ?? this.zone.id).length,
-      tourneyWins: this.tournament?.wins ?? 0
+      tourneyWins: this.tournament?.wins ?? 0,
+      commissions: this.commissions?.done ?? 0
     };
   }
 
@@ -1262,6 +1356,17 @@ export class Game {
       spots: (this.props.hotspots ?? []).filter((h) => conocidos.has(h.name)),
       tournament: this.tournament,
       terms,
+      commissions: this.commissions.offersFor(this.zone, SPECIES_BY_ID, this.economy.level),
+      accepted: this.commissions.accepted,
+      refreshIn: this.commissions.refreshIn(this.zone.id),
+      onAcceptCommission: (offer) => {
+        if (!this.commissions.accept(offer)) return false;
+        this.audio?.questAccept();
+        this.ui?.note(`Encargo aceptado: ${offer.text}`, 'gold');
+        this._persist();
+        return true;
+      },
+      onAbandonCommission: () => { this.commissions.abandon(); this._persist(); },
       money: this.economy.money,
       record: this.tournament.records[this.zone.id],
       onEnter: () => this.tournament.enter(this.zone, terms, (precio) => {

@@ -63,8 +63,12 @@ export class Props {
       for (let z = -R; z <= R; z += paso) {
         const depth = T.depthAt(x, z);
         if (depth < 0.5) continue;
-        // Sólo cuentan los puntos con una orilla firme a tiro de caña.
-        const orilla = this._shoreWithin(x, z, 34);
+        // Hace falta una orilla firme desde la que pescarlo. El radio es
+        // generoso a propósito: en un lago de orilla tendida, lo hondo está
+        // lejos de tierra y sólo se alcanza con caña larga o desde la barca.
+        // El puesto se encuentra pronto y se aprovecha después — eso es
+        // progresión, no un fallo.
+        const orilla = this._shoreWithin(x, z, 28);
         if (!orilla) continue;
         // Cuánto cae el fondo alrededor: el escalón.
         const salto = Math.max(
@@ -103,7 +107,8 @@ export class Props {
       this.hotspots.push({
         name, description, position,
         water: new THREE.Vector3(c.x, this.terrain.waterLevel, c.z),
-        depth: c.depth
+        depth: c.depth,
+        cast: Math.hypot(c.x - position.x, c.z - position.z)
       });
       this.fishingSpots.push({ name, position: position.clone() });
     }

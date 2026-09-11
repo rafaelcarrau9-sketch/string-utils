@@ -712,10 +712,12 @@ export class UI {
         ['Líneas rotas', s.lineBreaks],
         ['Efectividad', s.hooked ? `${Math.round((s.landed / s.hooked) * 100)}%` : '—']
       ]],
-      ['Concursos', [
-        ['Disputados', extras.tourneysPlayed ?? 0],
-        ['Ganados', extras.tourneysWon ?? 0],
-        ['Mejor marca', extras.bestTourney ? `${extras.bestTourney.toFixed(2)} kg` : '—']
+      ['Concursos y encargos', [
+        ['Concursos disputados', extras.tourneysPlayed ?? 0],
+        ['Concursos ganados', extras.tourneysWon ?? 0],
+        ['Mejor marca', extras.bestTourney ? `${extras.bestTourney.toFixed(2)} kg` : '—'],
+        ['Encargos entregados', extras.commissionsDone ?? 0],
+        ['Cobrado en encargos', extras.commissionsEarned ?? 0]
       ]],
       ['Récords', [
         ['Peso total', `${s.totalWeight.toFixed(1)} kg`],
@@ -909,9 +911,19 @@ export class UI {
     this.eventBox.classList.toggle('compite', progress !== null);
   }
 
-  setTrackedQuest(quest, quests, zoneName) {
-    if (!quest || this._hudHidden) {
+  setTrackedQuest(quest, quests, zoneName, commission = null) {
+    if ((!quest && !commission) || this._hudHidden) {
       if (this.trackBox.style.display !== 'none') this.trackBox.style.display = 'none';
+      return;
+    }
+    // Sin misión pero con encargo, el recuadro muestra el encargo: siempre hay
+    // algo que el jugador está intentando conseguir.
+    if (!quest) {
+      const html = `<div class="k">Encargo</div>
+        <div class="t">${commission.text}</div>
+        <div class="o"><span>Para ${commission.client}</span><b>${commission.progreso}/${commission.count}</b></div>`;
+      if (this.trackBox.innerHTML !== html) this.trackBox.innerHTML = html;
+      if (this.trackBox.style.display !== 'block') this.trackBox.style.display = 'block';
       return;
     }
     const counters = quests.counters(quest.id);
@@ -922,9 +934,12 @@ export class UI {
       const cifra = need > 1 ? `<b>${have}/${need}</b>` : (done ? '<b>✓</b>' : '');
       return `<div class="o${done ? ' done' : ''}"><span>${o.label}</span>${cifra}</div>`;
     }).join('');
+    const encargo = commission
+      ? `<div class="o"><span>Encargo: ${commission.text}</span><b>${commission.progreso}/${commission.count}</b></div>`
+      : '';
     const html = `<div class="k">Misión en curso</div>
       <div class="t">${quest.title}</div>${objetivos}
-      ${quest.hint ? `<div class="where">${quest.hint}</div>` : ''}`;
+      ${quest.hint ? `<div class="where">${quest.hint}</div>` : ''}${encargo}`;
     if (this.trackBox.innerHTML !== html) this.trackBox.innerHTML = html;
     if (this.trackBox.style.display !== 'block') this.trackBox.style.display = 'block';
   }
@@ -938,7 +953,11 @@ export class UI {
    * un tendero.
    */
   showNotice(zone, data) {
-    const { species, known, spots, tournament, terms, money, onEnter, onAbandon, record } = data;
+    const {
+      species, known, spots, tournament, terms, money, onEnter, onAbandon, record,
+      commissions = [], accepted = null, refreshIn = 0,
+      onAcceptCommission = () => false, onAbandonCommission = () => {}
+    } = data;
     const body = el('div');
     const render = () => {
       body.innerHTML = '';
@@ -959,8 +978,40 @@ export class UI {
 
       body.appendChild(el('div', 'sw-chaptitle', 'Puestos'));
       body.appendChild(el('div', 'sw-hint', spots.length
-        ? spots.map((p) => `<b>${p.name}</b> · ${p.depth.toFixed(1)} m — ${p.description}`).join('<br>')
+        ? spots.map((p) => `<b>${p.name}</b> · ${p.depth.toFixed(1)} m de calado a ${p.cast.toFixed(0)} m de lance — ${p.description}`).join('<br>')
         : 'Todavía no has encontrado ninguno. Recorre la orilla: se marcan solos al llegar.'));
+
+      // --- encargos ---
+      body.appendChild(el('div', 'sw-chaptitle', 'Encargos'));
+      if (accepted) {
+        const act = el('div', 'sw-quest tracked');
+        const mismaAgua = accepted.zone === zone.id;
+        act.innerHTML = `<div class="t">${accepted.text}</div>
+          <div class="d">Para ${accepted.client}${mismaAgua ? '' : ' · el encargo es de otra agua'} ·
+          <b>${accepted.progreso}/${accepted.count}</b></div>
+          <div class="rw">${accepted.reward} monedas · ${accepted.xp} XP</div>`;
+        const b = el('button', 'sw-btn ghost', 'Renunciar');
+        b.style.marginTop = '9px';
+        b.addEventListener('click', () => { onAbandonCommission(); render(); });
+        act.appendChild(b);
+        body.appendChild(act);
+      } else if (!commissions.length) {
+        body.appendChild(el('div', 'sw-hint', 'El tablón está vacío ahora mismo.'));
+      } else {
+        body.appendChild(el('div', 'sw-hint',
+          `Se renuevan en ${Math.ceil(refreshIn / 60)} min. Sólo puedes llevar uno a la vez.`));
+        for (const o of commissions) {
+          const card = el('div', 'sw-quest');
+          card.innerHTML = `<div class="t">${o.text}</div>
+            <div class="d">Para ${o.client}</div>
+            <div class="rw">${o.reward} monedas · ${o.xp} XP</div>`;
+          const b = el('button', 'sw-btn', 'Aceptar');
+          b.style.marginTop = '9px';
+          b.addEventListener('click', () => { if (onAcceptCommission(o)) render(); });
+          card.appendChild(b);
+          body.appendChild(card);
+        }
+      }
 
       body.appendChild(el('div', 'sw-chaptitle', 'Concurso'));
       const box = el('div', 'sw-quest');
@@ -1156,6 +1207,50 @@ export class UI {
     });
     body.appendChild(grid);
     this._overlay('Enciclopedia de peces', body);
+  }
+
+  /**
+   * Cierre de la campaña.
+   *
+   * No es una pantalla de «fin»: es el recuento de la temporada y un empujón
+   * para seguir. El juego continúa después, con todo abierto, los concursos y
+   * los encargos; eso hay que decirlo, o parece que se ha acabado.
+   */
+  showEpilogue(stats, onClose) {
+    const body = el('div');
+    body.innerHTML = `<div class="sw-prologue" style="max-width:none;text-align:left">
+      <p style="margin-bottom:14px">La Cuenca de Valdés queda declarada en régimen de protección.
+      La compuerta vieja se queda abierta y el caudal vuelve a su sitio.</p>
+      <p style="margin-bottom:18px;color:var(--dim)">El cuaderno de Remedios está completo. Lo que venga
+      a partir de ahora ya no es un misterio que resolver: es pescar, que tampoco es poco.</p>
+    </div>`;
+    const grid = el('div', 'sw-stats');
+    [
+      ['Nivel alcanzado', `${stats.level} · ${stats.title}`],
+      ['Peces cobrados', stats.landed],
+      ['Especies', `${stats.species} / ${stats.totalSpecies}`],
+      ['Mayor captura', stats.biggest > 0 ? `${stats.biggest.toFixed(2)} kg` : '—'],
+      ['Misiones', `${stats.quests} / ${stats.totalQuests}`],
+      ['Monedas ganadas', stats.earned]
+    ].forEach(([k, v]) => {
+      const st = el('div', 'sw-stat');
+      st.innerHTML = `<div class="k">${k}</div><div class="v">${v}</div>`;
+      grid.appendChild(st);
+    });
+    body.appendChild(grid);
+
+    const cola = el('div', 'sw-hint');
+    cola.style.marginTop = '16px';
+    cola.innerHTML = `La partida sigue: quedan especies que registrar, concursos que ganar,
+      encargos en los tablones y récords que batir en las cinco aguas.`;
+    body.appendChild(cola);
+
+    const b = el('button', 'sw-btn sw-cta', 'Seguir pescando');
+    b.style.marginTop = '18px';
+    b.addEventListener('click', () => { this.closePanel(); onClose?.(); });
+    body.appendChild(b);
+
+    this._overlay('Aguas de Valdés', body, { onClose });
   }
 
   /** Menú principal. `save` es null en partida nueva. */

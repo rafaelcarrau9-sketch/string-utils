@@ -29,6 +29,12 @@ export class Weather {
     this.cloudiness = this.target.cloudiness;
     this.fogDensity = this.target.fogDensity;
     this.rainAmount = this.target.rain;
+    // Relámpagos: sólo en tormenta, y con el trueno llegando después según la
+    // distancia, como en el mundo. Es lo que convierte «llueve mucho» en una
+    // tormenta de verdad.
+    this.flash = 0;                 // 0..1, el fogonazo que ilumina la escena
+    this._boltTimer = 12 + this.rng() * 20;
+    this._thunderQueue = [];
     this.windSpeed = this.target.wind;
     this.windDirection = new THREE.Vector2(1, 0.35).normalize();
     this.timeToChange = 120 + this.rng() * 180;
@@ -87,7 +93,48 @@ export class Weather {
   /** Cuánto pica la superficie del agua: alimenta el shader del lago. */
   get choppiness() { return clamp(0.5 + this.windSpeed / 9, 0.5, 2.4); }
 
-  update(dt, playerPosition, fogColor) {
+  /** Intensidad del fogonazo ahora mismo, para que la iluminación lo use. */
+  get lightning() { return this.flash; }
+
+  /**
+   * Relámpagos. El fogonazo es un pico que decae rápido; el trueno se encola
+   * con el retardo que corresponde a la distancia, y cuanto más lejos, más
+   * sordo suena.
+   */
+  _updateLightning(dt, audio) {
+    // El fogonazo se apaga en unas décimas.
+    this.flash = Math.max(0, this.flash - dt * 5.5);
+
+    for (let i = this._thunderQueue.length - 1; i >= 0; i--) {
+      const t = this._thunderQueue[i];
+      t.delay -= dt;
+      if (t.delay > 0) continue;
+      audio?.thunder?.(t.closeness);
+      this._thunderQueue.splice(i, 1);
+    }
+
+    // Sólo hay aparato eléctrico con tormenta declarada.
+    const tormenta = this.target.rain > 0.85 && this.rainAmount > 0.5;
+    if (!tormenta) { this._boltTimer = 8 + this.rng() * 14; return; }
+
+    this._boltTimer -= dt;
+    if (this._boltTimer > 0) return;
+    this._boltTimer = 7 + this.rng() * 22;
+
+    // Cerca o lejos: lo cerca decide el brillo, el retardo y el tipo de trueno.
+    const closeness = Math.pow(this.rng(), 1.6);       // lo muy cercano es raro
+    this.flash = 0.35 + closeness * 0.9;
+    this._thunderQueue.push({ delay: 0.4 + (1 - closeness) * 7, closeness });
+    this.onBolt?.(closeness);
+    // Algunos relámpagos vienen en ráfaga doble.
+    if (this.rng() < 0.35) {
+      this._thunderQueue.push({ delay: 0.55 + (1 - closeness) * 7, closeness: closeness * 0.8 });
+    }
+    return closeness;
+  }
+
+  update(dt, playerPosition, fogColor, audio = null) {
+    this._updateLightning(dt, audio);
     this.timeToChange -= dt;
     if (this.timeToChange <= 0) {
       // Transición a un estado vecino: nunca se pasa de despejado a tormenta de golpe.

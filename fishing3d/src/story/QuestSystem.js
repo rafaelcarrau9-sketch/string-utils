@@ -222,12 +222,15 @@ export class QuestSystem {
         return true;
       case 'catchAny':
         return !objective.zone || p.zone === objective.zone;
+      case 'trophy':
+        return (p.trophy ?? 0) >= (objective.minTrophy ?? 0.85);
       case 'visit':
         return p.zone === objective.zone;
       case 'talk':
         return p.npc === objective.npc;
       case 'own':
         return p.category === objective.category && p.item === objective.item;
+      case 'commission':
       case 'tournament':
       case 'spots':
       case 'discover':
@@ -281,6 +284,7 @@ function creditFor(objective, snap) {
     case 'deliver': return snap.pages ?? 0;
     case 'spots': return snap.spots?.(objective.zone) ?? 0;
     case 'tournament': return snap.tourneyWins ?? 0;
+    case 'commission': return snap.commissions ?? 0;
     case 'own': return snap.owns?.(objective.category, objective.item) ? 1 : 0;
     case 'visit': return snap.visited?.has?.(objective.zone) ? 1 : 0;
     case 'talk': return snap.met?.has?.(objective.npc) ? 1 : 0;
@@ -289,10 +293,10 @@ function creditFor(objective, snap) {
 }
 
 /** Objetivos que se pueden recalcular mirando el estado, no el historial. */
-const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit', 'spots', 'tournament']);
+const RECONCILABLE = new Set(['own', 'discover', 'level', 'money', 'deliver', 'visit', 'spots', 'tournament', 'commission']);
 
 /** Objetivos cuyo contador es un valor alcanzado, no un recuento de sucesos. */
-const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver', 'spots', 'tournament']);
+const ABSOLUTE = new Set(['discover', 'level', 'money', 'deliver', 'spots', 'tournament', 'commission']);
 
 /** Nombre legible de un personaje, para la interfaz. */
 export function npcName(id) { return NPCS[id]?.name ?? id; }

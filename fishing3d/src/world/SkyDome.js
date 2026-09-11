@@ -11,6 +11,8 @@ import { createRandom, clamp, lerp } from '../core/MathUtils.js';
  */
 
 const SKY_SCALE = 3000;
+/** Color del fogonazo: blanco frío, no la luz cálida del sol. */
+const RAYO_COLOR = new THREE.Color(0xdfe9ff);
 // Cuánto se atenúa el cielo para poder exponer el resto de la escena.
 const SKY_DIM = 0.40;
 
@@ -148,16 +150,27 @@ export class SkyDome {
     } else {
       this.sun.position.copy(sunDir).multiplyScalar(140);
     }
+    // Un relámpago blanquea la escena entera durante una décima: no es una luz
+    // nueva, es la que ya hay subida de golpe y virada a blanco azulado.
+    const rayo = weather.lightning ?? 0;
     this.sun.color.copy(time.sunColor);
-    this.sun.intensity = time.sunIntensity * overcast * zl.sun;
+    if (rayo > 0.01) this.sun.color.lerp(RAYO_COLOR, Math.min(1, rayo));
+    this.sun.intensity = time.sunIntensity * overcast * zl.sun + rayo * 9;
     this.sun.visible = this.sun.intensity > 0.01;
+    // Con un relámpago de noche el sol está bajo el horizonte: la luz tiene
+    // que venir de arriba o no iluminaría nada.
+    if (rayo > 0.05 && focus) {
+      this._boltTarget ??= new THREE.Vector3();
+      this.sun.position.copy(focus).add(this._boltTarget.set(40, 180, -60));
+    }
 
     this.moon.position.copy(focus || new THREE.Vector3()).addScaledVector(time.moonDirection, 140);
     this.moon.intensity = time.nightFactor * 0.5 * overcast;
     this.moon.visible = this.moon.intensity > 0.01;
 
     this.hemi.color.copy(time.skyColor);
-    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast * zl.hemi;
+    if (rayo > 0.01) this.hemi.color.lerp(RAYO_COLOR, Math.min(1, rayo * 0.8));
+    this.hemi.intensity = lerp(0.5, 3.2, daylight) * overcast * zl.hemi + rayo * 5;
     this.ambient.color.copy(time.ambientColor);
     this.ambient.intensity = lerp(1.2, 1.15, daylight) * zl.ambient;
 

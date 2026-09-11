@@ -54,6 +54,7 @@ MODULES = [
     "src/story/QuestSystem.js",
     "src/story/Events.js",
     "src/story/Tournament.js",
+    "src/story/Commissions.js",
     "src/fishing/Line.js",
     "src/fishing/Lure.js",
     "src/fishing/Rod.js",
