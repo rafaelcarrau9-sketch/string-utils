@@ -495,6 +495,7 @@ export class Game {
       events: {
         onCast: (power) => {
           this.economy.stats.casts++;
+          if (this._pose) this._pose.cast = 0.6 + power * 0.6;
           this.audio.cast();
           this.cameraFx.addFovKick(2.5 + power * 3.5);
         },
@@ -518,6 +519,7 @@ export class Game {
         },
         onRun: () => this.cameraFx.addShake(0.12),
         onPump: (metros) => {
+          if (this._pose) this._pose.pump = clamp(0.4 + metros * 0.9, 0.4, 1.2);
           // Recuperar hilo bombeando se oye y se nota: es la recompensa de
           // haber soltado en el momento justo.
           this.audio.reelTick(1);
@@ -1014,6 +1016,15 @@ export class Game {
     if (!panelOpen) this.interaction.update(this.player.position);
     if (talking && this.talkFocus) this._aimAtFocus(dt);
     this.player.holdingRod = this.fishing.rodStowed ? 0 : 1;
+    // Lo que el cuerpo tiene que estar haciendo con la caña. El modelo de
+    // primera persona ya lo hacía; en tercera el pescador se quedaba quieto.
+    this._pose ??= { charge: 0, cast: 0, fighting: false, tension: 0, pump: 0 };
+    this._pose.charge = this.fishing.state === FishingState.AIMING ? this.fishing.power : 0;
+    this._pose.fighting = this.fishing.state === FishingState.FIGHTING;
+    this._pose.tension = this.fishing.tensionRatio;
+    this._pose.cast = Math.max(0, (this._pose.cast ?? 0) - dt * 4);
+    this._pose.pump = Math.max(0, (this._pose.pump ?? 0) - dt * 5);
+    this.player.fishingPose = this._pose;
     this.cameraFx.update(dt);
 
     if (!headless) {

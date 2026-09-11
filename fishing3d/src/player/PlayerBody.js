@@ -132,6 +132,12 @@ export class PlayerBody {
     this.crouch = 0;
     this.breath = 0;
     this.armPose = 0;      // 0 brazos sueltos, 1 sujetando la caña
+    // Pose de pesca: lo que el cuerpo está haciendo con la caña ahora mismo.
+    // Se mezclan de forma continua, así que no hay cortes entre una y otra.
+    this.charge = 0;       // caña echada atrás para lanzar
+    this.castSwing = 0;    // latigazo del lanzamiento, se apaga solo
+    this.fightPose = 0;    // caña alta peleando
+    this.pumpPose = 0;     // sacudida del bombeo
     this.lastFootDown = { L: false, R: false };
   }
 
@@ -143,18 +149,32 @@ export class PlayerBody {
    * @param state.turnRate   giro en rad/s, para que el torso lidere
    * @param state.crouch     0..1
    * @param state.holdingRod 0..1, brazos en posición de caña
+   * @param state.fishing  { charge, cast, fighting, tension, pump } lo que
+   *        está pasando con el aparejo. En tercera persona el pescador tiene
+   *        que hacer lo que dice el HUD: si está cargando, se echa atrás; si
+   *        pelea, levanta la caña.
    * @param state.onFoot     falso a bordo de la barca: no hay ciclo de marcha
    * @returns {'L'|'R'|null} pie que acaba de apoyarse, para el sonido de paso
    */
   update(dt, state = {}) {
     const {
       speed = 0, running = false, turnRate = 0,
-      crouch = 0, holdingRod = 1, onFoot = true
+      crouch = 0, holdingRod = 1, onFoot = true, fishing = null
     } = state;
 
     this.breath += dt;
     this.crouch = damp(this.crouch, crouch, 8, dt);
     this.armPose = damp(this.armPose, holdingRod, 6, dt);
+
+    // --- pose de pesca ---------------------------------------------------
+    const f = fishing ?? {};
+    this.charge = damp(this.charge, f.charge ?? 0, 7, dt);
+    this.fightPose = damp(this.fightPose, f.fighting ? clamp(0.4 + (f.tension ?? 0) * 0.8, 0.4, 1.2) : 0, 5, dt);
+    // El latigazo y el bombeo son golpes: entran de una vez y se apagan.
+    if ((f.cast ?? 0) > this.castSwing) this.castSwing = f.cast;
+    this.castSwing = damp(this.castSwing, 0, 5.5, dt);
+    if ((f.pump ?? 0) > this.pumpPose) this.pumpPose = f.pump;
+    this.pumpPose = damp(this.pumpPose, 0, 6.5, dt);
 
     // --- 1. ciclo de marcha --------------------------------------------
     // La zancada crece con la velocidad; la cadencia, algo menos, para que
@@ -210,11 +230,39 @@ export class PlayerBody {
     const swingArm = swingB * amp * 0.75 * free;
     const swingArmB = swing * amp * 0.75 * free;
 
-    // Mano derecha en la empuñadura, izquierda en el carrete.
-    this.arms.R.shoulder.rotation.set(-1.05 * this.armPose + swingArm, -0.32 * this.armPose, -0.3 * this.armPose);
-    this.arms.R.elbow.rotation.set(-1.15 * this.armPose - Math.max(0, swingArm) * 0.6, 0, 0);
-    this.arms.L.shoulder.rotation.set(-0.85 * this.armPose + swingArmB, 0.42 * this.armPose, 0.34 * this.armPose);
-    this.arms.L.elbow.rotation.set(-1.35 * this.armPose - Math.max(0, swingArmB) * 0.6, 0, 0);
+    // Mano derecha en la empuñadura, izquierda en el carrete. Encima de esa
+    // base se suman la carga, el latigazo, la pelea y el bombeo: todos son
+    // desplazamientos del mismo gesto, no poses que se sustituyen.
+    const carga = this.charge * this.armPose;
+    const latigazo = this.castSwing * this.armPose;
+    const pelea = this.fightPose * this.armPose;
+    const bombeo = this.pumpPose * this.armPose;
+    // Cargar echa los brazos atrás y arriba; el latigazo los lanza adelante.
+    const hombroDer = -1.05 * this.armPose + swingArm
+      - carga * 0.85 + latigazo * 1.25 - pelea * 0.55 - bombeo * 0.5;
+    const codoDer = -1.15 * this.armPose - Math.max(0, swingArm) * 0.6
+      - carga * 0.35 + latigazo * 0.55 - pelea * 0.3;
+    this.arms.R.shoulder.rotation.set(hombroDer, -0.32 * this.armPose - carga * 0.3, -0.3 * this.armPose);
+    this.arms.R.elbow.rotation.set(codoDer, 0, 0);
+    this.arms.L.shoulder.rotation.set(
+      -0.85 * this.armPose + swingArmB - carga * 0.5 + latigazo * 0.8 - pelea * 0.4 - bombeo * 0.35,
+      0.42 * this.armPose, 0.34 * this.armPose
+    );
+    this.arms.L.elbow.rotation.set(
+      -1.35 * this.armPose - Math.max(0, swingArmB) * 0.6 - pelea * 0.25, 0, 0
+    );
+
+    // El torso acompaña: se abre al cargar, se cierra al soltar y se inclina
+    // hacia atrás peleando, que es donde está el peso del pez.
+    this.torso.rotation.x += -carga * 0.16 + latigazo * 0.22 - pelea * 0.2 - bombeo * 0.18;
+    this.torso.rotation.y += carga * 0.26 - latigazo * 0.3;
+    this.hips.rotation.y += carga * 0.12 - latigazo * 0.14;
+
+    // Y la caña que sostiene sigue el gesto en vez de quedarse clavada.
+    if (this.heldRod) {
+      this.heldRod.rotation.x = 2.15 + carga * 0.5 - latigazo * 0.9 - pelea * 0.55 - bombeo * 0.4;
+      this.heldRod.rotation.z = -0.25 - pelea * 0.18;
+    }
 
     // La caña aparece con la pose: guardada, la mano queda libre.
     this.heldRod.visible = this.armPose > 0.08;

@@ -2994,6 +2994,94 @@ class AmbientLife {
 
     this._buildJumpers();
     this._buildBirds();
+    this._buildMidges();
+  }
+
+  /**
+   * Nube de mosquitos.
+   *
+   * Es el detalle que más barato convierte una lámina de agua en un sitio con
+   * vida: una columna de bichos bailando sobre la superficie al amanecer y al
+   * atardecer. Son puntos, no mallas, y se mueven en el propio shader a partir
+   * del reloj, así que cuestan una llamada de dibujo y nada de CPU.
+   */
+  _buildMidges(count = 140) {
+    const positions = new Float32Array(count * 3);
+    const phases = new Float32Array(count * 2);
+    for (let i = 0; i < count; i++) {
+      // Repartidos en una columna achatada: anchos abajo, estrechos arriba.
+      const a = this.rng() * Math.PI * 2;
+      const r = Math.pow(this.rng(), 0.6) * 1.6;
+      positions.set([Math.cos(a) * r, this.rng() * 1.1, Math.sin(a) * r], i * 3);
+      phases.set([this.rng() * 6.28, 0.6 + this.rng() * 1.5], i * 2);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('aPhase', new THREE.BufferAttribute(phases, 2));
+
+    const material = new THREE.PointsMaterial({
+      color: 0x2b2a20, size: 0.035, sizeAttenuation: true,
+      transparent: true, opacity: 0, depthWrite: false
+    });
+    // El baile va en el shader: cada bicho tiene su fase y su velocidad.
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this._midgeTime = { value: 0 };
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `
+          #include <common>
+          attribute vec2 aPhase;
+          uniform float uTime;
+        `)
+        .replace('#include <begin_vertex>', `
+          #include <begin_vertex>
+          float t = uTime * aPhase.y + aPhase.x;
+          transformed.x += sin(t * 2.3) * 0.16 + sin(t * 0.7) * 0.3;
+          transformed.y += sin(t * 3.1 + 1.2) * 0.09;
+          transformed.z += cos(t * 2.7) * 0.16 + cos(t * 0.6) * 0.3;
+        `);
+    };
+    material.customProgramCacheKey = () => 'mosquitos';
+
+    this.midges = new THREE.Points(geometry, material);
+    this.midges.frustumCulled = false;
+    this.midges.visible = false;
+    this.group.add(this.midges);
+    this.midgeAnchor = new THREE.Vector3();
+    this.midgeTimer = 0;
+  }
+
+  /**
+   * La nube se coloca sobre agua somera cerca del jugador y sólo sale cuando
+   * toca: al amanecer y al atardecer, con poco viento y sin lluvia.
+   */
+  _updateMidges(dt, player, time, weather) {
+    const m = this.midges;
+    if (!m) return;
+    if (this._midgeTime) this._midgeTime.value += dt;
+
+    const hora = time.hour;
+    const franja = (hora > 5.5 && hora < 9.5) || (hora > 18 && hora < 21.5) ? 1 : 0.12;
+    const calma = clamp(1 - weather.rainAmount * 2.5, 0, 1) * clamp(1 - (weather.windSpeed - 3) / 7, 0.15, 1);
+    const objetivo = franja * calma * clamp(1 - time.nightFactor * 1.4, 0, 1) * (this.life.frogs > 0.3 ? 1 : 0.6);
+
+    m.material.opacity = damp(m.material.opacity, objetivo * 0.85, 1.2, dt);
+    m.visible = m.material.opacity > 0.02;
+    if (!m.visible) return;
+
+    this.midgeTimer -= dt;
+    if (this.midgeTimer <= 0) {
+      this.midgeTimer = 9 + this.rng() * 12;
+      // Un sitio con agua poco honda a la vista del jugador.
+      for (let i = 0; i < 14; i++) {
+        const a = this.rng() * Math.PI * 2;
+        const d = 6 + this.rng() * 16;
+        const x = player.x + Math.cos(a) * d;
+        const z = player.z + Math.sin(a) * d;
+        const depth = this.terrain.depthAt(x, z);
+        if (depth > 0.3 && depth < 3) { this.midgeAnchor.set(x, this.terrain.waterLevel + 0.45, z); break; }
+      }
+    }
+    m.position.lerp(this.midgeAnchor, 1 - Math.exp(-0.9 * dt));
   }
 
   _buildJumpers() {
@@ -3101,6 +3189,7 @@ class AmbientLife {
   get gustStrength() { return this.gust; }
 
   update(dt, { player, time, weather }) {
+    this._updateMidges(dt, player, time, weather);
     const feeding = time.feedingFactor;
     const calm = 1 - clamp(weather.rainAmount, 0, 1);
 
@@ -3172,6 +3261,8 @@ class AmbientLife {
   }
 
   dispose() {
+    this.midges?.geometry.dispose();
+    this.midges?.material.dispose();
     this.group.traverse((o) => {
       if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
     });
@@ -8408,6 +8499,12 @@ class PlayerBody {
     this.crouch = 0;
     this.breath = 0;
     this.armPose = 0;      // 0 brazos sueltos, 1 sujetando la caña
+    // Pose de pesca: lo que el cuerpo está haciendo con la caña ahora mismo.
+    // Se mezclan de forma continua, así que no hay cortes entre una y otra.
+    this.charge = 0;       // caña echada atrás para lanzar
+    this.castSwing = 0;    // latigazo del lanzamiento, se apaga solo
+    this.fightPose = 0;    // caña alta peleando
+    this.pumpPose = 0;     // sacudida del bombeo
     this.lastFootDown = { L: false, R: false };
   }
 
@@ -8419,18 +8516,32 @@ class PlayerBody {
    * @param state.turnRate   giro en rad/s, para que el torso lidere
    * @param state.crouch     0..1
    * @param state.holdingRod 0..1, brazos en posición de caña
+   * @param state.fishing  { charge, cast, fighting, tension, pump } lo que
+   *        está pasando con el aparejo. En tercera persona el pescador tiene
+   *        que hacer lo que dice el HUD: si está cargando, se echa atrás; si
+   *        pelea, levanta la caña.
    * @param state.onFoot     falso a bordo de la barca: no hay ciclo de marcha
    * @returns {'L'|'R'|null} pie que acaba de apoyarse, para el sonido de paso
    */
   update(dt, state = {}) {
     const {
       speed = 0, running = false, turnRate = 0,
-      crouch = 0, holdingRod = 1, onFoot = true
+      crouch = 0, holdingRod = 1, onFoot = true, fishing = null
     } = state;
 
     this.breath += dt;
     this.crouch = damp(this.crouch, crouch, 8, dt);
     this.armPose = damp(this.armPose, holdingRod, 6, dt);
+
+    // --- pose de pesca ---------------------------------------------------
+    const f = fishing ?? {};
+    this.charge = damp(this.charge, f.charge ?? 0, 7, dt);
+    this.fightPose = damp(this.fightPose, f.fighting ? clamp(0.4 + (f.tension ?? 0) * 0.8, 0.4, 1.2) : 0, 5, dt);
+    // El latigazo y el bombeo son golpes: entran de una vez y se apagan.
+    if ((f.cast ?? 0) > this.castSwing) this.castSwing = f.cast;
+    this.castSwing = damp(this.castSwing, 0, 5.5, dt);
+    if ((f.pump ?? 0) > this.pumpPose) this.pumpPose = f.pump;
+    this.pumpPose = damp(this.pumpPose, 0, 6.5, dt);
 
     // --- 1. ciclo de marcha --------------------------------------------
     // La zancada crece con la velocidad; la cadencia, algo menos, para que
@@ -8486,11 +8597,39 @@ class PlayerBody {
     const swingArm = swingB * amp * 0.75 * free;
     const swingArmB = swing * amp * 0.75 * free;
 
-    // Mano derecha en la empuñadura, izquierda en el carrete.
-    this.arms.R.shoulder.rotation.set(-1.05 * this.armPose + swingArm, -0.32 * this.armPose, -0.3 * this.armPose);
-    this.arms.R.elbow.rotation.set(-1.15 * this.armPose - Math.max(0, swingArm) * 0.6, 0, 0);
-    this.arms.L.shoulder.rotation.set(-0.85 * this.armPose + swingArmB, 0.42 * this.armPose, 0.34 * this.armPose);
-    this.arms.L.elbow.rotation.set(-1.35 * this.armPose - Math.max(0, swingArmB) * 0.6, 0, 0);
+    // Mano derecha en la empuñadura, izquierda en el carrete. Encima de esa
+    // base se suman la carga, el latigazo, la pelea y el bombeo: todos son
+    // desplazamientos del mismo gesto, no poses que se sustituyen.
+    const carga = this.charge * this.armPose;
+    const latigazo = this.castSwing * this.armPose;
+    const pelea = this.fightPose * this.armPose;
+    const bombeo = this.pumpPose * this.armPose;
+    // Cargar echa los brazos atrás y arriba; el latigazo los lanza adelante.
+    const hombroDer = -1.05 * this.armPose + swingArm
+      - carga * 0.85 + latigazo * 1.25 - pelea * 0.55 - bombeo * 0.5;
+    const codoDer = -1.15 * this.armPose - Math.max(0, swingArm) * 0.6
+      - carga * 0.35 + latigazo * 0.55 - pelea * 0.3;
+    this.arms.R.shoulder.rotation.set(hombroDer, -0.32 * this.armPose - carga * 0.3, -0.3 * this.armPose);
+    this.arms.R.elbow.rotation.set(codoDer, 0, 0);
+    this.arms.L.shoulder.rotation.set(
+      -0.85 * this.armPose + swingArmB - carga * 0.5 + latigazo * 0.8 - pelea * 0.4 - bombeo * 0.35,
+      0.42 * this.armPose, 0.34 * this.armPose
+    );
+    this.arms.L.elbow.rotation.set(
+      -1.35 * this.armPose - Math.max(0, swingArmB) * 0.6 - pelea * 0.25, 0, 0
+    );
+
+    // El torso acompaña: se abre al cargar, se cierra al soltar y se inclina
+    // hacia atrás peleando, que es donde está el peso del pez.
+    this.torso.rotation.x += -carga * 0.16 + latigazo * 0.22 - pelea * 0.2 - bombeo * 0.18;
+    this.torso.rotation.y += carga * 0.26 - latigazo * 0.3;
+    this.hips.rotation.y += carga * 0.12 - latigazo * 0.14;
+
+    // Y la caña que sostiene sigue el gesto en vez de quedarse clavada.
+    if (this.heldRod) {
+      this.heldRod.rotation.x = 2.15 + carga * 0.5 - latigazo * 0.9 - pelea * 0.55 - bombeo * 0.4;
+      this.heldRod.rotation.z = -0.25 - pelea * 0.18;
+    }
 
     // La caña aparece con la pose: guardada, la mano queda libre.
     this.heldRod.visible = this.armPose > 0.08;
@@ -8681,7 +8820,8 @@ class Player {
       turnRate: turnDelta / Math.max(dt, 1e-3),
       crouch: this.crouch,
       holdingRod: this.holdingRod ?? 1,
-      onFoot: !this.platform
+      onFoot: !this.platform,
+      fishing: this.fishingPose ?? null
     });
 
     this.lookDelta.multiplyScalar(0.82);
@@ -8711,7 +8851,8 @@ class Player {
     this.surface = 'barca';
     this.bodyRig.update(dt, {
       speed: 0, running: false, turnRate: 0,
-      crouch: 0.55, holdingRod: this.holdingRod ?? 1, onFoot: false
+      crouch: 0.55, holdingRod: this.holdingRod ?? 1, onFoot: false,
+      fishing: this.fishingPose ?? null
     });
     this.lookDelta.multiplyScalar(0.82);
     return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0, stepped: null, crouch: 0.55 };
@@ -11231,6 +11372,7 @@ class Game {
       events: {
         onCast: (power) => {
           this.economy.stats.casts++;
+          if (this._pose) this._pose.cast = 0.6 + power * 0.6;
           this.audio.cast();
           this.cameraFx.addFovKick(2.5 + power * 3.5);
         },
@@ -11254,6 +11396,7 @@ class Game {
         },
         onRun: () => this.cameraFx.addShake(0.12),
         onPump: (metros) => {
+          if (this._pose) this._pose.pump = clamp(0.4 + metros * 0.9, 0.4, 1.2);
           // Recuperar hilo bombeando se oye y se nota: es la recompensa de
           // haber soltado en el momento justo.
           this.audio.reelTick(1);
@@ -11750,6 +11893,15 @@ class Game {
     if (!panelOpen) this.interaction.update(this.player.position);
     if (talking && this.talkFocus) this._aimAtFocus(dt);
     this.player.holdingRod = this.fishing.rodStowed ? 0 : 1;
+    // Lo que el cuerpo tiene que estar haciendo con la caña. El modelo de
+    // primera persona ya lo hacía; en tercera el pescador se quedaba quieto.
+    this._pose ??= { charge: 0, cast: 0, fighting: false, tension: 0, pump: 0 };
+    this._pose.charge = this.fishing.state === FishingState.AIMING ? this.fishing.power : 0;
+    this._pose.fighting = this.fishing.state === FishingState.FIGHTING;
+    this._pose.tension = this.fishing.tensionRatio;
+    this._pose.cast = Math.max(0, (this._pose.cast ?? 0) - dt * 4);
+    this._pose.pump = Math.max(0, (this._pose.pump ?? 0) - dt * 5);
+    this.player.fishingPose = this._pose;
     this.cameraFx.update(dt);
 
     if (!headless) {

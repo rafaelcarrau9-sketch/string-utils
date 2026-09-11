@@ -38,6 +38,94 @@ export class AmbientLife {
 
     this._buildJumpers();
     this._buildBirds();
+    this._buildMidges();
+  }
+
+  /**
+   * Nube de mosquitos.
+   *
+   * Es el detalle que más barato convierte una lámina de agua en un sitio con
+   * vida: una columna de bichos bailando sobre la superficie al amanecer y al
+   * atardecer. Son puntos, no mallas, y se mueven en el propio shader a partir
+   * del reloj, así que cuestan una llamada de dibujo y nada de CPU.
+   */
+  _buildMidges(count = 140) {
+    const positions = new Float32Array(count * 3);
+    const phases = new Float32Array(count * 2);
+    for (let i = 0; i < count; i++) {
+      // Repartidos en una columna achatada: anchos abajo, estrechos arriba.
+      const a = this.rng() * Math.PI * 2;
+      const r = Math.pow(this.rng(), 0.6) * 1.6;
+      positions.set([Math.cos(a) * r, this.rng() * 1.1, Math.sin(a) * r], i * 3);
+      phases.set([this.rng() * 6.28, 0.6 + this.rng() * 1.5], i * 2);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('aPhase', new THREE.BufferAttribute(phases, 2));
+
+    const material = new THREE.PointsMaterial({
+      color: 0x2b2a20, size: 0.035, sizeAttenuation: true,
+      transparent: true, opacity: 0, depthWrite: false
+    });
+    // El baile va en el shader: cada bicho tiene su fase y su velocidad.
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this._midgeTime = { value: 0 };
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `
+          #include <common>
+          attribute vec2 aPhase;
+          uniform float uTime;
+        `)
+        .replace('#include <begin_vertex>', `
+          #include <begin_vertex>
+          float t = uTime * aPhase.y + aPhase.x;
+          transformed.x += sin(t * 2.3) * 0.16 + sin(t * 0.7) * 0.3;
+          transformed.y += sin(t * 3.1 + 1.2) * 0.09;
+          transformed.z += cos(t * 2.7) * 0.16 + cos(t * 0.6) * 0.3;
+        `);
+    };
+    material.customProgramCacheKey = () => 'mosquitos';
+
+    this.midges = new THREE.Points(geometry, material);
+    this.midges.frustumCulled = false;
+    this.midges.visible = false;
+    this.group.add(this.midges);
+    this.midgeAnchor = new THREE.Vector3();
+    this.midgeTimer = 0;
+  }
+
+  /**
+   * La nube se coloca sobre agua somera cerca del jugador y sólo sale cuando
+   * toca: al amanecer y al atardecer, con poco viento y sin lluvia.
+   */
+  _updateMidges(dt, player, time, weather) {
+    const m = this.midges;
+    if (!m) return;
+    if (this._midgeTime) this._midgeTime.value += dt;
+
+    const hora = time.hour;
+    const franja = (hora > 5.5 && hora < 9.5) || (hora > 18 && hora < 21.5) ? 1 : 0.12;
+    const calma = clamp(1 - weather.rainAmount * 2.5, 0, 1) * clamp(1 - (weather.windSpeed - 3) / 7, 0.15, 1);
+    const objetivo = franja * calma * clamp(1 - time.nightFactor * 1.4, 0, 1) * (this.life.frogs > 0.3 ? 1 : 0.6);
+
+    m.material.opacity = damp(m.material.opacity, objetivo * 0.85, 1.2, dt);
+    m.visible = m.material.opacity > 0.02;
+    if (!m.visible) return;
+
+    this.midgeTimer -= dt;
+    if (this.midgeTimer <= 0) {
+      this.midgeTimer = 9 + this.rng() * 12;
+      // Un sitio con agua poco honda a la vista del jugador.
+      for (let i = 0; i < 14; i++) {
+        const a = this.rng() * Math.PI * 2;
+        const d = 6 + this.rng() * 16;
+        const x = player.x + Math.cos(a) * d;
+        const z = player.z + Math.sin(a) * d;
+        const depth = this.terrain.depthAt(x, z);
+        if (depth > 0.3 && depth < 3) { this.midgeAnchor.set(x, this.terrain.waterLevel + 0.45, z); break; }
+      }
+    }
+    m.position.lerp(this.midgeAnchor, 1 - Math.exp(-0.9 * dt));
   }
 
   _buildJumpers() {
@@ -145,6 +233,7 @@ export class AmbientLife {
   get gustStrength() { return this.gust; }
 
   update(dt, { player, time, weather }) {
+    this._updateMidges(dt, player, time, weather);
     const feeding = time.feedingFactor;
     const calm = 1 - clamp(weather.rainAmount, 0, 1);
 
@@ -216,6 +305,8 @@ export class AmbientLife {
   }
 
   dispose() {
+    this.midges?.geometry.dispose();
+    this.midges?.material.dispose();
     this.group.traverse((o) => {
       if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
     });

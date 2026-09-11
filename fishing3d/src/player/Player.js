@@ -177,7 +177,8 @@ export class Player {
       turnRate: turnDelta / Math.max(dt, 1e-3),
       crouch: this.crouch,
       holdingRod: this.holdingRod ?? 1,
-      onFoot: !this.platform
+      onFoot: !this.platform,
+      fishing: this.fishingPose ?? null
     });
 
     this.lookDelta.multiplyScalar(0.82);
@@ -207,7 +208,8 @@ export class Player {
     this.surface = 'barca';
     this.bodyRig.update(dt, {
       speed: 0, running: false, turnRate: 0,
-      crouch: 0.55, holdingRod: this.holdingRod ?? 1, onFoot: false
+      crouch: 0.55, holdingRod: this.holdingRod ?? 1, onFoot: false,
+      fishing: this.fishingPose ?? null
     });
     this.lookDelta.multiplyScalar(0.82);
     return { speed: Math.abs(this.platform.speed), surface: 'barca', depth: 0, stepped: null, crouch: 0.55 };
